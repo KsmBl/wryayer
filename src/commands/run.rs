@@ -6,6 +6,12 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub fn run(app_name: &str, args: &[String]) -> Result<()> {
+    // Strip a leading "--" separator (e.g. `wryayer run firefox -- file.pdf`)
+    let args = match args {
+        [first, rest @ ..] if first == "--" => rest,
+        other => other,
+    };
+
     let manifest = read_manifest(app_name)
         .with_context(|| format!("'{app_name}' is not installed"))?;
     let config = read_config(app_name)?;
