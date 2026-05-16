@@ -187,7 +187,7 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
 fn draw_install(f: &mut Frame, app: &mut App, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(0)])
+        .constraints([Constraint::Length(3), Constraint::Min(0), Constraint::Length(1)])
         .split(area);
 
     // Search bar — active border when typing, dim when list is focused
@@ -210,16 +210,49 @@ fn draw_install(f: &mut Frame, app: &mut App, area: Rect) {
     f.render_widget(search_widget, chunks[0]);
 
     // Results
+    let installed_names: std::collections::HashSet<&str> =
+        app.installed.iter().map(|m| m.app.name.as_str()).collect();
+
     let items: Vec<ListItem> = app
         .search_results
         .iter()
-        .map(|pkg| ListItem::new(Span::styled(pkg.as_str(), Style::default().fg(Color::White))))
+        .map(|pkg| {
+            if installed_names.contains(pkg.as_str()) {
+                ListItem::new(Line::from(vec![
+                    Span::styled("✓ ", Style::default().fg(C_GREEN)),
+                    Span::styled(pkg.as_str(), Style::default().fg(Color::White)),
+                    Span::styled(" [installed]", Style::default().fg(C_GREEN)),
+                ]))
+            } else {
+                ListItem::new(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(pkg.as_str(), Style::default().fg(Color::White)),
+                ]))
+            }
+        })
         .collect();
+
+    // Detail line for selected result
+    let selected_hint = app.avail_state.selected().and_then(|i| app.search_results.get(i)).map(|pkg| {
+        if installed_names.contains(pkg.as_str()) {
+            Line::from(vec![
+                Span::styled(" Already installed — ", Style::default().fg(C_GREEN)),
+                Span::styled("Enter", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                Span::styled(" to uninstall", Style::default().fg(C_GREEN)),
+            ])
+        } else {
+            Line::from(vec![
+                Span::styled(" Press ", Style::default().fg(C_DIM)),
+                Span::styled("Enter", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                Span::styled(" to install", Style::default().fg(C_DIM)),
+            ])
+        }
+    });
 
     let results_title = if app.search_results.is_empty() {
         " Results "
     } else {
-        " Results — [↓] Select  [Enter] Install "
+        " Results — [↓] Select  [Enter] Install / Uninstall "
     };
 
     let list = List::new(items)
@@ -233,6 +266,10 @@ fn draw_install(f: &mut Frame, app: &mut App, area: Rect) {
         .highlight_symbol("▶ ");
 
     f.render_stateful_widget(list, chunks[1], &mut app.avail_state);
+
+    if let Some(hint) = selected_hint {
+        f.render_widget(Paragraph::new(hint), chunks[2]);
+    }
 }
 
 // ── Import tab ────────────────────────────────────────────────────────────────

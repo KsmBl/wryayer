@@ -387,15 +387,27 @@ fn on_install(app: &mut App, code: KeyCode) {
             KeyCode::Enter => {
                 if let Some(pkg) = app.selected_available() {
                     let pkg = pkg.to_string();
-                    app.screen = Screen::Confirm {
-                        title: format!("Install '{pkg}'?"),
-                        body: vec![
-                            format!("Installs {pkg} into ~/.wryayer/{pkg}/"),
-                            String::new(),
-                            "Press y to confirm, n or Esc to cancel.".into(),
-                        ],
-                        action: PendingAction::Install(pkg),
-                    };
+                    if app.installed.iter().any(|m| m.app.name == pkg) {
+                        app.screen = Screen::Confirm {
+                            title: format!("'{pkg}' is already installed"),
+                            body: vec![
+                                format!("Remove '{pkg}' and its isolated directory?"),
+                                String::new(),
+                                "Press y to uninstall, n or Esc to cancel.".into(),
+                            ],
+                            action: PendingAction::Remove(pkg),
+                        };
+                    } else {
+                        app.screen = Screen::Confirm {
+                            title: format!("Install '{pkg}'?"),
+                            body: vec![
+                                format!("Installs {pkg} into ~/.wryayer/{pkg}/"),
+                                String::new(),
+                                "Press y to confirm, n or Esc to cancel.".into(),
+                            ],
+                            action: PendingAction::Install(pkg),
+                        };
+                    }
                 }
             }
             KeyCode::Esc => {

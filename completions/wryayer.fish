@@ -24,7 +24,7 @@ end
 complete -c wryayer -f
 
 # ── Top-level subcommands ─────────────────────────────────────────────────────
-set -l cmds install remove list run update repair config backup import help
+set -l cmds install remove list run update repair config backup import tui help
 complete -c wryayer -n "not __fish_seen_subcommand_from $cmds" -a install -d 'Install a package in an isolated directory'
 complete -c wryayer -n "not __fish_seen_subcommand_from $cmds" -a remove  -d 'Remove an installed app and its launchers'
 complete -c wryayer -n "not __fish_seen_subcommand_from $cmds" -a list    -d 'List all installed apps'
@@ -34,6 +34,7 @@ complete -c wryayer -n "not __fish_seen_subcommand_from $cmds" -a repair  -d 'Fi
 complete -c wryayer -n "not __fish_seen_subcommand_from $cmds" -a config  -d 'View or change per-app configuration'
 complete -c wryayer -n "not __fish_seen_subcommand_from $cmds" -a backup  -d 'Create a zip backup of an installed app'
 complete -c wryayer -n "not __fish_seen_subcommand_from $cmds" -a import  -d 'Import an app from a wryayer backup zip'
+complete -c wryayer -n "not __fish_seen_subcommand_from $cmds" -a tui     -d 'Launch the interactive TUI'
 complete -c wryayer -n "not __fish_seen_subcommand_from $cmds" -a help    -d 'Print help'
 
 # ── install ───────────────────────────────────────────────────────────────────
