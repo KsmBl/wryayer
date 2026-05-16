@@ -31,6 +31,12 @@ pub struct AppConfig {
     pub temp_delete: LocalDelete,
     /// Allow outgoing network access inside bwrap (default: true)
     pub network: bool,
+    /// Allow access to /dev/video* camera devices (default: true)
+    pub camera: bool,
+    /// Allow ALSA capture devices + PipeWire/PulseAudio mic (default: true)
+    pub microphone: bool,
+    /// Allow ALSA playback + PipeWire/PulseAudio audio output (default: true)
+    pub audio: bool,
 }
 
 impl Default for AppConfig {
@@ -39,6 +45,9 @@ impl Default for AppConfig {
             temp_mode: TempMode::System,
             temp_delete: LocalDelete::OnStart,
             network: true,
+            camera: true,
+            microphone: true,
+            audio: true,
         }
     }
 }
@@ -90,16 +99,33 @@ fn parse_ini(content: &str) -> Result<AppConfig> {
                 };
             }
             ("network", v) => {
-                config.network = match v {
-                    "on"  | "true"  | "1" => true,
-                    "off" | "false" | "0" => false,
-                    other => bail!("unknown network value '{other}' — valid: on, off"),
-                };
+                config.network = parse_bool(v)
+                    .map_err(|_| anyhow::anyhow!("unknown network value '{v}' — valid: on, off"))?;
+            }
+            ("camera", v) => {
+                config.camera = parse_bool(v)
+                    .map_err(|_| anyhow::anyhow!("unknown camera value '{v}' — valid: on, off"))?;
+            }
+            ("microphone", v) => {
+                config.microphone = parse_bool(v)
+                    .map_err(|_| anyhow::anyhow!("unknown microphone value '{v}' — valid: on, off"))?;
+            }
+            ("audio", v) => {
+                config.audio = parse_bool(v)
+                    .map_err(|_| anyhow::anyhow!("unknown audio value '{v}' — valid: on, off"))?;
             }
             _ => {}
         }
     }
     Ok(config)
+}
+
+fn parse_bool(v: &str) -> Result<bool, ()> {
+    match v {
+        "on" | "true" | "1" => Ok(true),
+        "off" | "false" | "0" => Ok(false),
+        _ => Err(()),
+    }
 }
 
 fn format_ini(config: &AppConfig) -> String {
@@ -114,7 +140,7 @@ fn format_ini(config: &AppConfig) -> String {
         LocalDelete::OnStart => "on_start",
         LocalDelete::OnClose => "on_close",
     };
-    let network = if config.network { "on" } else { "off" };
+    let b = |v: bool| if v { "on" } else { "off" };
     format!(
         "[temp]\n\
          ; ramdisk = private in-memory tmpfs, discarded on close\n\
@@ -131,6 +157,18 @@ fn format_ini(config: &AppConfig) -> String {
          \n\
          [network]\n\
          ; on = allow internet access (default), off = block all network\n\
-         network = {network}\n"
+         network = {}\n\
+         \n\
+         [devices]\n\
+         ; on = allow access, off = mask device inside sandbox\n\
+         camera = {}\n\
+         ; note: microphone off blocks ALSA capture; PipeWire/PulseAudio mic\n\
+         ; is only fully blocked when audio is also off\n\
+         microphone = {}\n\
+         audio = {}\n",
+        b(config.network),
+        b(config.camera),
+        b(config.microphone),
+        b(config.audio),
     )
 }

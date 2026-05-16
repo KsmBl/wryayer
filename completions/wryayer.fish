@@ -77,7 +77,7 @@ complete -c wryayer -n '__fish_seen_subcommand_from import' -F
 # Level 3b (tempdelete): tempdelete seen
 # Level 3c (network):    network seen
 
-set -l settings tempmode tempdelete network
+set -l settings tempmode tempdelete network camera microphone audio
 
 # Level 1 — app name
 complete -c wryayer -n "__fish_seen_subcommand_from config; and not __wryayer_config_has_app; and not __fish_seen_subcommand_from $settings" -a '(__wryayer_apps)' -d 'installed app'
@@ -86,18 +86,23 @@ complete -c wryayer -n "__fish_seen_subcommand_from config; and not __wryayer_co
 complete -c wryayer -n "__fish_seen_subcommand_from config; and __wryayer_config_has_app; and not __fish_seen_subcommand_from $settings" -a tempmode   -d 'Set temp directory mode'
 complete -c wryayer -n "__fish_seen_subcommand_from config; and __wryayer_config_has_app; and not __fish_seen_subcommand_from $settings" -a tempdelete -d 'Set temp cleanup policy (for local mode)'
 complete -c wryayer -n "__fish_seen_subcommand_from config; and __wryayer_config_has_app; and not __fish_seen_subcommand_from $settings" -a network    -d 'Enable or disable network access'
+complete -c wryayer -n "__fish_seen_subcommand_from config; and __wryayer_config_has_app; and not __fish_seen_subcommand_from $settings" -a camera     -d 'Enable or disable camera access'
+complete -c wryayer -n "__fish_seen_subcommand_from config; and __wryayer_config_has_app; and not __fish_seen_subcommand_from $settings" -a microphone -d 'Enable or disable microphone input'
+complete -c wryayer -n "__fish_seen_subcommand_from config; and __wryayer_config_has_app; and not __fish_seen_subcommand_from $settings" -a audio      -d 'Enable or disable audio output'
 
 # Level 3a — tempmode values
-complete -c wryayer -n '__fish_seen_subcommand_from tempmode; and not __fish_seen_subcommand_from tempdelete network' -a system   -d 'Share host /tmp with all other apps (default)'
-complete -c wryayer -n '__fish_seen_subcommand_from tempmode; and not __fish_seen_subcommand_from tempdelete network' -a ramdisk  -d 'Private in-memory tmpfs — fast, wiped on close'
-complete -c wryayer -n '__fish_seen_subcommand_from tempmode; and not __fish_seen_subcommand_from tempdelete network' -a local    -d 'Persistent per-app dir — lifetime set by tempdelete'
-complete -c wryayer -n '__fish_seen_subcommand_from tempmode; and not __fish_seen_subcommand_from tempdelete network' -a uuid     -d 'Per-instance UUID dir — isolated, wiped on close'
+complete -c wryayer -n "__fish_seen_subcommand_from tempmode; and not __fish_seen_subcommand_from tempdelete $settings[3..]" -a system   -d 'Share host /tmp with all other apps (default)'
+complete -c wryayer -n "__fish_seen_subcommand_from tempmode; and not __fish_seen_subcommand_from tempdelete $settings[3..]" -a ramdisk  -d 'Private in-memory tmpfs — fast, wiped on close'
+complete -c wryayer -n "__fish_seen_subcommand_from tempmode; and not __fish_seen_subcommand_from tempdelete $settings[3..]" -a local    -d 'Persistent per-app dir — lifetime set by tempdelete'
+complete -c wryayer -n "__fish_seen_subcommand_from tempmode; and not __fish_seen_subcommand_from tempdelete $settings[3..]" -a uuid     -d 'Per-instance UUID dir — isolated, wiped on close'
 
 # Level 3b — tempdelete values
-complete -c wryayer -n '__fish_seen_subcommand_from tempdelete; and not __fish_seen_subcommand_from tempmode network' -a never    -d 'Keep temp dir across restarts'
-complete -c wryayer -n '__fish_seen_subcommand_from tempdelete; and not __fish_seen_subcommand_from tempmode network' -a on_start -d 'Wipe on launch when no other instance is running'
-complete -c wryayer -n '__fish_seen_subcommand_from tempdelete; and not __fish_seen_subcommand_from tempmode network' -a on_close -d 'Wipe when this instance exits'
+complete -c wryayer -n "__fish_seen_subcommand_from tempdelete; and not __fish_seen_subcommand_from tempmode $settings[3..]" -a never    -d 'Keep temp dir across restarts'
+complete -c wryayer -n "__fish_seen_subcommand_from tempdelete; and not __fish_seen_subcommand_from tempmode $settings[3..]" -a on_start -d 'Wipe on launch when no other instance is running'
+complete -c wryayer -n "__fish_seen_subcommand_from tempdelete; and not __fish_seen_subcommand_from tempmode $settings[3..]" -a on_close -d 'Wipe when this instance exits'
 
-# Level 3c — network values
-complete -c wryayer -n '__fish_seen_subcommand_from network; and not __fish_seen_subcommand_from tempmode tempdelete' -a on  -d 'Allow internet access (default)'
-complete -c wryayer -n '__fish_seen_subcommand_from network; and not __fish_seen_subcommand_from tempmode tempdelete' -a off -d 'Block all network access'
+# Levels 3c-3f — on/off toggle for network, camera, microphone, audio
+for _setting in network camera microphone audio
+    complete -c wryayer -n "__fish_seen_subcommand_from $_setting; and not __fish_seen_subcommand_from tempmode tempdelete" -a on  -d 'Enable (default)'
+    complete -c wryayer -n "__fish_seen_subcommand_from $_setting; and not __fish_seen_subcommand_from tempmode tempdelete" -a off -d 'Disable'
+end

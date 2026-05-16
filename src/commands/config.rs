@@ -7,12 +7,17 @@ pub fn run(
     temp_mode: Option<&str>,
     temp_delete: Option<&str>,
     network: Option<&str>,
+    camera: Option<&str>,
+    microphone: Option<&str>,
+    audio: Option<&str>,
 ) -> Result<()> {
     read_manifest(app_name)
         .with_context(|| format!("'{app_name}' is not installed"))?;
 
     let mut config = read_config(app_name)?;
-    let changed = temp_mode.is_some() || temp_delete.is_some() || network.is_some();
+    let changed = [temp_mode, temp_delete, network, camera, microphone, audio]
+        .iter()
+        .any(Option::is_some);
 
     if let Some(mode) = temp_mode {
         config.temp_mode = match mode {
@@ -33,12 +38,19 @@ pub fn run(
         };
     }
 
-    if let Some(val) = network {
-        config.network = match val {
-            "on"  | "true"  | "1" => true,
-            "off" | "false" | "0" => false,
-            other => bail!("unknown network value '{other}'\n  valid: on, off"),
-        };
+    for (val, field, name) in [
+        (network,    &mut config.network,    "network"),
+        (camera,     &mut config.camera,     "camera"),
+        (microphone, &mut config.microphone, "microphone"),
+        (audio,      &mut config.audio,      "audio"),
+    ] {
+        if let Some(v) = val {
+            *field = match v {
+                "on"  | "true"  | "1" => true,
+                "off" | "false" | "0" => false,
+                other => bail!("unknown {name} value '{other}'\n  valid: on, off"),
+            };
+        }
     }
 
     if changed {
@@ -51,6 +63,7 @@ pub fn run(
 }
 
 fn print_config(app_name: &str, config: &AppConfig) {
+    let b = |v: bool| if v { "on" } else { "off" };
     let mode = match config.temp_mode {
         TempMode::System  => "system",
         TempMode::Ramdisk => "ramdisk",
@@ -67,5 +80,13 @@ fn print_config(app_name: &str, config: &AppConfig) {
         };
         eprintln!("  temp.delete = {delete}");
     }
-    eprintln!("  network     = {}", if config.network { "on" } else { "off" });
+    eprintln!("  network     = {}", b(config.network));
+    eprintln!("  camera      = {}", b(config.camera));
+    eprintln!("  microphone  = {}", b(config.microphone));
+    if !config.microphone && config.audio {
+        eprintln!("  ! microphone off only blocks ALSA capture devices.");
+        eprintln!("    Apps using PipeWire or PulseAudio can still access");
+        eprintln!("    the mic. Set audio = off to block it completely.");
+    }
+    eprintln!("  audio       = {}", b(config.audio));
 }

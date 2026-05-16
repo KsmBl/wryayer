@@ -103,6 +103,21 @@ enum ConfigSetting {
         /// on = allow internet access (default), off = block all network
         enabled: String,
     },
+    /// Enable or disable camera access inside the sandbox
+    Camera {
+        /// on = allow /dev/video* access (default), off = mask all cameras
+        enabled: String,
+    },
+    /// Enable or disable microphone input inside the sandbox
+    Microphone {
+        /// on = allow mic input (default), off = mask ALSA capture devices
+        enabled: String,
+    },
+    /// Enable or disable audio output inside the sandbox
+    Audio {
+        /// on = allow audio output (default), off = mask ALSA + PipeWire/PulseAudio
+        enabled: String,
+    },
 }
 
 fn main() {
@@ -120,15 +135,24 @@ fn main() {
         }
         Commands::Repair { app_name } => commands::repair::run(&app_name),
         Commands::Config { app_name, setting } => match setting {
-            None => commands::config::run(&app_name, None, None, None),
+            None => commands::config::run(&app_name, None, None, None, None, None, None),
             Some(ConfigSetting::Tempmode { mode }) => {
-                commands::config::run(&app_name, Some(&mode), None, None)
+                commands::config::run(&app_name, Some(&mode), None, None, None, None, None)
             }
             Some(ConfigSetting::Tempdelete { policy }) => {
-                commands::config::run(&app_name, None, Some(&policy), None)
+                commands::config::run(&app_name, None, Some(&policy), None, None, None, None)
             }
             Some(ConfigSetting::Network { enabled }) => {
-                commands::config::run(&app_name, None, None, Some(&enabled))
+                commands::config::run(&app_name, None, None, Some(&enabled), None, None, None)
+            }
+            Some(ConfigSetting::Camera { enabled }) => {
+                commands::config::run(&app_name, None, None, None, Some(&enabled), None, None)
+            }
+            Some(ConfigSetting::Microphone { enabled }) => {
+                commands::config::run(&app_name, None, None, None, None, Some(&enabled), None)
+            }
+            Some(ConfigSetting::Audio { enabled }) => {
+                commands::config::run(&app_name, None, None, None, None, None, Some(&enabled))
             }
         },
         Commands::Backup { app_name, output } => {

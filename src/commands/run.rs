@@ -20,7 +20,7 @@ pub fn run(app_name: &str, args: &[String]) -> Result<()> {
 
     let (temp, cleanup) = prepare_temp(&config, &app_root)?;
 
-    let mut cmd = bwrap_cmd(&app_root_str, &binary, args, &temp, config.network);
+    let mut cmd = bwrap_cmd(&app_root_str, &binary, args, &temp, &config);
     cmd.env("FONTCONFIG_CACHE", "/tmp/.wryayer-fc-cache");
 
     if let Some(cleanup_path) = cleanup {
@@ -106,7 +106,7 @@ fn kernel_uuid() -> String {
 
 // ── bwrap command builder ─────────────────────────────────────────────────────
 
-fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, network: bool) -> Command {
+fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, config: &AppConfig) -> Command {
     let mut cmd = Command::new("bwrap");
 
     cmd.args(["--bind", app_root, "/"]);
@@ -132,11 +132,73 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, net
         cmd.args(["--ro-bind-try", p, p]);
     }
 
-    if !network {
+    if !config.network {
         cmd.arg("--unshare-net");
+    }
+
+    // ── Device masking (later binds override the --dev-bind /dev /dev above) ──
+
+    if !config.camera {
+        mask_dev_prefix(&mut cmd, "/dev", "video");
+        mask_dev_prefix(&mut cmd, "/dev", "media");
+    }
+
+    // audio=off blocks everything; microphone=off (with audio=on) blocks only
+    // ALSA capture devices (PipeWire/PulseAudio mic is not separately blockable)
+    if !config.audio {
+        mask_snd_devices(&mut cmd, None);
+        mask_audio_sockets(&mut cmd);
+    } else if !config.microphone {
+        // Only mask ALSA capture devices (names end in 'c', e.g. pcmC0D0c)
+        mask_snd_devices(&mut cmd, Some('c'));
     }
 
     cmd.args(["--", binary]);
     cmd.args(args);
     cmd
+}
+
+/// Bind /dev/null over every file in `dir` whose name starts with `prefix`.
+fn mask_dev_prefix(cmd: &mut Command, dir: &str, prefix: &str) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with(prefix) {
+            let path = format!("{dir}/{name}");
+            cmd.args(["--bind", "/dev/null", &path]);
+        }
+    }
+}
+
+/// Bind /dev/null over ALSA sound devices.
+/// If `capture_suffix` is Some('c'), only mask capture devices (pcmC*D*c).
+fn mask_snd_devices(cmd: &mut Command, capture_only: Option<char>) {
+    let Ok(entries) = std::fs::read_dir("/dev/snd") else { return };
+    for entry in entries.flatten() {
+        if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let matches = match capture_only {
+            Some(suffix) => name.ends_with(suffix),
+            None => true,
+        };
+        if matches {
+            let path = format!("/dev/snd/{name}");
+            cmd.args(["--bind", "/dev/null", &path]);
+        }
+    }
+}
+
+/// Bind /dev/null over PipeWire and PulseAudio sockets in XDG_RUNTIME_DIR.
+fn mask_audio_sockets(cmd: &mut Command) {
+    let Ok(xdg) = std::env::var("XDG_RUNTIME_DIR") else { return };
+    for name in &["pipewire-0", "pipewire-0.lock", "pulse/native"] {
+        let path = format!("{xdg}/{name}");
+        if std::path::Path::new(&path).exists() {
+            cmd.args(["--bind", "/dev/null", &path]);
+        }
+    }
 }
