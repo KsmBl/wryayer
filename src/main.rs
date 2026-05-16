@@ -82,6 +82,12 @@ enum Commands {
     },
     /// Launch the interactive TUI
     Tui,
+    /// Hard-link identical files across app directories to reclaim disk space
+    Dedup {
+        /// Print every file that gets linked
+        #[arg(long, short)]
+        verbose: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -189,6 +195,7 @@ fn main() {
         }
         Commands::Import { path } => commands::import::run(&path),
         Commands::Tui => tui::run(),
+        Commands::Dedup { verbose } => commands::dedup::run(verbose),
     };
 
     if let Err(e) = result {

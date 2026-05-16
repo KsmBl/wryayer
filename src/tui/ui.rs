@@ -6,6 +6,7 @@ use ratatui::{
     Frame,
 };
 
+use crate::commands::dedup::format_bytes;
 use crate::config::{AppConfig, LocalDelete, TempMode};
 
 use super::{App, Screen, Tab, CFG_SAVE};
@@ -28,8 +29,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     match app.tab {
         Tab::Installed => draw_installed(f, app, chunks[1]),
-        Tab::Install => draw_install(f, app, chunks[1]),
-        Tab::Import => draw_import(f, app, chunks[1]),
+        Tab::Install   => draw_install(f, app, chunks[1]),
+        Tab::Import    => draw_import(f, app, chunks[1]),
+        Tab::Space     => draw_space(f, app, chunks[1]),
     }
 
     draw_statusbar(f, app, chunks[2]);
@@ -85,8 +87,8 @@ fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
         Span::styled(label.to_string(), Style::default().fg(C_ACCENT)),
         Span::raw(" "),
     ]);
-    let titles = vec![mk("Installed"), mk("Install"), mk("Import")];
-    let sel = match app.tab { Tab::Installed => 0, Tab::Install => 1, Tab::Import => 2 };
+    let titles = vec![mk("Installed"), mk("Install"), mk("Import"), mk("Space")];
+    let sel = match app.tab { Tab::Installed => 0, Tab::Install => 1, Tab::Import => 2, Tab::Space => 3 };
     let tabs = Tabs::new(titles)
         .select(sel)
         .block(Block::default().borders(Borders::ALL)
@@ -296,9 +298,10 @@ fn draw_import(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_statusbar(f: &mut Frame, app: &App, area: Rect) {
     let hint = match app.tab {
-        Tab::Installed => "[Tab/Shift+Tab] Switch  [r] Run  [d] Delete  [b] Backup  [c] Check  [u] Update  [s] Config  [q] Quit",
-        Tab::Install => "[Tab/Shift+Tab] Switch  Type to search  [↓] Select  [Enter] Install/Uninstall  [q] Quit",
-        Tab::Import => "[Tab/Shift+Tab] Switch  Type zip path  [Enter] Import  [Esc] Clear  [Shift+Q] Quit",
+        Tab::Installed => "[Tab] Switch  [r] Run  [d] Delete  [b] Backup  [c] Check  [u] Update  [s] Config  [q] Quit",
+        Tab::Install   => "[Tab] Switch  Type to search  [↓] Select  [Enter] Install/Uninstall  [q] Quit",
+        Tab::Import    => "[Tab] Switch  Type zip path  [Enter] Import  [Esc] Clear  [Shift+Q] Quit",
+        Tab::Space     => "[Tab] Switch  [r] Run dedup  [q] Quit",
     };
     let msg = if app.status.is_empty() {
         format!(" {hint}")
@@ -425,6 +428,154 @@ fn draw_operation(
                 .border_style(Style::default().fg(border_color))),
         chunks[2],
     );
+}
+
+// ── Space tab ─────────────────────────────────────────────────────────────────
+
+fn draw_space(f: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Disk Usage ")
+        .title_style(Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    if app.du_apparent == 0 {
+        f.render_widget(
+            Paragraph::new("No apps installed.")
+                .style(Style::default().fg(C_DIM))
+                .alignment(Alignment::Center),
+            inner,
+        );
+        return;
+    }
+
+    // Layout constants
+    let label_w = app.installed.iter()
+        .map(|m| m.app.name.len())
+        .max().unwrap_or(0)
+        .max(8);           // "Apparent" is 8 chars
+    let size_w: usize = 12;
+    let pct_w: usize  = 4;
+    let prefix: usize = 2; // leading "  "
+    let gaps: usize   = 6; // spaces between columns
+    let bar_w = (inner.width as usize)
+        .saturating_sub(prefix + label_w + size_w + pct_w + gaps)
+        .max(8);
+
+    let mut y = inner.y + 1;
+
+    // ── Global bars ───────────────────────────────────────────────────────────
+
+    let savings     = app.du_apparent.saturating_sub(app.du_actual);
+    let on_disk_frac = (app.du_actual as f64 / app.du_apparent as f64).clamp(0.0, 1.0);
+    let solid       = ((on_disk_frac * bar_w as f64).round() as usize).min(bar_w);
+    let dimmed      = bar_w - solid;
+
+    // Row 1 — "Apparent": full solid bar
+    let apparent_line = Line::from(vec![
+        Span::styled(
+            format!("  {:<label_w$}  ", "Apparent"),
+            Style::default().fg(C_DIM),
+        ),
+        Span::styled("█".repeat(bar_w), Style::default().fg(C_ACCENT)),
+        Span::styled(
+            format!("  {:>size_w$}", format_bytes(app.du_apparent)),
+            Style::default().fg(Color::White),
+        ),
+    ]);
+    f.render_widget(Paragraph::new(apparent_line),
+        Rect { x: inner.x, y, width: inner.width, height: 1 });
+    y += 1;
+
+    // Row 2 — "On disk": solid portion + dimmed savings portion
+    let saves_str = if savings > 0 {
+        format!("  saves {}", format_bytes(savings))
+    } else {
+        String::new()
+    };
+    let on_disk_line = Line::from(vec![
+        Span::styled(
+            format!("  {:<label_w$}  ", "On disk"),
+            Style::default().fg(C_DIM),
+        ),
+        Span::styled("█".repeat(solid),  Style::default().fg(C_ACCENT)),
+        Span::styled("░".repeat(dimmed), Style::default().fg(Color::Rgb(55, 55, 65))),
+        Span::styled(
+            format!("  {:>size_w$}", format_bytes(app.du_actual)),
+            Style::default().fg(Color::White),
+        ),
+        Span::styled(saves_str, Style::default().fg(C_GREEN)),
+    ]);
+    f.render_widget(Paragraph::new(on_disk_line),
+        Rect { x: inner.x, y, width: inner.width, height: 1 });
+    y += 2;
+
+    // Separator
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            format!("  {}", "─".repeat(inner.width as usize - 4)),
+            Style::default().fg(Color::Rgb(50, 50, 60)),
+        )),
+        Rect { x: inner.x, y, width: inner.width, height: 1 },
+    );
+    y += 2;
+
+    // ── Per-app bars ──────────────────────────────────────────────────────────
+
+    let mut rows: Vec<(&str, u64)> = app.installed.iter()
+        .map(|m| (m.app.name.as_str(), *app.app_sizes.get(&m.app.name).unwrap_or(&0)))
+        .collect();
+    rows.sort_by(|a, b| b.1.cmp(&a.1));
+
+    for (name, size) in &rows {
+        if y + 1 >= inner.y + inner.height { break; }
+
+        let frac = (*size as f64 / app.du_apparent as f64).clamp(0.0, 1.0);
+        let pct  = (frac * 100.0).round() as u32;
+        let bar  = fractional_bar(bar_w, frac);
+
+        let row = Line::from(vec![
+            Span::styled(
+                format!("  {:<label_w$}  ", name),
+                Style::default().fg(C_DIM),
+            ),
+            Span::styled(bar, Style::default().fg(C_ACCENT)),
+            Span::styled(
+                format!("  {:>size_w$}  {:>2}%", format_bytes(*size), pct),
+                Style::default().fg(Color::White),
+            ),
+        ]);
+        f.render_widget(Paragraph::new(row),
+            Rect { x: inner.x, y, width: inner.width, height: 1 });
+        y += 1;
+    }
+
+    // Footer
+    let footer_y = inner.y + inner.height.saturating_sub(1);
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            "  [r] Run dedup",
+            Style::default().fg(C_DIM),
+        )),
+        Rect { x: inner.x, y: footer_y, width: inner.width, height: 1 },
+    );
+}
+
+const BLOCK_EIGHTHS: &[char] = &[' ', '▏', '▎', '▍', '▌', '▋', '▊', '▉', '█'];
+
+fn fractional_bar(width: usize, fraction: f64) -> String {
+    let eighths = (fraction.clamp(0.0, 1.0) * width as f64 * 8.0).round() as usize;
+    let full    = (eighths / 8).min(width);
+    let rem     = eighths % 8;
+    let mut s   = "█".repeat(full);
+    if rem > 0 && full < width {
+        s.push(BLOCK_EIGHTHS[rem]);
+    }
+    while s.chars().count() < width {
+        s.push(' ');
+    }
+    s
 }
 
 // ── Config overlay ────────────────────────────────────────────────────────────

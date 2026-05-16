@@ -18,6 +18,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::widgets::ListState;
 use ratatui::Terminal;
 
+use crate::commands::dedup::all_du;
 use crate::config::{read_config, write_config, AppConfig, LocalDelete, TempMode};
 use crate::manifest::{list_all_apps, Manifest};
 
@@ -90,6 +91,7 @@ pub enum Tab {
     Installed,
     Install,
     Import,
+    Space,
 }
 
 // ── App state ─────────────────────────────────────────────────────────────────
@@ -112,6 +114,10 @@ pub struct App {
     pub search_list_focused: bool,
     // Import tab
     pub import_input: String,
+    // Disk usage (computed once on load, refreshed on reload)
+    pub app_sizes: HashMap<String, u64>,
+    pub du_apparent: u64,
+    pub du_actual: u64,
     // Overlay
     pub screen: Screen,
     pub status: String,
@@ -126,6 +132,7 @@ impl App {
         if !installed.is_empty() {
             inst_state.select(Some(0));
         }
+        let (app_sizes, du_apparent, du_actual) = all_du().unwrap_or_default();
         let (search_tx, search_rx) = mpsc::channel();
         Ok(Self {
             quit: false,
@@ -142,6 +149,9 @@ impl App {
             avail_state: ListState::default(),
             search_list_focused: false,
             import_input: String::new(),
+            app_sizes,
+            du_apparent,
+            du_actual,
             screen: Screen::Main,
             status: String::new(),
             log_scroll: 0,
@@ -158,6 +168,11 @@ impl App {
             } else {
                 self.inst_state.select(Some(sel.min(self.installed.len() - 1)));
             }
+        }
+        if let Ok((sizes, apparent, actual)) = all_du() {
+            self.app_sizes = sizes;
+            self.du_apparent = apparent;
+            self.du_actual = actual;
         }
     }
 
@@ -281,17 +296,19 @@ fn on_main(app: &mut App, code: KeyCode) -> Result<()> {
         KeyCode::Tab => {
             app.tab = match app.tab {
                 Tab::Installed => Tab::Install,
-                Tab::Install => Tab::Import,
-                Tab::Import => Tab::Installed,
+                Tab::Install  => Tab::Import,
+                Tab::Import   => Tab::Space,
+                Tab::Space    => Tab::Installed,
             };
             app.status.clear();
             return Ok(());
         }
         KeyCode::BackTab => {
             app.tab = match app.tab {
-                Tab::Installed => Tab::Import,
-                Tab::Install => Tab::Installed,
-                Tab::Import => Tab::Install,
+                Tab::Installed => Tab::Space,
+                Tab::Install   => Tab::Installed,
+                Tab::Import    => Tab::Install,
+                Tab::Space     => Tab::Import,
             };
             app.status.clear();
             return Ok(());
@@ -309,8 +326,9 @@ fn on_main(app: &mut App, code: KeyCode) -> Result<()> {
 
     match app.tab {
         Tab::Installed => on_installed(app, code),
-        Tab::Install => on_install(app, code),
-        Tab::Import => on_import(app, code),
+        Tab::Install   => on_install(app, code),
+        Tab::Import    => on_import(app, code),
+        Tab::Space     => on_space_tab(app, code),
     }
     Ok(())
 }
@@ -688,6 +706,14 @@ fn on_config(app: &mut App, code: KeyCode) {
             }
         }
         _ => {}
+    }
+}
+
+// ── Space tab ─────────────────────────────────────────────────────────────────
+
+fn on_space_tab(app: &mut App, code: KeyCode) {
+    if code == KeyCode::Char('r') {
+        launch_op(app, "Dedup".to_string(), vec!["dedup".to_string()], None, true);
     }
 }
 

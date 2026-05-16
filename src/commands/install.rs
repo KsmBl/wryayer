@@ -127,6 +127,12 @@ pub fn run(pkg_name: &str, app_name: Option<&str>, bin_name: Option<&str>) -> Re
         app_name, app_name
     );
     eprintln!("Run with: ~/bin/{bin_name}  or  wryayer run {app_name}");
+
+    // Dedup after every install so shared libs between apps are hard-linked.
+    if let Err(e) = super::dedup::run(false) {
+        eprintln!("warning: dedup failed: {e:#}");
+    }
+
     Ok(())
 }
 
