@@ -3,7 +3,7 @@ mod ui;
 use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader};
 use std::process::{Command, Stdio};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -19,14 +19,14 @@ use ratatui::Terminal;
 
 use crate::manifest::{list_all_apps, Manifest};
 
-// ── Message from background op ────────────────────────────────────────────────
+// ── Op messages ───────────────────────────────────────────────────────────────
 
 pub enum Msg {
     Line(String),
     Done(bool),
 }
 
-// ── Screen overlays ──────────────────────────────────────────────────────────
+// ── Screen overlays ───────────────────────────────────────────────────────────
 
 pub enum Screen {
     Main,
@@ -43,12 +43,7 @@ pub enum Screen {
         rx: Receiver<Msg>,
         total_bytes: Option<u64>,
         started: Instant,
-        /// after a successful op that changes installed state, reload on close
         reload: bool,
-    },
-    FileInput {
-        prompt: String,
-        input: String,
     },
 }
 
@@ -59,12 +54,13 @@ pub enum PendingAction {
     Backup(String),
 }
 
-// ── Tab ───────────────────────────────────────────────────────────────────────
+// ── Tabs ──────────────────────────────────────────────────────────────────────
 
 #[derive(PartialEq, Clone, Copy)]
 pub enum Tab {
     Installed,
     Install,
+    Import,
 }
 
 // ── App state ─────────────────────────────────────────────────────────────────
@@ -75,12 +71,18 @@ pub struct App {
     // Installed tab
     pub installed: Vec<Manifest>,
     pub inst_state: ListState,
-    pub update_available: HashMap<String, String>, // name → new_version
-    // Install tab
+    pub update_available: HashMap<String, String>,
+    // Install tab — async search
     pub search_input: String,
     pub search_results: Vec<String>,
+    pub search_searching: bool,
+    pub search_gen: u64,
+    pub search_tx: Sender<(u64, Vec<String>)>,
+    pub search_rx: Receiver<(u64, Vec<String>)>,
     pub avail_state: ListState,
-    pub search_focused: bool,
+    pub search_list_focused: bool,
+    // Import tab
+    pub import_input: String,
     // Overlay
     pub screen: Screen,
     pub status: String,
@@ -94,6 +96,7 @@ impl App {
         if !installed.is_empty() {
             inst_state.select(Some(0));
         }
+        let (search_tx, search_rx) = mpsc::channel();
         Ok(Self {
             quit: false,
             tab: Tab::Installed,
@@ -102,8 +105,13 @@ impl App {
             update_available: HashMap::new(),
             search_input: String::new(),
             search_results: Vec::new(),
+            search_searching: false,
+            search_gen: 0,
+            search_tx,
+            search_rx,
             avail_state: ListState::default(),
-            search_focused: true,
+            search_list_focused: false,
+            import_input: String::new(),
             screen: Screen::Main,
             status: String::new(),
             log_scroll: 0,
@@ -158,12 +166,26 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(
             loop {
                 match rx.try_recv() {
                     Ok(Msg::Line(l)) => log.push(l),
-                    Ok(Msg::Done(ok)) => {
-                        *done = true;
-                        *success = ok;
-                    }
+                    Ok(Msg::Done(ok)) => { *done = true; *success = ok; }
                     Err(_) => break,
                 }
+            }
+        }
+
+        // Drain async search results — only apply if generation matches
+        loop {
+            match app.search_rx.try_recv() {
+                Ok((gen, results)) if gen == app.search_gen => {
+                    app.search_results = results;
+                    app.search_searching = false;
+                    if app.search_results.is_empty() {
+                        app.status = "No results.".into();
+                    } else {
+                        app.status = format!("{} results", app.search_results.len());
+                    }
+                }
+                Ok(_) => {} // stale generation, discard
+                Err(_) => break,
             }
         }
 
@@ -186,7 +208,7 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(
     }
 }
 
-// ── Key dispatch ─────────────────────────────────────────────────────────────
+// ── Key dispatch ──────────────────────────────────────────────────────────────
 
 fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
     let tag = match &app.screen {
@@ -194,7 +216,6 @@ fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
         Screen::Confirm { .. } => 1,
         Screen::Operation { done: false, .. } => 2,
         Screen::Operation { done: true, .. } => 3,
-        Screen::FileInput { .. } => 4,
     };
 
     match tag {
@@ -202,7 +223,6 @@ fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
         1 => on_confirm(app, code)?,
         2 => on_op_running(app, code),
         3 => on_op_done(app, code)?,
-        4 => on_file_input(app, code)?,
         _ => {}
     }
     Ok(())
@@ -219,7 +239,8 @@ fn on_main(app: &mut App, code: KeyCode) -> Result<()> {
         KeyCode::Tab => {
             app.tab = match app.tab {
                 Tab::Installed => Tab::Install,
-                Tab::Install => Tab::Installed,
+                Tab::Install => Tab::Import,
+                Tab::Import => Tab::Installed,
             };
             app.status.clear();
             return Ok(());
@@ -229,10 +250,13 @@ fn on_main(app: &mut App, code: KeyCode) -> Result<()> {
 
     match app.tab {
         Tab::Installed => on_installed(app, code),
-        Tab::Install => on_install(app, code)?,
+        Tab::Install => on_install(app, code),
+        Tab::Import => on_import(app, code),
     }
     Ok(())
 }
+
+// ── Installed tab ─────────────────────────────────────────────────────────────
 
 fn on_installed(app: &mut App, code: KeyCode) {
     let len = app.installed.len();
@@ -252,7 +276,7 @@ fn on_installed(app: &mut App, code: KeyCode) {
         KeyCode::Char('r') | KeyCode::Enter => {
             if let Some(m) = app.selected_installed() {
                 let name = m.app.name.clone();
-                launch_run(app, &name);
+                launch_op(app, format!("Run — {name}"), vec!["run".into(), name], None, false);
             }
         }
         KeyCode::Char('d') | KeyCode::Delete => {
@@ -287,19 +311,7 @@ fn on_installed(app: &mut App, code: KeyCode) {
         KeyCode::Char('c') => {
             if let Some(m) = app.selected_installed() {
                 let name = m.app.name.clone();
-                let (tx, rx) = mpsc::channel();
-                spawn_wryayer(&["update", "--check", &name], tx, false);
-                app.log_scroll = 0;
-                app.screen = Screen::Operation {
-                    title: format!("Check updates — {name}"),
-                    log: vec![],
-                    done: false,
-                    success: false,
-                    rx,
-                    total_bytes: None,
-                    started: Instant::now(),
-                    reload: false,
-                };
+                launch_op(app, format!("Check updates — {name}"), vec!["update".into(), "--check".into(), name], None, false);
             }
         }
         KeyCode::Char('u') => {
@@ -308,12 +320,8 @@ fn on_installed(app: &mut App, code: KeyCode) {
                 let new_ver = app.update_available.get(&name).cloned();
                 let body = match new_ver {
                     Some(ref v) => {
-                        let cur = m
-                            .packages
-                            .iter()
-                            .find(|p| p.name == name)
-                            .map(|p| p.version.as_str())
-                            .unwrap_or("?");
+                        let cur = m.packages.iter().find(|p| p.name == name)
+                            .map(|p| p.version.as_str()).unwrap_or("?");
                         vec![
                             format!("  {cur}  →  {v}"),
                             String::new(),
@@ -337,61 +345,34 @@ fn on_installed(app: &mut App, code: KeyCode) {
     }
 }
 
-fn launch_run(app: &mut App, name: &str) {
-    let (tx, rx) = mpsc::channel();
-    spawn_wryayer(&["run", name], tx, false);
-    app.log_scroll = 0;
-    app.screen = Screen::Operation {
-        title: format!("Run — {name}"),
-        log: vec![],
-        done: false,
-        success: false,
-        rx,
-        total_bytes: None,
-        started: Instant::now(),
-        reload: false,
-    };
-}
+// ── Install tab ───────────────────────────────────────────────────────────────
 
-fn on_install(app: &mut App, code: KeyCode) -> Result<()> {
-    if app.search_focused {
+fn on_install(app: &mut App, code: KeyCode) {
+    if !app.search_list_focused {
         match code {
-            KeyCode::Char('i') => {
-                app.screen = Screen::FileInput {
-                    prompt: "Import zip path:".into(),
-                    input: String::new(),
-                };
-                return Ok(());
-            }
             KeyCode::Char(c) => {
                 app.search_input.push(c);
+                trigger_search(app);
             }
             KeyCode::Backspace => {
                 app.search_input.pop();
-            }
-            KeyCode::Enter => {
-                do_search(app);
-                if !app.search_results.is_empty() {
-                    app.search_focused = false;
-                    app.avail_state.select(Some(0));
-                }
+                trigger_search(app);
             }
             KeyCode::Down => {
                 if !app.search_results.is_empty() {
-                    app.search_focused = false;
+                    app.search_list_focused = true;
                     app.avail_state.select(Some(0));
                 }
             }
             _ => {}
         }
     } else {
-        // List focused
         let len = app.search_results.len();
         match code {
             KeyCode::Up | KeyCode::Char('k') => {
                 let i = app.avail_state.selected().unwrap_or(0);
                 if i == 0 {
-                    app.search_focused = true;
+                    app.search_list_focused = false;
                     app.avail_state.select(None);
                 } else {
                     app.avail_state.select(Some(i - 1));
@@ -417,40 +398,56 @@ fn on_install(app: &mut App, code: KeyCode) -> Result<()> {
                     };
                 }
             }
-            KeyCode::Char('/') | KeyCode::Esc => {
-                app.search_focused = true;
+            KeyCode::Esc => {
+                app.search_list_focused = false;
                 app.avail_state.select(None);
-            }
-            KeyCode::Char('i') => {
-                app.screen = Screen::FileInput {
-                    prompt: "Import zip path:".into(),
-                    input: String::new(),
-                };
             }
             _ => {}
         }
     }
-    Ok(())
 }
 
-fn do_search(app: &mut App) {
+fn trigger_search(app: &mut App) {
     let query = app.search_input.trim().to_string();
     if query.is_empty() {
+        app.search_gen += 1; // invalidate any in-flight search
         app.search_results.clear();
+        app.search_searching = false;
+        app.status.clear();
         return;
     }
-    app.status = format!("Searching '{query}'...");
-    let out = Command::new("pacman").args(["-Ssq", &query]).output();
-    match out {
-        Ok(o) => {
-            let s = String::from_utf8_lossy(&o.stdout);
-            app.search_results = s.lines().map(str::to_string).collect();
-            app.status = format!("{} results for '{query}'", app.search_results.len());
+    app.search_gen += 1;
+    app.search_searching = true;
+    app.status = format!("Searching '{query}'…");
+    let gen = app.search_gen;
+    let tx = app.search_tx.clone();
+    thread::spawn(move || {
+        let out = Command::new("pacman").args(["-Ssq", &query]).output();
+        let results = match out {
+            Ok(o) => String::from_utf8_lossy(&o.stdout).lines().map(str::to_string).collect(),
+            Err(_) => vec![],
+        };
+        let _ = tx.send((gen, results));
+    });
+}
+
+// ── Import tab ────────────────────────────────────────────────────────────────
+
+fn on_import(app: &mut App, code: KeyCode) {
+    match code {
+        KeyCode::Char(c) => app.import_input.push(c),
+        KeyCode::Backspace => { app.import_input.pop(); }
+        KeyCode::Enter => {
+            let raw = app.import_input.trim().to_string();
+            if raw.is_empty() {
+                return;
+            }
+            let path = shellexpand::tilde(&raw).into_owned();
+            let zip_bytes = std::fs::metadata(&path).ok().map(|m| m.len());
+            launch_op(app, format!("Import — {path}"), vec!["import".into(), path], zip_bytes, true);
+            app.import_input.clear();
         }
-        Err(e) => {
-            app.search_results.clear();
-            app.status = format!("pacman error: {e}");
-        }
+        _ => {}
     }
 }
 
@@ -459,7 +456,6 @@ fn do_search(app: &mut App) {
 fn on_confirm(app: &mut App, code: KeyCode) -> Result<()> {
     match code {
         KeyCode::Char('y') | KeyCode::Char('Y') => {
-            // Pull action out and replace screen
             let screen = std::mem::replace(&mut app.screen, Screen::Main);
             if let Screen::Confirm { action, .. } = screen {
                 execute_action(app, action);
@@ -474,67 +470,19 @@ fn on_confirm(app: &mut App, code: KeyCode) -> Result<()> {
 }
 
 fn execute_action(app: &mut App, action: PendingAction) {
-    let (tx, rx) = mpsc::channel();
     match action {
-        PendingAction::Remove(name) => {
-            spawn_wryayer(&["remove", &name], tx, false);
-            app.log_scroll = 0;
-            app.screen = Screen::Operation {
-                title: format!("Remove — {name}"),
-                log: vec![],
-                done: false,
-                success: false,
-                rx,
-                total_bytes: None,
-                started: Instant::now(),
-                reload: true,
-            };
-        }
-        PendingAction::Update(name) => {
-            spawn_wryayer(&["update", &name], tx, false);
-            app.log_scroll = 0;
-            app.screen = Screen::Operation {
-                title: format!("Update — {name}"),
-                log: vec![],
-                done: false,
-                success: false,
-                rx,
-                total_bytes: None,
-                started: Instant::now(),
-                reload: true,
-            };
-        }
-        PendingAction::Install(pkg) => {
-            spawn_wryayer(&["install", &pkg], tx, false);
-            app.log_scroll = 0;
-            app.screen = Screen::Operation {
-                title: format!("Install — {pkg}"),
-                log: vec![],
-                done: false,
-                success: false,
-                rx,
-                total_bytes: None,
-                started: Instant::now(),
-                reload: true,
-            };
-        }
+        PendingAction::Remove(name) =>
+            launch_op(app, format!("Remove — {name}"), vec!["remove".into(), name], None, true),
+        PendingAction::Update(name) =>
+            launch_op(app, format!("Update — {name}"), vec!["update".into(), name], None, true),
+        PendingAction::Install(pkg) =>
+            launch_op(app, format!("Install — {pkg}"), vec!["install".into(), pkg], None, true),
         PendingAction::Backup(name) => {
             let total = dir_bytes(&format!(
                 "{}/.wryayer/{name}",
                 std::env::var("HOME").unwrap_or_default()
             ));
-            spawn_wryayer(&["backup", &name], tx, false);
-            app.log_scroll = 0;
-            app.screen = Screen::Operation {
-                title: format!("Backup — {name}"),
-                log: vec![],
-                done: false,
-                success: false,
-                rx,
-                total_bytes: total,
-                started: Instant::now(),
-                reload: false,
-            };
+            launch_op(app, format!("Backup — {name}"), vec!["backup".into(), name], total, false);
         }
     }
 }
@@ -542,31 +490,17 @@ fn execute_action(app: &mut App, action: PendingAction) {
 // ── Operation screens ─────────────────────────────────────────────────────────
 
 fn on_op_running(app: &mut App, code: KeyCode) {
-    if let Screen::Operation { .. } = &mut app.screen {
-        match code {
-            KeyCode::Up | KeyCode::Char('k') => {
-                if app.log_scroll > 0 {
-                    app.log_scroll -= 1;
-                }
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                app.log_scroll += 1;
-            }
-            _ => {}
-        }
+    match code {
+        KeyCode::Up | KeyCode::Char('k') => { if app.log_scroll > 0 { app.log_scroll -= 1; } }
+        KeyCode::Down | KeyCode::Char('j') => { app.log_scroll += 1; }
+        _ => {}
     }
 }
 
 fn on_op_done(app: &mut App, code: KeyCode) -> Result<()> {
     match code {
-        KeyCode::Up | KeyCode::Char('k') => {
-            if app.log_scroll > 0 {
-                app.log_scroll -= 1;
-            }
-        }
-        KeyCode::Down | KeyCode::Char('j') => {
-            app.log_scroll += 1;
-        }
+        KeyCode::Up | KeyCode::Char('k') => { if app.log_scroll > 0 { app.log_scroll -= 1; } }
+        KeyCode::Down | KeyCode::Char('j') => { app.log_scroll += 1; }
         KeyCode::Char('q') | KeyCode::Esc | KeyCode::Enter => {
             let screen = std::mem::replace(&mut app.screen, Screen::Main);
             if let Screen::Operation { reload, success, .. } = screen {
@@ -580,53 +514,26 @@ fn on_op_done(app: &mut App, code: KeyCode) -> Result<()> {
     Ok(())
 }
 
-// ── File input (import) ───────────────────────────────────────────────────────
+// ── Shared helpers ────────────────────────────────────────────────────────────
 
-fn on_file_input(app: &mut App, code: KeyCode) -> Result<()> {
-    match code {
-        KeyCode::Esc => {
-            app.screen = Screen::Main;
-        }
-        KeyCode::Char(c) => {
-            if let Screen::FileInput { ref mut input, .. } = app.screen {
-                input.push(c);
-            }
-        }
-        KeyCode::Backspace => {
-            if let Screen::FileInput { ref mut input, .. } = app.screen {
-                input.pop();
-            }
-        }
-        KeyCode::Enter => {
-            let screen = std::mem::replace(&mut app.screen, Screen::Main);
-            if let Screen::FileInput { input, .. } = screen {
-                let path = shellexpand::tilde(&input).into_owned();
-                let (tx, rx) = mpsc::channel();
-                spawn_wryayer(&["import", &path], tx, false);
-                app.log_scroll = 0;
-                let zip_bytes = std::fs::metadata(&path).ok().map(|m| m.len());
-                app.screen = Screen::Operation {
-                    title: format!("Import — {path}"),
-                    log: vec![],
-                    done: false,
-                    success: false,
-                    rx,
-                    total_bytes: zip_bytes,
-                    started: Instant::now(),
-                    reload: true,
-                };
-            }
-        }
-        _ => {}
-    }
-    Ok(())
+fn launch_op(app: &mut App, title: String, args: Vec<String>, total_bytes: Option<u64>, reload: bool) {
+    let (tx, rx) = mpsc::channel();
+    spawn_wryayer(args, tx);
+    app.log_scroll = 0;
+    app.screen = Screen::Operation {
+        title,
+        log: vec![],
+        done: false,
+        success: false,
+        rx,
+        total_bytes,
+        started: Instant::now(),
+        reload,
+    };
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-fn spawn_wryayer(args: &[&str], tx: mpsc::Sender<Msg>, _capture_stdout: bool) {
+fn spawn_wryayer(args: Vec<String>, tx: mpsc::Sender<Msg>) {
     let exe = std::env::current_exe().unwrap_or_else(|_| "wryayer".into());
-    let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
     thread::spawn(move || {
         let mut child = match Command::new(&exe)
             .args(&args)
