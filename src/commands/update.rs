@@ -1,0 +1,201 @@
+use crate::manifest::{
+    app_dir, list_all_apps, now_rfc3339, read_manifest, write_manifest, AppMeta, Manifest,
+    PackageEntry, PackageSource,
+};
+use crate::package::{
+    build_aur, download_official, extract_package, resolve_full_dep_tree,
+    satisfy_missing_sonames,
+};
+use anyhow::{bail, Context, Result};
+use std::fs;
+use std::path::PathBuf;
+use std::process::Command;
+
+pub fn run(app_name: Option<&str>) -> Result<()> {
+    let manifests = match app_name {
+        Some(name) => vec![read_manifest(name)
+            .with_context(|| format!("'{name}' is not installed"))?],
+        None => list_all_apps()?,
+    };
+
+    if manifests.is_empty() {
+        eprintln!("No apps installed.");
+        return Ok(());
+    }
+
+    for manifest in &manifests {
+        let name = &manifest.app.name;
+        let main_pkg = manifest.packages.iter().find(|p| p.name == manifest.app.name);
+        let current_version = main_pkg.map(|p| p.version.as_str()).unwrap_or("0");
+
+        eprintln!("Checking {name}...");
+
+        let latest_version = match main_pkg.map(|p| &p.source).unwrap_or(&PackageSource::Official) {
+            PackageSource::Official => get_official_version(name)?,
+            PackageSource::Aur => get_aur_version(name)?,
+        };
+
+        match latest_version {
+            None => {
+                eprintln!("  {name}: package not found, skipping");
+                continue;
+            }
+            Some(ref ver) if !is_newer(ver, current_version)? => {
+                eprintln!("  {name}: up to date ({current_version})");
+                continue;
+            }
+            Some(ref ver) => {
+                eprintln!("  {name}: updating {current_version} -> {ver}");
+            }
+        }
+
+        reinstall(manifest)?;
+    }
+
+    Ok(())
+}
+
+fn reinstall(manifest: &crate::manifest::Manifest) -> Result<()> {
+    let app_name = &manifest.app.name;
+    let bin_name = &manifest.app.main_binary;
+
+    eprintln!("Resolving dependencies for {app_name}...");
+    let mut resolved = resolve_full_dep_tree(app_name)?;
+
+    let home = std::env::var("HOME").context("HOME not set")?;
+    let cache_dir = PathBuf::from(&home).join(".cache").join("wryayer").join("pkg");
+    let build_dir = PathBuf::from(&home).join(".cache").join("wryayer").join("build");
+
+    for pkg in &mut resolved {
+        match pkg.source {
+            PackageSource::Official => {
+                let path = download_official(&pkg.name, &cache_dir)
+                    .with_context(|| format!("failed to download {}", pkg.name))?;
+                pkg.pkg_path = Some(path);
+            }
+            PackageSource::Aur => {
+                let path = build_aur(&pkg.name, &build_dir)
+                    .with_context(|| format!("failed to build {}", pkg.name))?;
+                pkg.pkg_path = Some(path);
+            }
+        }
+    }
+
+    let app_dir = app_dir(app_name)?;
+
+    // Remove old files but keep the directory
+    if app_dir.exists() {
+        for entry in fs::read_dir(&app_dir)
+            .with_context(|| format!("failed to read app dir {}", app_dir.display()))?
+        {
+            let entry = entry.context("failed to read entry")?;
+            let path = entry.path();
+            let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if file_name == ".manifest.toml" {
+                continue;
+            }
+            if path.is_dir() {
+                fs::remove_dir_all(&path)
+                    .with_context(|| format!("failed to remove {}", path.display()))?;
+            } else {
+                fs::remove_file(&path)
+                    .with_context(|| format!("failed to remove {}", path.display()))?;
+            }
+        }
+    }
+
+    for pkg in &resolved {
+        let pkg_path = pkg.pkg_path.as_ref().unwrap();
+        eprintln!("Extracting {}...", pkg.name);
+        extract_package(pkg_path, &app_dir)
+            .with_context(|| format!("failed to extract {}", pkg.name))?;
+    }
+
+    let packages: Vec<PackageEntry> = resolved
+        .iter()
+        .map(|p| PackageEntry {
+            name: p.name.clone(),
+            version: p.version.clone(),
+            source: p.source.clone(),
+        })
+        .collect();
+
+    let new_manifest = Manifest {
+        app: AppMeta {
+            name: app_name.clone(),
+            main_binary: bin_name.clone(),
+            installed_at: now_rfc3339(),
+            launchers: manifest.app.launchers.clone(),
+        },
+        packages,
+    };
+    write_manifest(app_name, &new_manifest)?;
+
+    eprintln!("Checking for missing shared library dependencies...");
+    match satisfy_missing_sonames(&app_dir, &cache_dir) {
+        Ok(extra) if !extra.is_empty() => eprintln!("  Added: {}", extra.join(", ")),
+        Ok(_) => {}
+        Err(e) => eprintln!("  Warning: soname check failed: {e:#}"),
+    }
+
+    eprintln!("Updated '{app_name}'.");
+    Ok(())
+}
+
+fn get_official_version(pkg_name: &str) -> Result<Option<String>> {
+    let output = Command::new("pacman")
+        .args(["-Si", pkg_name])
+        .output()
+        .context("failed to spawn pacman -Si")?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        if line.starts_with("Version") && line.contains(':') {
+            let ver = line.splitn(2, ':').nth(1).unwrap_or("").trim().to_string();
+            return Ok(Some(ver));
+        }
+    }
+    Ok(None)
+}
+
+fn get_aur_version(pkg_name: &str) -> Result<Option<String>> {
+    let url = format!("https://aur.archlinux.org/rpc/v5/info?arg[]={pkg_name}");
+    let client = reqwest::blocking::Client::new();
+    let json: serde_json::Value = client
+        .get(&url)
+        .send()
+        .context("failed to query AUR RPC")?
+        .json()
+        .context("failed to parse AUR RPC JSON")?;
+    let version = json
+        .get("results")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|arr| arr.first())
+        .and_then(|pkg| pkg.get("Version"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    Ok(version)
+}
+
+fn is_newer(candidate: &str, current: &str) -> Result<bool> {
+    if candidate == current {
+        return Ok(false);
+    }
+    let output = Command::new("vercmp")
+        .args([candidate, current])
+        .output()
+        .context("failed to run vercmp")?;
+    if !output.status.success() {
+        bail!(
+            "vercmp failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let result: i32 = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .context("vercmp output was not an integer")?;
+    Ok(result > 0)
+}
