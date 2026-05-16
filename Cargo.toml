@@ -17,3 +17,6 @@ reqwest = { version = "0.12", features = ["blocking", "json"] }
 indicatif = "0.17"
 chrono = { version = "0.4", features = ["serde"] }
 zip = "2"
+ratatui = "0.29"
+crossterm = "0.28"
+shellexpand = "3"

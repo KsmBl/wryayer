@@ -1,0 +1,668 @@
+mod ui;
+
+use std::collections::HashMap;
+use std::io::{self, BufRead, BufReader};
+use std::process::{Command, Stdio};
+use std::sync::mpsc::{self, Receiver};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use anyhow::Result;
+use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+};
+use crossterm::ExecutableCommand;
+use ratatui::backend::CrosstermBackend;
+use ratatui::widgets::ListState;
+use ratatui::Terminal;
+
+use crate::manifest::{list_all_apps, Manifest};
+
+// ── Message from background op ────────────────────────────────────────────────
+
+pub enum Msg {
+    Line(String),
+    Done(bool),
+}
+
+// ── Screen overlays ──────────────────────────────────────────────────────────
+
+pub enum Screen {
+    Main,
+    Confirm {
+        title: String,
+        body: Vec<String>,
+        action: PendingAction,
+    },
+    Operation {
+        title: String,
+        log: Vec<String>,
+        done: bool,
+        success: bool,
+        rx: Receiver<Msg>,
+        total_bytes: Option<u64>,
+        started: Instant,
+        /// after a successful op that changes installed state, reload on close
+        reload: bool,
+    },
+    FileInput {
+        prompt: String,
+        input: String,
+    },
+}
+
+pub enum PendingAction {
+    Remove(String),
+    Update(String),
+    Install(String),
+    Backup(String),
+}
+
+// ── Tab ───────────────────────────────────────────────────────────────────────
+
+#[derive(PartialEq, Clone, Copy)]
+pub enum Tab {
+    Installed,
+    Install,
+}
+
+// ── App state ─────────────────────────────────────────────────────────────────
+
+pub struct App {
+    pub quit: bool,
+    pub tab: Tab,
+    // Installed tab
+    pub installed: Vec<Manifest>,
+    pub inst_state: ListState,
+    pub update_available: HashMap<String, String>, // name → new_version
+    // Install tab
+    pub search_input: String,
+    pub search_results: Vec<String>,
+    pub avail_state: ListState,
+    pub search_focused: bool,
+    // Overlay
+    pub screen: Screen,
+    pub status: String,
+    pub log_scroll: usize,
+}
+
+impl App {
+    fn new() -> Result<Self> {
+        let installed = list_all_apps()?;
+        let mut inst_state = ListState::default();
+        if !installed.is_empty() {
+            inst_state.select(Some(0));
+        }
+        Ok(Self {
+            quit: false,
+            tab: Tab::Installed,
+            installed,
+            inst_state,
+            update_available: HashMap::new(),
+            search_input: String::new(),
+            search_results: Vec::new(),
+            avail_state: ListState::default(),
+            search_focused: true,
+            screen: Screen::Main,
+            status: String::new(),
+            log_scroll: 0,
+        })
+    }
+
+    fn reload_installed(&mut self) {
+        if let Ok(list) = list_all_apps() {
+            self.installed = list;
+            let sel = self.inst_state.selected().unwrap_or(0);
+            if self.installed.is_empty() {
+                self.inst_state.select(None);
+            } else {
+                self.inst_state.select(Some(sel.min(self.installed.len() - 1)));
+            }
+        }
+    }
+
+    pub fn selected_installed(&self) -> Option<&Manifest> {
+        self.inst_state.selected().and_then(|i| self.installed.get(i))
+    }
+
+    pub fn selected_available(&self) -> Option<&str> {
+        self.avail_state
+            .selected()
+            .and_then(|i| self.search_results.get(i))
+            .map(String::as_str)
+    }
+}
+
+// ── Entry point ───────────────────────────────────────────────────────────────
+
+pub fn run() -> Result<()> {
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    stdout.execute(EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+    let res = event_loop(&mut terminal);
+    disable_raw_mode()?;
+    terminal.backend_mut().execute(LeaveAlternateScreen)?;
+    terminal.show_cursor()?;
+    res
+}
+
+fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
+    let mut app = App::new()?;
+
+    loop {
+        // Drain op channel
+        if let Screen::Operation { rx, log, done, success, .. } = &mut app.screen {
+            loop {
+                match rx.try_recv() {
+                    Ok(Msg::Line(l)) => log.push(l),
+                    Ok(Msg::Done(ok)) => {
+                        *done = true;
+                        *success = ok;
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+
+        terminal.draw(|f| ui::draw(f, &mut app))?;
+
+        if app.quit {
+            return Ok(());
+        }
+
+        if !event::poll(Duration::from_millis(50))? {
+            continue;
+        }
+
+        if let Event::Key(key) = event::read()? {
+            if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+                return Ok(());
+            }
+            handle_key(&mut app, key.code)?;
+        }
+    }
+}
+
+// ── Key dispatch ─────────────────────────────────────────────────────────────
+
+fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
+    let tag = match &app.screen {
+        Screen::Main => 0u8,
+        Screen::Confirm { .. } => 1,
+        Screen::Operation { done: false, .. } => 2,
+        Screen::Operation { done: true, .. } => 3,
+        Screen::FileInput { .. } => 4,
+    };
+
+    match tag {
+        0 => on_main(app, code)?,
+        1 => on_confirm(app, code)?,
+        2 => on_op_running(app, code),
+        3 => on_op_done(app, code)?,
+        4 => on_file_input(app, code)?,
+        _ => {}
+    }
+    Ok(())
+}
+
+// ── Main screen ───────────────────────────────────────────────────────────────
+
+fn on_main(app: &mut App, code: KeyCode) -> Result<()> {
+    match code {
+        KeyCode::Char('q') | KeyCode::Esc => {
+            app.quit = true;
+            return Ok(());
+        }
+        KeyCode::Tab => {
+            app.tab = match app.tab {
+                Tab::Installed => Tab::Install,
+                Tab::Install => Tab::Installed,
+            };
+            app.status.clear();
+            return Ok(());
+        }
+        _ => {}
+    }
+
+    match app.tab {
+        Tab::Installed => on_installed(app, code),
+        Tab::Install => on_install(app, code)?,
+    }
+    Ok(())
+}
+
+fn on_installed(app: &mut App, code: KeyCode) {
+    let len = app.installed.len();
+    if len == 0 {
+        return;
+    }
+
+    match code {
+        KeyCode::Up | KeyCode::Char('k') => {
+            let i = app.inst_state.selected().unwrap_or(0);
+            app.inst_state.select(Some(if i == 0 { len - 1 } else { i - 1 }));
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            let i = app.inst_state.selected().unwrap_or(0);
+            app.inst_state.select(Some((i + 1) % len));
+        }
+        KeyCode::Char('r') | KeyCode::Enter => {
+            if let Some(m) = app.selected_installed() {
+                let name = m.app.name.clone();
+                launch_run(app, &name);
+            }
+        }
+        KeyCode::Char('d') | KeyCode::Delete => {
+            if let Some(m) = app.selected_installed() {
+                let name = m.app.name.clone();
+                app.screen = Screen::Confirm {
+                    title: format!("Remove '{name}'?"),
+                    body: vec![
+                        format!("This deletes ~/.wryayer/{name}/ and all launchers."),
+                        String::new(),
+                        "Press y to confirm, n or Esc to cancel.".into(),
+                    ],
+                    action: PendingAction::Remove(name),
+                };
+            }
+        }
+        KeyCode::Char('b') => {
+            if let Some(m) = app.selected_installed() {
+                let name = m.app.name.clone();
+                let zip = format!("{}-{}.zip", name, chrono::Local::now().format("%Y-%m-%d"));
+                app.screen = Screen::Confirm {
+                    title: format!("Backup '{name}'?"),
+                    body: vec![
+                        format!("Output: ~/{zip}"),
+                        String::new(),
+                        "Press y to confirm, n or Esc to cancel.".into(),
+                    ],
+                    action: PendingAction::Backup(name),
+                };
+            }
+        }
+        KeyCode::Char('c') => {
+            if let Some(m) = app.selected_installed() {
+                let name = m.app.name.clone();
+                let (tx, rx) = mpsc::channel();
+                spawn_wryayer(&["update", "--check", &name], tx, false);
+                app.log_scroll = 0;
+                app.screen = Screen::Operation {
+                    title: format!("Check updates — {name}"),
+                    log: vec![],
+                    done: false,
+                    success: false,
+                    rx,
+                    total_bytes: None,
+                    started: Instant::now(),
+                    reload: false,
+                };
+            }
+        }
+        KeyCode::Char('u') => {
+            if let Some(m) = app.selected_installed() {
+                let name = m.app.name.clone();
+                let new_ver = app.update_available.get(&name).cloned();
+                let body = match new_ver {
+                    Some(ref v) => {
+                        let cur = m
+                            .packages
+                            .iter()
+                            .find(|p| p.name == name)
+                            .map(|p| p.version.as_str())
+                            .unwrap_or("?");
+                        vec![
+                            format!("  {cur}  →  {v}"),
+                            String::new(),
+                            "Press y to update, n or Esc to cancel.".into(),
+                        ]
+                    }
+                    None => vec![
+                        "Run [c]heck first to verify an update is available.".into(),
+                        String::new(),
+                        "Press y to update anyway, n or Esc to cancel.".into(),
+                    ],
+                };
+                app.screen = Screen::Confirm {
+                    title: format!("Update '{name}'?"),
+                    body,
+                    action: PendingAction::Update(name),
+                };
+            }
+        }
+        _ => {}
+    }
+}
+
+fn launch_run(app: &mut App, name: &str) {
+    let (tx, rx) = mpsc::channel();
+    spawn_wryayer(&["run", name], tx, false);
+    app.log_scroll = 0;
+    app.screen = Screen::Operation {
+        title: format!("Run — {name}"),
+        log: vec![],
+        done: false,
+        success: false,
+        rx,
+        total_bytes: None,
+        started: Instant::now(),
+        reload: false,
+    };
+}
+
+fn on_install(app: &mut App, code: KeyCode) -> Result<()> {
+    if app.search_focused {
+        match code {
+            KeyCode::Char('i') => {
+                app.screen = Screen::FileInput {
+                    prompt: "Import zip path:".into(),
+                    input: String::new(),
+                };
+                return Ok(());
+            }
+            KeyCode::Char(c) => {
+                app.search_input.push(c);
+            }
+            KeyCode::Backspace => {
+                app.search_input.pop();
+            }
+            KeyCode::Enter => {
+                do_search(app);
+                if !app.search_results.is_empty() {
+                    app.search_focused = false;
+                    app.avail_state.select(Some(0));
+                }
+            }
+            KeyCode::Down => {
+                if !app.search_results.is_empty() {
+                    app.search_focused = false;
+                    app.avail_state.select(Some(0));
+                }
+            }
+            _ => {}
+        }
+    } else {
+        // List focused
+        let len = app.search_results.len();
+        match code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                let i = app.avail_state.selected().unwrap_or(0);
+                if i == 0 {
+                    app.search_focused = true;
+                    app.avail_state.select(None);
+                } else {
+                    app.avail_state.select(Some(i - 1));
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                let i = app.avail_state.selected().unwrap_or(0);
+                if len > 0 {
+                    app.avail_state.select(Some((i + 1).min(len - 1)));
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(pkg) = app.selected_available() {
+                    let pkg = pkg.to_string();
+                    app.screen = Screen::Confirm {
+                        title: format!("Install '{pkg}'?"),
+                        body: vec![
+                            format!("Installs {pkg} into ~/.wryayer/{pkg}/"),
+                            String::new(),
+                            "Press y to confirm, n or Esc to cancel.".into(),
+                        ],
+                        action: PendingAction::Install(pkg),
+                    };
+                }
+            }
+            KeyCode::Char('/') | KeyCode::Esc => {
+                app.search_focused = true;
+                app.avail_state.select(None);
+            }
+            KeyCode::Char('i') => {
+                app.screen = Screen::FileInput {
+                    prompt: "Import zip path:".into(),
+                    input: String::new(),
+                };
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn do_search(app: &mut App) {
+    let query = app.search_input.trim().to_string();
+    if query.is_empty() {
+        app.search_results.clear();
+        return;
+    }
+    app.status = format!("Searching '{query}'...");
+    let out = Command::new("pacman").args(["-Ssq", &query]).output();
+    match out {
+        Ok(o) => {
+            let s = String::from_utf8_lossy(&o.stdout);
+            app.search_results = s.lines().map(str::to_string).collect();
+            app.status = format!("{} results for '{query}'", app.search_results.len());
+        }
+        Err(e) => {
+            app.search_results.clear();
+            app.status = format!("pacman error: {e}");
+        }
+    }
+}
+
+// ── Confirm dialog ────────────────────────────────────────────────────────────
+
+fn on_confirm(app: &mut App, code: KeyCode) -> Result<()> {
+    match code {
+        KeyCode::Char('y') | KeyCode::Char('Y') => {
+            // Pull action out and replace screen
+            let screen = std::mem::replace(&mut app.screen, Screen::Main);
+            if let Screen::Confirm { action, .. } = screen {
+                execute_action(app, action);
+            }
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+            app.screen = Screen::Main;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn execute_action(app: &mut App, action: PendingAction) {
+    let (tx, rx) = mpsc::channel();
+    match action {
+        PendingAction::Remove(name) => {
+            spawn_wryayer(&["remove", &name], tx, false);
+            app.log_scroll = 0;
+            app.screen = Screen::Operation {
+                title: format!("Remove — {name}"),
+                log: vec![],
+                done: false,
+                success: false,
+                rx,
+                total_bytes: None,
+                started: Instant::now(),
+                reload: true,
+            };
+        }
+        PendingAction::Update(name) => {
+            spawn_wryayer(&["update", &name], tx, false);
+            app.log_scroll = 0;
+            app.screen = Screen::Operation {
+                title: format!("Update — {name}"),
+                log: vec![],
+                done: false,
+                success: false,
+                rx,
+                total_bytes: None,
+                started: Instant::now(),
+                reload: true,
+            };
+        }
+        PendingAction::Install(pkg) => {
+            spawn_wryayer(&["install", &pkg], tx, false);
+            app.log_scroll = 0;
+            app.screen = Screen::Operation {
+                title: format!("Install — {pkg}"),
+                log: vec![],
+                done: false,
+                success: false,
+                rx,
+                total_bytes: None,
+                started: Instant::now(),
+                reload: true,
+            };
+        }
+        PendingAction::Backup(name) => {
+            let total = dir_bytes(&format!(
+                "{}/.wryayer/{name}",
+                std::env::var("HOME").unwrap_or_default()
+            ));
+            spawn_wryayer(&["backup", &name], tx, false);
+            app.log_scroll = 0;
+            app.screen = Screen::Operation {
+                title: format!("Backup — {name}"),
+                log: vec![],
+                done: false,
+                success: false,
+                rx,
+                total_bytes: total,
+                started: Instant::now(),
+                reload: false,
+            };
+        }
+    }
+}
+
+// ── Operation screens ─────────────────────────────────────────────────────────
+
+fn on_op_running(app: &mut App, code: KeyCode) {
+    if let Screen::Operation { .. } = &mut app.screen {
+        match code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                if app.log_scroll > 0 {
+                    app.log_scroll -= 1;
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                app.log_scroll += 1;
+            }
+            _ => {}
+        }
+    }
+}
+
+fn on_op_done(app: &mut App, code: KeyCode) -> Result<()> {
+    match code {
+        KeyCode::Up | KeyCode::Char('k') => {
+            if app.log_scroll > 0 {
+                app.log_scroll -= 1;
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            app.log_scroll += 1;
+        }
+        KeyCode::Char('q') | KeyCode::Esc | KeyCode::Enter => {
+            let screen = std::mem::replace(&mut app.screen, Screen::Main);
+            if let Screen::Operation { reload, success, .. } = screen {
+                if reload && success {
+                    app.reload_installed();
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+// ── File input (import) ───────────────────────────────────────────────────────
+
+fn on_file_input(app: &mut App, code: KeyCode) -> Result<()> {
+    match code {
+        KeyCode::Esc => {
+            app.screen = Screen::Main;
+        }
+        KeyCode::Char(c) => {
+            if let Screen::FileInput { ref mut input, .. } = app.screen {
+                input.push(c);
+            }
+        }
+        KeyCode::Backspace => {
+            if let Screen::FileInput { ref mut input, .. } = app.screen {
+                input.pop();
+            }
+        }
+        KeyCode::Enter => {
+            let screen = std::mem::replace(&mut app.screen, Screen::Main);
+            if let Screen::FileInput { input, .. } = screen {
+                let path = shellexpand::tilde(&input).into_owned();
+                let (tx, rx) = mpsc::channel();
+                spawn_wryayer(&["import", &path], tx, false);
+                app.log_scroll = 0;
+                let zip_bytes = std::fs::metadata(&path).ok().map(|m| m.len());
+                app.screen = Screen::Operation {
+                    title: format!("Import — {path}"),
+                    log: vec![],
+                    done: false,
+                    success: false,
+                    rx,
+                    total_bytes: zip_bytes,
+                    started: Instant::now(),
+                    reload: true,
+                };
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+fn spawn_wryayer(args: &[&str], tx: mpsc::Sender<Msg>, _capture_stdout: bool) {
+    let exe = std::env::current_exe().unwrap_or_else(|_| "wryayer".into());
+    let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+    thread::spawn(move || {
+        let mut child = match Command::new(&exe)
+            .args(&args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = tx.send(Msg::Line(format!("error: {e}")));
+                let _ = tx.send(Msg::Done(false));
+                return;
+            }
+        };
+
+        let stderr = child.stderr.take().unwrap();
+        let tx2 = tx.clone();
+        thread::spawn(move || {
+            for line in BufReader::new(stderr).lines().flatten() {
+                let _ = tx2.send(Msg::Line(line));
+            }
+        });
+
+        if let Some(stdout) = child.stdout.take() {
+            for line in BufReader::new(stdout).lines().flatten() {
+                let _ = tx.send(Msg::Line(line));
+            }
+        }
+
+        let ok = child.wait().map(|s| s.success()).unwrap_or(false);
+        let _ = tx.send(Msg::Done(ok));
+    });
+}
+
+fn dir_bytes(path: &str) -> Option<u64> {
+    let out = Command::new("du").args(["-sb", path]).output().ok()?;
+    let s = String::from_utf8_lossy(&out.stdout);
+    s.split_whitespace().next()?.parse().ok()
+}

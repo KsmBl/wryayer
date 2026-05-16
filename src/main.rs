@@ -3,6 +3,7 @@ mod config;
 mod launcher;
 mod manifest;
 mod package;
+mod tui;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -79,6 +80,8 @@ enum Commands {
         /// Path to the zip file created by `wryayer backup`
         path: PathBuf,
     },
+    /// Launch the interactive TUI
+    Tui,
 }
 
 #[derive(Subcommand)]
@@ -159,6 +162,7 @@ fn main() {
             commands::backup::run(&app_name, output.as_ref())
         }
         Commands::Import { path } => commands::import::run(&path),
+        Commands::Tui => tui::run(),
     };
 
     if let Err(e) = result {
