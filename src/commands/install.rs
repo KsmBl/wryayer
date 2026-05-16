@@ -8,7 +8,7 @@ use crate::package::{
 };
 use anyhow::{Context, Result};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub fn run(pkg_name: &str, app_name: Option<&str>, bin_name: Option<&str>) -> Result<()> {
     let app_name = app_name.unwrap_or(pkg_name);
@@ -78,12 +78,13 @@ pub fn run(pkg_name: &str, app_name: Option<&str>, bin_name: Option<&str>) -> Re
 
         eprintln!("Checking for missing shared library dependencies...");
         match satisfy_missing_sonames(&app_dir, &cache_dir) {
-            Ok(extra) if !extra.is_empty() => {
-                eprintln!("  Added: {}", extra.join(", "));
-            }
+            Ok(extra) if !extra.is_empty() => eprintln!("  Added: {}", extra.join(", ")),
             Ok(_) => {}
             Err(e) => eprintln!("  Warning: soname check failed: {e:#}"),
         }
+
+        eprintln!("Building library cache...");
+        run_ldconfig(&app_dir);
 
         let launcher_path = create_launcher(app_name, bin_name)
             .with_context(|| format!("failed to create launcher for {bin_name}"))?;
@@ -127,4 +128,16 @@ pub fn run(pkg_name: &str, app_name: Option<&str>, bin_name: Option<&str>) -> Re
     );
     eprintln!("Run with: ~/bin/{bin_name}  or  wryayer run {app_name}");
     Ok(())
+}
+
+pub fn run_ldconfig(app_dir: &Path) {
+    match std::process::Command::new("ldconfig")
+        .arg("-r")
+        .arg(app_dir)
+        .status()
+    {
+        Ok(s) if !s.success() => eprintln!("  warning: ldconfig exited with {s}"),
+        Err(_) => eprintln!("  warning: ldconfig not found, skipping cache build"),
+        _ => {}
+    }
 }

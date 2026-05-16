@@ -2,12 +2,17 @@ use crate::config::{config_path, read_config, write_config, AppConfig, LocalDele
 use crate::manifest::read_manifest;
 use anyhow::{bail, Context, Result};
 
-pub fn run(app_name: &str, temp_mode: Option<&str>, temp_delete: Option<&str>) -> Result<()> {
+pub fn run(
+    app_name: &str,
+    temp_mode: Option<&str>,
+    temp_delete: Option<&str>,
+    network: Option<&str>,
+) -> Result<()> {
     read_manifest(app_name)
         .with_context(|| format!("'{app_name}' is not installed"))?;
 
     let mut config = read_config(app_name)?;
-    let changed = temp_mode.is_some() || temp_delete.is_some();
+    let changed = temp_mode.is_some() || temp_delete.is_some() || network.is_some();
 
     if let Some(mode) = temp_mode {
         config.temp_mode = match mode {
@@ -25,6 +30,14 @@ pub fn run(app_name: &str, temp_mode: Option<&str>, temp_delete: Option<&str>) -
             "on_start" => LocalDelete::OnStart,
             "on_close" => LocalDelete::OnClose,
             other => bail!("unknown delete policy '{other}'\n  valid: never, on_start, on_close"),
+        };
+    }
+
+    if let Some(val) = network {
+        config.network = match val {
+            "on"  | "true"  | "1" => true,
+            "off" | "false" | "0" => false,
+            other => bail!("unknown network value '{other}'\n  valid: on, off"),
         };
     }
 
@@ -54,4 +67,5 @@ fn print_config(app_name: &str, config: &AppConfig) {
         };
         eprintln!("  temp.delete = {delete}");
     }
+    eprintln!("  network     = {}", if config.network { "on" } else { "off" });
 }

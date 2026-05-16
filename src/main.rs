@@ -5,6 +5,7 @@ mod manifest;
 mod package;
 
 use clap::{Parser, Subcommand};
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(
@@ -49,6 +50,9 @@ enum Commands {
     Update {
         /// The app to update (default: all apps)
         app_name: Option<String>,
+        /// Show available updates without installing them
+        #[arg(long)]
+        check: bool,
     },
     /// Scan an app for missing shared libraries and install them
     Repair {
@@ -61,6 +65,19 @@ enum Commands {
         app_name: String,
         #[command(subcommand)]
         setting: Option<ConfigSetting>,
+    },
+    /// Create a zip backup of an installed app
+    Backup {
+        /// The app name as shown by `wryayer list`
+        app_name: String,
+        /// Output file path (default: ./<app>-YYYY-MM-DD.zip)
+        #[arg(long, short)]
+        output: Option<PathBuf>,
+    },
+    /// Import an app from a wryayer backup zip
+    Import {
+        /// Path to the zip file created by `wryayer backup`
+        path: PathBuf,
     },
 }
 
@@ -81,6 +98,11 @@ enum ConfigSetting {
         /// on_close = wipe when this instance exits
         policy: String,
     },
+    /// Enable or disable network access inside the sandbox
+    Network {
+        /// on = allow internet access (default), off = block all network
+        enabled: String,
+    },
 }
 
 fn main() {
@@ -93,17 +115,26 @@ fn main() {
         Commands::Remove { app_name } => commands::remove::run(&app_name),
         Commands::List => commands::list::run(),
         Commands::Run { app_name, args } => commands::run::run(&app_name, &args),
-        Commands::Update { app_name } => commands::update::run(app_name.as_deref()),
+        Commands::Update { app_name, check } => {
+            commands::update::run(app_name.as_deref(), check)
+        }
         Commands::Repair { app_name } => commands::repair::run(&app_name),
         Commands::Config { app_name, setting } => match setting {
-            None => commands::config::run(&app_name, None, None),
+            None => commands::config::run(&app_name, None, None, None),
             Some(ConfigSetting::Tempmode { mode }) => {
-                commands::config::run(&app_name, Some(&mode), None)
+                commands::config::run(&app_name, Some(&mode), None, None)
             }
             Some(ConfigSetting::Tempdelete { policy }) => {
-                commands::config::run(&app_name, None, Some(&policy))
+                commands::config::run(&app_name, None, Some(&policy), None)
+            }
+            Some(ConfigSetting::Network { enabled }) => {
+                commands::config::run(&app_name, None, None, Some(&enabled))
             }
         },
+        Commands::Backup { app_name, output } => {
+            commands::backup::run(&app_name, output.as_ref())
+        }
+        Commands::Import { path } => commands::import::run(&path),
     };
 
     if let Err(e) = result {

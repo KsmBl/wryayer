@@ -2,6 +2,7 @@ use crate::manifest::{
     app_dir, list_all_apps, now_rfc3339, read_manifest, write_manifest, AppMeta, Manifest,
     PackageEntry, PackageSource,
 };
+use crate::commands::install::run_ldconfig;
 use crate::package::{
     build_aur, download_official, extract_package, resolve_full_dep_tree,
     satisfy_missing_sonames,
@@ -11,7 +12,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-pub fn run(app_name: Option<&str>) -> Result<()> {
+pub fn run(app_name: Option<&str>, check_only: bool) -> Result<()> {
     let manifests = match app_name {
         Some(name) => vec![read_manifest(name)
             .with_context(|| format!("'{name}' is not installed"))?],
@@ -23,12 +24,12 @@ pub fn run(app_name: Option<&str>) -> Result<()> {
         return Ok(());
     }
 
+    let mut has_updates = false;
+
     for manifest in &manifests {
         let name = &manifest.app.name;
         let main_pkg = manifest.packages.iter().find(|p| p.name == manifest.app.name);
         let current_version = main_pkg.map(|p| p.version.as_str()).unwrap_or("0");
-
-        eprintln!("Checking {name}...");
 
         let latest_version = match main_pkg.map(|p| &p.source).unwrap_or(&PackageSource::Official) {
             PackageSource::Official => get_official_version(name)?,
@@ -36,20 +37,26 @@ pub fn run(app_name: Option<&str>) -> Result<()> {
         };
 
         match latest_version {
-            None => {
-                eprintln!("  {name}: package not found, skipping");
-                continue;
-            }
+            None => eprintln!("{name}: package not found, skipping"),
             Some(ref ver) if !is_newer(ver, current_version)? => {
-                eprintln!("  {name}: up to date ({current_version})");
-                continue;
+                if check_only {
+                    eprintln!("{name}: up to date ({current_version})");
+                }
             }
             Some(ref ver) => {
-                eprintln!("  {name}: updating {current_version} -> {ver}");
+                has_updates = true;
+                if check_only {
+                    eprintln!("{name}: update available  {current_version}  ->  {ver}");
+                } else {
+                    eprintln!("{name}: updating {current_version} -> {ver}");
+                    reinstall(manifest)?;
+                }
             }
         }
+    }
 
-        reinstall(manifest)?;
+    if check_only && !has_updates {
+        eprintln!("All apps are up to date.");
     }
 
     Ok(())
@@ -137,6 +144,9 @@ fn reinstall(manifest: &crate::manifest::Manifest) -> Result<()> {
         Ok(_) => {}
         Err(e) => eprintln!("  Warning: soname check failed: {e:#}"),
     }
+
+    eprintln!("Building library cache...");
+    run_ldconfig(&app_dir);
 
     eprintln!("Updated '{app_name}'.");
     Ok(())

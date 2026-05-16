@@ -1,4 +1,6 @@
+pub mod backup;
 pub mod config;
+pub mod import;
 pub mod install;
 pub mod list;
 pub mod remove;

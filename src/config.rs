@@ -29,6 +29,8 @@ pub enum LocalDelete {
 pub struct AppConfig {
     pub temp_mode: TempMode,
     pub temp_delete: LocalDelete,
+    /// Allow outgoing network access inside bwrap (default: true)
+    pub network: bool,
 }
 
 impl Default for AppConfig {
@@ -36,6 +38,7 @@ impl Default for AppConfig {
         Self {
             temp_mode: TempMode::System,
             temp_delete: LocalDelete::OnStart,
+            network: true,
         }
     }
 }
@@ -86,6 +89,13 @@ fn parse_ini(content: &str) -> Result<AppConfig> {
                     other      => bail!("unknown delete policy '{other}' — valid: never, on_start, on_close"),
                 };
             }
+            ("network", v) => {
+                config.network = match v {
+                    "on"  | "true"  | "1" => true,
+                    "off" | "false" | "0" => false,
+                    other => bail!("unknown network value '{other}' — valid: on, off"),
+                };
+            }
             _ => {}
         }
     }
@@ -104,6 +114,7 @@ fn format_ini(config: &AppConfig) -> String {
         LocalDelete::OnStart => "on_start",
         LocalDelete::OnClose => "on_close",
     };
+    let network = if config.network { "on" } else { "off" };
     format!(
         "[temp]\n\
          ; ramdisk = private in-memory tmpfs, discarded on close\n\
@@ -116,6 +127,10 @@ fn format_ini(config: &AppConfig) -> String {
          ; never    = keep temp across restarts\n\
          ; on_start = wipe on launch when no other instance is running\n\
          ; on_close = wipe when this instance exits\n\
-         delete = {delete}\n"
+         delete = {delete}\n\
+         \n\
+         [network]\n\
+         ; on = allow internet access (default), off = block all network\n\
+         network = {network}\n"
     )
 }

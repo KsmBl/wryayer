@@ -20,7 +20,7 @@ pub fn run(app_name: &str, args: &[String]) -> Result<()> {
 
     let (temp, cleanup) = prepare_temp(&config, &app_root)?;
 
-    let mut cmd = bwrap_cmd(&app_root_str, &binary, args, &temp);
+    let mut cmd = bwrap_cmd(&app_root_str, &binary, args, &temp, config.network);
     cmd.env("FONTCONFIG_CACHE", "/tmp/.wryayer-fc-cache");
 
     if let Some(cleanup_path) = cleanup {
@@ -106,7 +106,7 @@ fn kernel_uuid() -> String {
 
 // ── bwrap command builder ─────────────────────────────────────────────────────
 
-fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind) -> Command {
+fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, network: bool) -> Command {
     let mut cmd = Command::new("bwrap");
 
     cmd.args(["--bind", app_root, "/"]);
@@ -130,6 +130,10 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind) -> 
         "/etc/passwd",      "/etc/group",       "/etc/ssl/certs",
     ] {
         cmd.args(["--ro-bind-try", p, p]);
+    }
+
+    if !network {
+        cmd.arg("--unshare-net");
     }
 
     cmd.args(["--", binary]);

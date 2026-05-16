@@ -1,3 +1,4 @@
+use crate::commands::install::run_ldconfig;
 use crate::manifest::{app_dir, read_manifest};
 use crate::package::{find_missing_sonames, satisfy_missing_sonames};
 use anyhow::{Context, Result};
@@ -26,6 +27,8 @@ pub fn run(app_name: &str) -> Result<()> {
         eprintln!("Could not resolve any missing libraries automatically.");
     } else {
         eprintln!("Repaired {app_name}: installed {}", installed.join(", "));
+        eprintln!("Rebuilding library cache...");
+        run_ldconfig(&app_dir);
     }
 
     Ok(())
