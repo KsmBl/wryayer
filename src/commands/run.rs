@@ -126,8 +126,15 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
         TempBind::Dir(d)  => { cmd.args(["--bind",  d.to_str().unwrap_or("/tmp"), "/tmp"]); }
     }
 
-    cmd.args(["--bind", "/run",  "/run"]);
-    cmd.args(["--bind", "/home", "/home"]);
+    cmd.args(["--bind", "/run", "/run"]);
+
+    // No home binding by default — apps are fully isolated from the user's home.
+    // Each entry in shared_dirs is bind-mounted read-write inside the sandbox.
+    for dir in &config.shared_dirs {
+        if std::path::Path::new(dir.as_str()).is_dir() {
+            cmd.args(["--bind", dir.as_str(), dir.as_str()]);
+        }
+    }
 
     // /etc — networking, locale, identity, TLS
     for p in &[

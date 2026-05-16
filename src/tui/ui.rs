@@ -8,7 +8,7 @@ use ratatui::{
 
 use crate::config::{AppConfig, LocalDelete, TempMode};
 
-use super::{App, Screen, Tab, CFG_LEN, CFG_SAVE};
+use super::{App, Screen, Tab, CFG_SAVE};
 
 const C_ACCENT: Color = Color::Cyan;
 const C_GREEN: Color = Color::Green;
@@ -16,7 +16,6 @@ const C_RED: Color = Color::Red;
 const C_YELLOW: Color = Color::Yellow;
 const C_DIM: Color = Color::DarkGray;
 const C_SELECT: Color = Color::Rgb(40, 60, 80);
-const C_SELECT_RED: Color = Color::Rgb(80, 20, 20);
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
@@ -59,15 +58,21 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             let selected = *selected;
             draw_config(f, area, &app_name, &config, selected);
         }
-        Screen::FileBrowser { current_dir, entries, fb_state } => {
+        Screen::SharedDirs { app_name, dirs, selected } => {
+            let app_name = app_name.clone();
+            let dirs = dirs.clone();
+            let selected = *selected;
+            draw_shared_dirs(f, area, &app_name, &dirs, selected);
+        }
+        Screen::FileBrowser { current_dir, entries, fb_state, pick_dir_for } => {
             let title = current_dir.to_string_lossy().into_owned();
             let entries: Vec<(String, bool, bool)> = entries
                 .iter()
                 .map(|e| (e.name.clone(), e.is_dir, e.is_zip))
                 .collect();
-            // Need mutable fb_state — reconstruct via index only
             let sel = fb_state.selected();
-            draw_file_browser(f, area, &title, &entries, sel);
+            let pick_dir = pick_dir_for.is_some();
+            draw_file_browser(f, area, &title, &entries, sel, pick_dir);
         }
     }
 }
@@ -436,22 +441,28 @@ fn draw_config(f: &mut Frame, area: Rect, app_name: &str, config: &AppConfig, se
     f.render_widget(block, popup);
 
     let b = |v: bool| if v { "  on " } else { " off " };
-    let rows: &[(&str, &str)] = &[
-        ("Network    ", b(config.network)),
-        ("Camera     ", b(config.camera)),
-        ("Microphone ", b(config.microphone)),
-        ("Audio      ", b(config.audio)),
+    let share_label = if config.shared_dirs.is_empty() {
+        " none  →".to_string()
+    } else {
+        format!(" {}  →", config.shared_dirs.len())
+    };
+    let rows: Vec<(&str, String)> = vec![
+        ("Network    ", b(config.network).to_string()),
+        ("Camera     ", b(config.camera).to_string()),
+        ("Microphone ", b(config.microphone).to_string()),
+        ("Audio      ", b(config.audio).to_string()),
         ("Temp mode  ", match config.temp_mode {
             TempMode::System  => " system  ",
             TempMode::Ramdisk => " ramdisk ",
             TempMode::Local   => " local   ",
             TempMode::Uuid    => " uuid    ",
-        }),
+        }.to_string()),
         ("Temp delete", match config.temp_delete {
             LocalDelete::Never   => " never    ",
             LocalDelete::OnStart => " on_start ",
             LocalDelete::OnClose => " on_close ",
-        }),
+        }.to_string()),
+        ("Shared dirs", share_label),
     ];
 
     let row_h = 2u16;
@@ -537,6 +548,64 @@ fn draw_config(f: &mut Frame, area: Rect, app_name: &str, config: &AppConfig, se
     );
 }
 
+// ── Shared dirs overlay ───────────────────────────────────────────────────────
+
+fn draw_shared_dirs(f: &mut Frame, area: Rect, app_name: &str, dirs: &[String], selected: usize) {
+    let popup = centered_rect(60, 70, area);
+    f.render_widget(Clear, popup);
+
+    let block = Block::default().borders(Borders::ALL)
+        .title(format!(" Shared Folders — {app_name} "))
+        .title_style(Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD))
+        .border_style(Style::default().fg(C_ACCENT));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .split(inner);
+
+    if dirs.is_empty() {
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                "  No directories shared. Press [a] to add one.",
+                Style::default().fg(C_DIM),
+            )).wrap(Wrap { trim: false }),
+            chunks[0],
+        );
+    } else {
+        let items: Vec<ListItem> = dirs.iter().enumerate().map(|(i, d)| {
+            let is_sel = i == selected;
+            let style = if is_sel {
+                Style::default().fg(Color::White).bg(C_SELECT).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(C_ACCENT)
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(if is_sel { " ▶ " } else { "   " }, Style::default().fg(C_ACCENT)),
+                Span::styled(d.as_str(), style),
+            ]))
+        }).collect();
+
+        let mut list_state = ListState::default();
+        list_state.select(if dirs.is_empty() { None } else { Some(selected) });
+
+        let list = List::new(items)
+            .block(Block::default())
+            .highlight_style(Style::default().bg(C_SELECT));
+        f.render_stateful_widget(list, chunks[0], &mut list_state);
+    }
+
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            " [a] Add  [d/Del] Remove  [Esc/q] Back",
+            Style::default().fg(C_DIM),
+        )),
+        chunks[1],
+    );
+}
+
 // ── File browser overlay ──────────────────────────────────────────────────────
 
 fn draw_file_browser(
@@ -545,6 +614,7 @@ fn draw_file_browser(
     current_dir: &str,
     entries: &[(String, bool, bool)], // (name, is_dir, is_zip)
     selected: Option<usize>,
+    pick_dir: bool,
 ) {
     let popup = centered_rect(70, 80, area);
     f.render_widget(Clear, popup);
@@ -591,11 +661,13 @@ fn draw_file_browser(
 
     f.render_stateful_widget(list, chunks[0], &mut list_state);
 
+    let footer = if pick_dir {
+        " [↑↓/jk] Navigate  [Enter/→] Open dir  [Space/s] Select this dir  [Esc] Cancel"
+    } else {
+        " [↑↓/jk] Navigate  [Enter/→] Open  [Backspace/←] Up  [q/Esc] Cancel"
+    };
     f.render_widget(
-        Paragraph::new(Span::styled(
-            " [↑↓/jk] Navigate  [Enter/→] Open  [Backspace/←] Up  [q/Esc] Cancel",
-            Style::default().fg(C_DIM),
-        )),
+        Paragraph::new(Span::styled(footer, Style::default().fg(C_DIM))),
         chunks[1],
     );
 }

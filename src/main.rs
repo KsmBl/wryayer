@@ -121,6 +121,27 @@ enum ConfigSetting {
         /// on = allow audio output (default), off = mask ALSA + PipeWire/PulseAudio
         enabled: String,
     },
+    /// Manage host directories shared read-write into the sandbox
+    Share {
+        #[command(subcommand)]
+        action: ShareAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum ShareAction {
+    /// Add a directory to the shared list
+    Add {
+        /// Absolute path of the directory to share
+        path: String,
+    },
+    /// Remove a directory from the shared list
+    Remove {
+        /// Absolute path of the directory to remove
+        path: String,
+    },
+    /// List currently shared directories
+    List,
 }
 
 fn main() {
@@ -157,6 +178,11 @@ fn main() {
             Some(ConfigSetting::Audio { enabled }) => {
                 commands::config::run(&app_name, None, None, None, None, None, Some(&enabled))
             }
+            Some(ConfigSetting::Share { action }) => match action {
+                ShareAction::Add { path } => commands::config::share_add(&app_name, &path),
+                ShareAction::Remove { path } => commands::config::share_remove(&app_name, &path),
+                ShareAction::List => commands::config::share_list(&app_name),
+            },
         },
         Commands::Backup { app_name, output } => {
             commands::backup::run(&app_name, output.as_ref())

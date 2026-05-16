@@ -1,6 +1,7 @@
 use crate::config::{config_path, read_config, write_config, AppConfig, LocalDelete, TempMode};
 use crate::manifest::read_manifest;
 use anyhow::{bail, Context, Result};
+use std::path::Path;
 
 pub fn run(
     app_name: &str,
@@ -62,6 +63,51 @@ pub fn run(
     Ok(())
 }
 
+pub fn share_add(app_name: &str, raw_path: &str) -> Result<()> {
+    read_manifest(app_name).with_context(|| format!("'{app_name}' is not installed"))?;
+    let path = shellexpand::tilde(raw_path).into_owned();
+    if !Path::new(&path).is_dir() {
+        bail!("not a directory: {path}");
+    }
+    let mut config = read_config(app_name)?;
+    if config.shared_dirs.contains(&path) {
+        eprintln!("already shared: {path}");
+    } else {
+        config.shared_dirs.push(path.clone());
+        write_config(app_name, &config)?;
+        eprintln!("added shared dir: {path}");
+    }
+    Ok(())
+}
+
+pub fn share_remove(app_name: &str, raw_path: &str) -> Result<()> {
+    read_manifest(app_name).with_context(|| format!("'{app_name}' is not installed"))?;
+    let path = shellexpand::tilde(raw_path).into_owned();
+    let mut config = read_config(app_name)?;
+    let before = config.shared_dirs.len();
+    config.shared_dirs.retain(|d| d != &path);
+    if config.shared_dirs.len() < before {
+        write_config(app_name, &config)?;
+        eprintln!("removed shared dir: {path}");
+    } else {
+        eprintln!("not found: {path}");
+    }
+    Ok(())
+}
+
+pub fn share_list(app_name: &str) -> Result<()> {
+    read_manifest(app_name).with_context(|| format!("'{app_name}' is not installed"))?;
+    let config = read_config(app_name)?;
+    if config.shared_dirs.is_empty() {
+        eprintln!("[{app_name}] no shared directories");
+    } else {
+        for d in &config.shared_dirs {
+            println!("{d}");
+        }
+    }
+    Ok(())
+}
+
 fn print_config(app_name: &str, config: &AppConfig) {
     let b = |v: bool| if v { "on" } else { "off" };
     let mode = match config.temp_mode {
@@ -89,4 +135,12 @@ fn print_config(app_name: &str, config: &AppConfig) {
         eprintln!("    the mic. Set audio = off to block it completely.");
     }
     eprintln!("  audio       = {}", b(config.audio));
+    if config.shared_dirs.is_empty() {
+        eprintln!("  shared dirs = (none)");
+    } else {
+        eprintln!("  shared dirs:");
+        for d in &config.shared_dirs {
+            eprintln!("    {d}");
+        }
+    }
 }

@@ -61,10 +61,17 @@ pub enum Screen {
         config: AppConfig,
         selected: usize,
     },
+    SharedDirs {
+        app_name: String,
+        dirs: Vec<String>,
+        selected: usize,
+    },
     FileBrowser {
         current_dir: PathBuf,
         entries: Vec<FbEntry>,
         fb_state: ListState,
+        /// Some(app_name) = dir-pick mode for shared dirs; None = zip import mode
+        pick_dir_for: Option<String>,
     },
 }
 
@@ -250,6 +257,7 @@ fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
         Screen::Operation { done: true, .. } => 3,
         Screen::Config { .. } => 4,
         Screen::FileBrowser { .. } => 5,
+        Screen::SharedDirs { .. } => 6,
     };
 
     match tag {
@@ -259,6 +267,7 @@ fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
         3 => on_op_done(app, code)?,
         4 => on_config(app, code),
         5 => on_file_browser(app, code),
+        6 => on_shared_dirs(app, code),
         _ => {}
     }
     Ok(())
@@ -521,13 +530,8 @@ fn on_import(app: &mut App, code: KeyCode) {
         KeyCode::Char(c) => app.import_input.push(c),
         KeyCode::Backspace => { app.import_input.pop(); }
         KeyCode::Tab | KeyCode::BackTab => {} // handled by on_main already
-        KeyCode::Char('b') => {
-            // 'b' already handled by Char(c) above, but we want file browser
-            // This arm is unreachable because Char('b') matches Char(c) first
-            // — handled below in a dedicated check
-        }
         KeyCode::F(1) | KeyCode::F(2) => {
-            open_file_browser(app);
+            open_file_browser(app, None);
         }
         KeyCode::Enter => {
             let raw = app.import_input.trim().to_string();
@@ -622,9 +626,10 @@ fn on_op_done(app: &mut App, code: KeyCode) -> Result<()> {
 
 // ── Config screen ─────────────────────────────────────────────────────────────
 
-// Rows: 0=network 1=camera 2=microphone 3=audio 4=temp_mode 5=temp_delete 6=Save button
-pub const CFG_LEN: usize = 7;
-pub const CFG_SAVE: usize = 6;
+// Rows: 0=network 1=camera 2=microphone 3=audio 4=temp_mode 5=temp_delete 6=shared_dirs 7=Save
+pub const CFG_LEN: usize = 8;
+pub const CFG_SHARES: usize = 6;
+pub const CFG_SAVE: usize = 7;
 
 fn on_config(app: &mut App, code: KeyCode) {
     let Screen::Config { app_name, config, selected } = &mut app.screen else { return };
@@ -648,6 +653,14 @@ fn on_config(app: &mut App, code: KeyCode) {
                 let cfg = config.clone();
                 app.screen = Screen::Main;
                 let _ = write_config(&name, &cfg);
+                app.needs_clear = true;
+                return;
+            }
+            if *selected == CFG_SHARES {
+                let name = app_name.clone();
+                let dirs = config.shared_dirs.clone();
+                let sel = if dirs.is_empty() { 0 } else { dirs.len() - 1 };
+                app.screen = Screen::SharedDirs { app_name: name, dirs, selected: sel };
                 app.needs_clear = true;
                 return;
             }
@@ -678,9 +691,49 @@ fn on_config(app: &mut App, code: KeyCode) {
     }
 }
 
+// ── Shared dirs screen ────────────────────────────────────────────────────────
+
+fn on_shared_dirs(app: &mut App, code: KeyCode) {
+    let Screen::SharedDirs { app_name, dirs, selected } = &mut app.screen else { return };
+    match code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            let name = app_name.clone();
+            let config = read_config(&name).unwrap_or_default();
+            app.screen = Screen::Config { app_name: name, config, selected: CFG_SHARES };
+            app.needs_clear = true;
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            *selected = selected.saturating_sub(1);
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if !dirs.is_empty() {
+                *selected = (*selected + 1).min(dirs.len() - 1);
+            }
+        }
+        KeyCode::Char('d') | KeyCode::Delete => {
+            if !dirs.is_empty() {
+                let name = app_name.clone();
+                let idx = *selected;
+                dirs.remove(idx);
+                if !dirs.is_empty() && idx >= dirs.len() {
+                    *selected = dirs.len() - 1;
+                }
+                let mut config = read_config(&name).unwrap_or_default();
+                config.shared_dirs = dirs.clone();
+                let _ = write_config(&name, &config);
+            }
+        }
+        KeyCode::Char('a') => {
+            let name = app_name.clone();
+            open_file_browser(app, Some(name));
+        }
+        _ => {}
+    }
+}
+
 // ── File browser ──────────────────────────────────────────────────────────────
 
-fn open_file_browser(app: &mut App) {
+fn open_file_browser(app: &mut App, pick_dir_for: Option<String>) {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
     let dir = PathBuf::from(home);
     let entries = load_dir_entries(&dir);
@@ -688,7 +741,7 @@ fn open_file_browser(app: &mut App) {
     if !entries.is_empty() {
         fb_state.select(Some(0));
     }
-    app.screen = Screen::FileBrowser { current_dir: dir, entries, fb_state };
+    app.screen = Screen::FileBrowser { current_dir: dir, entries, fb_state, pick_dir_for };
 }
 
 fn load_dir_entries(dir: &PathBuf) -> Vec<FbEntry> {
@@ -713,15 +766,23 @@ enum FbAction {
     Nothing,
     EnterDir(PathBuf),
     SelectFile(String),
+    /// Pick-dir mode: user selected `path` for `app_name`
+    SelectDir { path: PathBuf, app_name: String },
     GoUp,
-    Close,
+    /// None = return to Import tab; Some(app_name) = return to SharedDirs
+    Close(Option<String>),
 }
 
 fn on_file_browser(app: &mut App, code: KeyCode) {
     let action = {
-        let Screen::FileBrowser { current_dir, entries, fb_state } = &mut app.screen else { return };
+        let Screen::FileBrowser { current_dir, entries, fb_state, pick_dir_for } = &mut app.screen else { return };
+        let pick = pick_dir_for.clone();
         match code {
-            KeyCode::Esc | KeyCode::Char('q') => FbAction::Close,
+            KeyCode::Esc | KeyCode::Char('q') => FbAction::Close(pick),
+            // Space / s selects the current directory in pick-dir mode
+            KeyCode::Char(' ') | KeyCode::Char('s') if pick.is_some() => {
+                FbAction::SelectDir { path: current_dir.clone(), app_name: pick.unwrap() }
+            }
             KeyCode::Up | KeyCode::Char('k') => {
                 let i = fb_state.selected().unwrap_or(0);
                 fb_state.select(Some(i.saturating_sub(1)));
@@ -733,18 +794,14 @@ fn on_file_browser(app: &mut App, code: KeyCode) {
                 FbAction::Nothing
             }
             KeyCode::Left | KeyCode::Backspace => {
-                if let Some(parent) = current_dir.parent() {
-                    FbAction::GoUp
-                } else {
-                    FbAction::Nothing
-                }
+                if current_dir.parent().is_some() { FbAction::GoUp } else { FbAction::Nothing }
             }
             KeyCode::Enter | KeyCode::Right => {
                 let i = fb_state.selected().unwrap_or(0);
                 if let Some(entry) = entries.get(i) {
                     if entry.is_dir {
                         FbAction::EnterDir(current_dir.join(&entry.name))
-                    } else if entry.is_zip {
+                    } else if entry.is_zip && pick.is_none() {
                         FbAction::SelectFile(
                             current_dir.join(&entry.name).to_string_lossy().into_owned(),
                         )
@@ -761,12 +818,20 @@ fn on_file_browser(app: &mut App, code: KeyCode) {
 
     match action {
         FbAction::Nothing => {}
-        FbAction::Close => {
+        FbAction::Close(None) => {
             app.screen = Screen::Main;
             app.tab = Tab::Import;
+            app.needs_clear = true;
+        }
+        FbAction::Close(Some(app_name)) => {
+            let config = read_config(&app_name).unwrap_or_default();
+            let dirs = config.shared_dirs;
+            let selected = dirs.len().saturating_sub(1);
+            app.screen = Screen::SharedDirs { app_name, dirs, selected };
+            app.needs_clear = true;
         }
         FbAction::GoUp => {
-            if let Screen::FileBrowser { current_dir, entries, fb_state } = &mut app.screen {
+            if let Screen::FileBrowser { current_dir, entries, fb_state, .. } = &mut app.screen {
                 if let Some(parent) = current_dir.parent().map(|p| p.to_path_buf()) {
                     *entries = load_dir_entries(&parent);
                     *current_dir = parent;
@@ -775,7 +840,7 @@ fn on_file_browser(app: &mut App, code: KeyCode) {
             }
         }
         FbAction::EnterDir(new_dir) => {
-            if let Screen::FileBrowser { current_dir, entries, fb_state } = &mut app.screen {
+            if let Screen::FileBrowser { current_dir, entries, fb_state, .. } = &mut app.screen {
                 let new_entries = load_dir_entries(&new_dir);
                 *current_dir = new_dir;
                 *entries = new_entries;
@@ -786,6 +851,18 @@ fn on_file_browser(app: &mut App, code: KeyCode) {
             app.import_input = path;
             app.screen = Screen::Main;
             app.tab = Tab::Import;
+        }
+        FbAction::SelectDir { path, app_name } => {
+            let path_str = path.to_string_lossy().into_owned();
+            let mut config = read_config(&app_name).unwrap_or_default();
+            if !config.shared_dirs.contains(&path_str) {
+                config.shared_dirs.push(path_str);
+                let _ = write_config(&app_name, &config);
+            }
+            let dirs = config.shared_dirs;
+            let selected = dirs.len().saturating_sub(1);
+            app.screen = Screen::SharedDirs { app_name, dirs, selected };
+            app.needs_clear = true;
         }
     }
 }

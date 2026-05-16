@@ -37,6 +37,8 @@ pub struct AppConfig {
     pub microphone: bool,
     /// Allow ALSA playback + PipeWire/PulseAudio audio output (default: true)
     pub audio: bool,
+    /// Host directories bind-mounted read-write inside the sandbox (default: none)
+    pub shared_dirs: Vec<String>,
 }
 
 impl Default for AppConfig {
@@ -48,6 +50,7 @@ impl Default for AppConfig {
             camera: true,
             microphone: true,
             audio: true,
+            shared_dirs: Vec::new(),
         }
     }
 }
@@ -114,6 +117,9 @@ fn parse_ini(content: &str) -> Result<AppConfig> {
                 config.audio = parse_bool(v)
                     .map_err(|_| anyhow::anyhow!("unknown audio value '{v}' — valid: on, off"))?;
             }
+            ("share_dir", v) if !v.is_empty() => {
+                config.shared_dirs.push(v.to_owned());
+            }
             _ => {}
         }
     }
@@ -141,7 +147,7 @@ fn format_ini(config: &AppConfig) -> String {
         LocalDelete::OnClose => "on_close",
     };
     let b = |v: bool| if v { "on" } else { "off" };
-    format!(
+    let mut s = format!(
         "[temp]\n\
          ; ramdisk = private in-memory tmpfs, discarded on close\n\
          ; local   = persistent per-app dir ~/.wryayer/<app>/.tmp/\n\
@@ -170,5 +176,13 @@ fn format_ini(config: &AppConfig) -> String {
         b(config.camera),
         b(config.microphone),
         b(config.audio),
-    )
+    );
+    if !config.shared_dirs.is_empty() {
+        s.push_str("\n[share]\n");
+        s.push_str("; Host directories bind-mounted read-write inside the sandbox\n");
+        for dir in &config.shared_dirs {
+            s.push_str(&format!("share_dir = {dir}\n"));
+        }
+    }
+    s
 }
