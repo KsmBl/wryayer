@@ -2,6 +2,7 @@ mod ui;
 
 use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
@@ -17,6 +18,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::widgets::ListState;
 use ratatui::Terminal;
 
+use crate::config::{read_config, write_config, AppConfig, LocalDelete, TempMode};
 use crate::manifest::{list_all_apps, Manifest};
 
 // ── Op messages ───────────────────────────────────────────────────────────────
@@ -24,6 +26,14 @@ use crate::manifest::{list_all_apps, Manifest};
 pub enum Msg {
     Line(String),
     Done(bool),
+}
+
+// ── File browser entry ────────────────────────────────────────────────────────
+
+pub struct FbEntry {
+    pub name: String,
+    pub is_dir: bool,
+    pub is_zip: bool,
 }
 
 // ── Screen overlays ───────────────────────────────────────────────────────────
@@ -34,6 +44,7 @@ pub enum Screen {
         title: String,
         body: Vec<String>,
         action: PendingAction,
+        danger: bool,
     },
     Operation {
         title: String,
@@ -45,10 +56,21 @@ pub enum Screen {
         started: Instant,
         reload: bool,
     },
+    Config {
+        app_name: String,
+        config: AppConfig,
+        selected: usize,
+    },
+    FileBrowser {
+        current_dir: PathBuf,
+        entries: Vec<FbEntry>,
+        fb_state: ListState,
+    },
 }
 
 pub enum PendingAction {
     Remove(String),
+    ConfirmedRemove(String),
     Update(String),
     Install(String),
     Backup(String),
@@ -87,6 +109,7 @@ pub struct App {
     pub screen: Screen,
     pub status: String,
     pub log_scroll: usize,
+    pub needs_clear: bool,
 }
 
 impl App {
@@ -115,6 +138,7 @@ impl App {
             screen: Screen::Main,
             status: String::new(),
             log_scroll: 0,
+            needs_clear: false,
         })
     }
 
@@ -172,19 +196,19 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(
             }
         }
 
-        // Drain async search results — only apply if generation matches
+        // Drain async search results
         loop {
             match app.search_rx.try_recv() {
                 Ok((gen, results)) if gen == app.search_gen => {
                     app.search_results = results;
                     app.search_searching = false;
-                    if app.search_results.is_empty() {
-                        app.status = "No results.".into();
+                    app.status = if app.search_results.is_empty() {
+                        "No results.".into()
                     } else {
-                        app.status = format!("{} results", app.search_results.len());
-                    }
+                        format!("{} results", app.search_results.len())
+                    };
                 }
-                Ok(_) => {} // stale generation, discard
+                Ok(_) => {}
                 Err(_) => break,
             }
         }
@@ -203,7 +227,15 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(
             if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
                 return Ok(());
             }
+            // Shift+Q force-quits from anywhere, even during running operations
+            if key.code == KeyCode::Char('Q') {
+                return Ok(());
+            }
             handle_key(&mut app, key.code)?;
+            if app.needs_clear {
+                app.needs_clear = false;
+                terminal.clear()?;
+            }
         }
     }
 }
@@ -216,6 +248,8 @@ fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
         Screen::Confirm { .. } => 1,
         Screen::Operation { done: false, .. } => 2,
         Screen::Operation { done: true, .. } => 3,
+        Screen::Config { .. } => 4,
+        Screen::FileBrowser { .. } => 5,
     };
 
     match tag {
@@ -223,6 +257,8 @@ fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
         1 => on_confirm(app, code)?,
         2 => on_op_running(app, code),
         3 => on_op_done(app, code)?,
+        4 => on_config(app, code),
+        5 => on_file_browser(app, code),
         _ => {}
     }
     Ok(())
@@ -231,11 +267,8 @@ fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
 // ── Main screen ───────────────────────────────────────────────────────────────
 
 fn on_main(app: &mut App, code: KeyCode) -> Result<()> {
+    // Tab cycling — always active
     match code {
-        KeyCode::Char('q') | KeyCode::Esc => {
-            app.quit = true;
-            return Ok(());
-        }
         KeyCode::Tab => {
             app.tab = match app.tab {
                 Tab::Installed => Tab::Install,
@@ -245,7 +278,24 @@ fn on_main(app: &mut App, code: KeyCode) -> Result<()> {
             app.status.clear();
             return Ok(());
         }
+        KeyCode::BackTab => {
+            app.tab = match app.tab {
+                Tab::Installed => Tab::Import,
+                Tab::Install => Tab::Installed,
+                Tab::Import => Tab::Install,
+            };
+            app.status.clear();
+            return Ok(());
+        }
         _ => {}
+    }
+
+    // 'q' / Esc quit only when NOT in the Import text-input tab
+    if !matches!(app.tab, Tab::Import) {
+        if matches!(code, KeyCode::Char('q') | KeyCode::Esc) {
+            app.quit = true;
+            return Ok(());
+        }
     }
 
     match app.tab {
@@ -285,11 +335,12 @@ fn on_installed(app: &mut App, code: KeyCode) {
                 app.screen = Screen::Confirm {
                     title: format!("Remove '{name}'?"),
                     body: vec![
-                        format!("This deletes ~/.wryayer/{name}/ and all launchers."),
+                        format!("Delete ~/.wryayer/{name}/ and all launchers?"),
                         String::new(),
-                        "Press y to confirm, n or Esc to cancel.".into(),
+                        "Press y to continue, n or Esc to cancel.".into(),
                     ],
                     action: PendingAction::Remove(name),
+                    danger: true,
                 };
             }
         }
@@ -305,6 +356,7 @@ fn on_installed(app: &mut App, code: KeyCode) {
                         "Press y to confirm, n or Esc to cancel.".into(),
                     ],
                     action: PendingAction::Backup(name),
+                    danger: false,
                 };
             }
         }
@@ -322,11 +374,7 @@ fn on_installed(app: &mut App, code: KeyCode) {
                     Some(ref v) => {
                         let cur = m.packages.iter().find(|p| p.name == name)
                             .map(|p| p.version.as_str()).unwrap_or("?");
-                        vec![
-                            format!("  {cur}  →  {v}"),
-                            String::new(),
-                            "Press y to update, n or Esc to cancel.".into(),
-                        ]
+                        vec![format!("  {cur}  →  {v}"), String::new(), "Press y to update, n or Esc to cancel.".into()]
                     }
                     None => vec![
                         "Run [c]heck first to verify an update is available.".into(),
@@ -338,7 +386,15 @@ fn on_installed(app: &mut App, code: KeyCode) {
                     title: format!("Update '{name}'?"),
                     body,
                     action: PendingAction::Update(name),
+                    danger: false,
                 };
+            }
+        }
+        KeyCode::Char('s') => {
+            if let Some(m) = app.selected_installed() {
+                let name = m.app.name.clone();
+                let config = read_config(&name).unwrap_or_default();
+                app.screen = Screen::Config { app_name: name, config, selected: 0 };
             }
         }
         _ => {}
@@ -396,6 +452,7 @@ fn on_install(app: &mut App, code: KeyCode) {
                                 "Press y to uninstall, n or Esc to cancel.".into(),
                             ],
                             action: PendingAction::Remove(pkg),
+                            danger: true,
                         };
                     } else {
                         app.screen = Screen::Confirm {
@@ -406,6 +463,7 @@ fn on_install(app: &mut App, code: KeyCode) {
                                 "Press y to confirm, n or Esc to cancel.".into(),
                             ],
                             action: PendingAction::Install(pkg),
+                            danger: false,
                         };
                     }
                 }
@@ -422,7 +480,7 @@ fn on_install(app: &mut App, code: KeyCode) {
 fn trigger_search(app: &mut App) {
     let query = app.search_input.trim().to_string();
     if query.is_empty() {
-        app.search_gen += 1; // invalidate any in-flight search
+        app.search_gen += 1;
         app.search_results.clear();
         app.search_searching = false;
         app.status.clear();
@@ -447,8 +505,30 @@ fn trigger_search(app: &mut App) {
 
 fn on_import(app: &mut App, code: KeyCode) {
     match code {
+        KeyCode::Esc => {
+            // Clear input or switch away
+            if app.import_input.is_empty() {
+                app.tab = Tab::Installed;
+            } else {
+                app.import_input.clear();
+            }
+        }
+        KeyCode::Char('q') => {
+            // In import tab 'q' is intercepted here — typing 'q' into the path
+            // To quit from import tab, use Shift+Q
+            app.import_input.push('q');
+        }
         KeyCode::Char(c) => app.import_input.push(c),
         KeyCode::Backspace => { app.import_input.pop(); }
+        KeyCode::Tab | KeyCode::BackTab => {} // handled by on_main already
+        KeyCode::Char('b') => {
+            // 'b' already handled by Char(c) above, but we want file browser
+            // This arm is unreachable because Char('b') matches Char(c) first
+            // — handled below in a dedicated check
+        }
+        KeyCode::F(1) | KeyCode::F(2) => {
+            open_file_browser(app);
+        }
         KeyCode::Enter => {
             let raw = app.import_input.trim().to_string();
             if raw.is_empty() {
@@ -483,7 +563,20 @@ fn on_confirm(app: &mut App, code: KeyCode) -> Result<()> {
 
 fn execute_action(app: &mut App, action: PendingAction) {
     match action {
-        PendingAction::Remove(name) =>
+        PendingAction::Remove(name) => {
+            // Double-confirm: first press shows this second dialog
+            app.screen = Screen::Confirm {
+                title: format!("PERMANENTLY delete '{name}'?"),
+                body: vec![
+                    "This cannot be undone.".into(),
+                    String::new(),
+                    "Press y again to permanently delete, n or Esc to cancel.".into(),
+                ],
+                action: PendingAction::ConfirmedRemove(name),
+                danger: true,
+            };
+        }
+        PendingAction::ConfirmedRemove(name) =>
             launch_op(app, format!("Remove — {name}"), vec!["remove".into(), name], None, true),
         PendingAction::Update(name) =>
             launch_op(app, format!("Update — {name}"), vec!["update".into(), name], None, true),
@@ -520,10 +613,181 @@ fn on_op_done(app: &mut App, code: KeyCode) -> Result<()> {
                     app.reload_installed();
                 }
             }
+            app.needs_clear = true;
         }
         _ => {}
     }
     Ok(())
+}
+
+// ── Config screen ─────────────────────────────────────────────────────────────
+
+// Rows: 0=network 1=camera 2=microphone 3=audio 4=temp_mode 5=temp_delete 6=Save button
+pub const CFG_LEN: usize = 7;
+pub const CFG_SAVE: usize = 6;
+
+fn on_config(app: &mut App, code: KeyCode) {
+    let Screen::Config { app_name, config, selected } = &mut app.screen else { return };
+
+    match code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            // Discard changes
+            app.screen = Screen::Main;
+            app.needs_clear = true;
+            return;
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            *selected = selected.saturating_sub(1);
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            *selected = (*selected + 1).min(CFG_LEN - 1);
+        }
+        KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') | KeyCode::Enter => {
+            if *selected == CFG_SAVE {
+                let name = app_name.clone();
+                let cfg = config.clone();
+                app.screen = Screen::Main;
+                let _ = write_config(&name, &cfg);
+                app.needs_clear = true;
+                return;
+            }
+            match *selected {
+                0 => config.network = !config.network,
+                1 => config.camera = !config.camera,
+                2 => config.microphone = !config.microphone,
+                3 => config.audio = !config.audio,
+                4 => {
+                    config.temp_mode = match config.temp_mode {
+                        TempMode::System  => TempMode::Ramdisk,
+                        TempMode::Ramdisk => TempMode::Local,
+                        TempMode::Local   => TempMode::Uuid,
+                        TempMode::Uuid    => TempMode::System,
+                    };
+                }
+                5 => {
+                    config.temp_delete = match config.temp_delete {
+                        LocalDelete::Never   => LocalDelete::OnStart,
+                        LocalDelete::OnStart => LocalDelete::OnClose,
+                        LocalDelete::OnClose => LocalDelete::Never,
+                    };
+                }
+                _ => {}
+            }
+        }
+        _ => {}
+    }
+}
+
+// ── File browser ──────────────────────────────────────────────────────────────
+
+fn open_file_browser(app: &mut App) {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+    let dir = PathBuf::from(home);
+    let entries = load_dir_entries(&dir);
+    let mut fb_state = ListState::default();
+    if !entries.is_empty() {
+        fb_state.select(Some(0));
+    }
+    app.screen = Screen::FileBrowser { current_dir: dir, entries, fb_state };
+}
+
+fn load_dir_entries(dir: &PathBuf) -> Vec<FbEntry> {
+    let mut entries = vec![];
+    let Ok(rd) = std::fs::read_dir(dir) else { return entries };
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') { continue; }
+        let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        let is_zip = name.ends_with(".zip");
+        entries.push(FbEntry { name, is_dir, is_zip });
+    }
+    entries.sort_by(|a, b| match (a.is_dir, b.is_dir) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => a.name.cmp(&b.name),
+    });
+    entries
+}
+
+enum FbAction {
+    Nothing,
+    EnterDir(PathBuf),
+    SelectFile(String),
+    GoUp,
+    Close,
+}
+
+fn on_file_browser(app: &mut App, code: KeyCode) {
+    let action = {
+        let Screen::FileBrowser { current_dir, entries, fb_state } = &mut app.screen else { return };
+        match code {
+            KeyCode::Esc | KeyCode::Char('q') => FbAction::Close,
+            KeyCode::Up | KeyCode::Char('k') => {
+                let i = fb_state.selected().unwrap_or(0);
+                fb_state.select(Some(i.saturating_sub(1)));
+                FbAction::Nothing
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                let i = fb_state.selected().unwrap_or(0);
+                fb_state.select(Some((i + 1).min(entries.len().saturating_sub(1))));
+                FbAction::Nothing
+            }
+            KeyCode::Left | KeyCode::Backspace => {
+                if let Some(parent) = current_dir.parent() {
+                    FbAction::GoUp
+                } else {
+                    FbAction::Nothing
+                }
+            }
+            KeyCode::Enter | KeyCode::Right => {
+                let i = fb_state.selected().unwrap_or(0);
+                if let Some(entry) = entries.get(i) {
+                    if entry.is_dir {
+                        FbAction::EnterDir(current_dir.join(&entry.name))
+                    } else if entry.is_zip {
+                        FbAction::SelectFile(
+                            current_dir.join(&entry.name).to_string_lossy().into_owned(),
+                        )
+                    } else {
+                        FbAction::Nothing
+                    }
+                } else {
+                    FbAction::Nothing
+                }
+            }
+            _ => FbAction::Nothing,
+        }
+    };
+
+    match action {
+        FbAction::Nothing => {}
+        FbAction::Close => {
+            app.screen = Screen::Main;
+            app.tab = Tab::Import;
+        }
+        FbAction::GoUp => {
+            if let Screen::FileBrowser { current_dir, entries, fb_state } = &mut app.screen {
+                if let Some(parent) = current_dir.parent().map(|p| p.to_path_buf()) {
+                    *entries = load_dir_entries(&parent);
+                    *current_dir = parent;
+                    fb_state.select(if entries.is_empty() { None } else { Some(0) });
+                }
+            }
+        }
+        FbAction::EnterDir(new_dir) => {
+            if let Screen::FileBrowser { current_dir, entries, fb_state } = &mut app.screen {
+                let new_entries = load_dir_entries(&new_dir);
+                *current_dir = new_dir;
+                *entries = new_entries;
+                fb_state.select(if entries.is_empty() { None } else { Some(0) });
+            }
+        }
+        FbAction::SelectFile(path) => {
+            app.import_input = path;
+            app.screen = Screen::Main;
+            app.tab = Tab::Import;
+        }
+    }
 }
 
 // ── Shared helpers ────────────────────────────────────────────────────────────

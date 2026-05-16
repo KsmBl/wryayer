@@ -2,11 +2,13 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Gauge, List, ListItem, Paragraph, Tabs, Wrap},
+    widgets::{Block, Borders, Clear, Gauge, List, ListItem, ListState, Paragraph, Tabs, Wrap},
     Frame,
 };
 
-use super::{App, Screen, Tab};
+use crate::config::{AppConfig, LocalDelete, TempMode};
+
+use super::{App, Screen, Tab, CFG_LEN, CFG_SAVE};
 
 const C_ACCENT: Color = Color::Cyan;
 const C_GREEN: Color = Color::Green;
@@ -14,16 +16,13 @@ const C_RED: Color = Color::Red;
 const C_YELLOW: Color = Color::Yellow;
 const C_DIM: Color = Color::DarkGray;
 const C_SELECT: Color = Color::Rgb(40, 60, 80);
+const C_SELECT_RED: Color = Color::Rgb(80, 20, 20);
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Min(0),
-            Constraint::Length(1),
-        ])
+        .constraints([Constraint::Length(3), Constraint::Min(0), Constraint::Length(1)])
         .split(area);
 
     draw_tabs(f, app, chunks[0]);
@@ -36,13 +35,14 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     draw_statusbar(f, app, chunks[2]);
 
-    // Overlays (drawn last so they appear on top)
+    // Overlays
     match &app.screen {
         Screen::Main => {}
-        Screen::Confirm { title, body, .. } => {
+        Screen::Confirm { title, body, danger, .. } => {
             let title = title.clone();
             let body = body.clone();
-            draw_confirm(f, area, &title, &body);
+            let danger = *danger;
+            draw_confirm(f, area, &title, &body, danger);
         }
         Screen::Operation { title, log, done, success, total_bytes, started, .. } => {
             let title = title.clone();
@@ -53,39 +53,40 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             let elapsed = started.elapsed();
             draw_operation(f, area, app, &title, &log, done, success, total_bytes, elapsed);
         }
+        Screen::Config { app_name, config, selected } => {
+            let app_name = app_name.clone();
+            let config = config.clone();
+            let selected = *selected;
+            draw_config(f, area, &app_name, &config, selected);
+        }
+        Screen::FileBrowser { current_dir, entries, fb_state } => {
+            let title = current_dir.to_string_lossy().into_owned();
+            let entries: Vec<(String, bool, bool)> = entries
+                .iter()
+                .map(|e| (e.name.clone(), e.is_dir, e.is_zip))
+                .collect();
+            // Need mutable fb_state — reconstruct via index only
+            let sel = fb_state.selected();
+            draw_file_browser(f, area, &title, &entries, sel);
+        }
     }
 }
 
 // ── Tab bar ───────────────────────────────────────────────────────────────────
 
 fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
-    let mk = |label: &str| {
-        Line::from(vec![
-            Span::raw(" "),
-            Span::styled(label.to_string(), Style::default().fg(C_ACCENT)),
-            Span::raw(" "),
-        ])
-    };
+    let mk = |label: &str| Line::from(vec![
+        Span::raw(" "),
+        Span::styled(label.to_string(), Style::default().fg(C_ACCENT)),
+        Span::raw(" "),
+    ]);
     let titles = vec![mk("Installed"), mk("Install"), mk("Import")];
-    let sel = match app.tab {
-        Tab::Installed => 0,
-        Tab::Install => 1,
-        Tab::Import => 2,
-    };
+    let sel = match app.tab { Tab::Installed => 0, Tab::Install => 1, Tab::Import => 2 };
     let tabs = Tabs::new(titles)
         .select(sel)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" wryayer ")
-                .title_style(Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD)),
-        )
-        .highlight_style(
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD)
-                .bg(C_SELECT),
-        )
+        .block(Block::default().borders(Borders::ALL)
+            .title(" wryayer ").title_style(Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD)))
+        .highlight_style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD).bg(C_SELECT))
         .divider(Span::styled("|", Style::default().fg(C_DIM)));
     f.render_widget(tabs, area);
 }
@@ -98,18 +99,14 @@ fn draw_installed(f: &mut Frame, app: &mut App, area: Rect) {
         .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
         .split(area);
 
-    let items: Vec<ListItem> = app
-        .installed
-        .iter()
-        .map(|m| {
-            let dot = if app.update_available.contains_key(&m.app.name) {
-                Span::styled(" ●", Style::default().fg(C_YELLOW))
-            } else {
-                Span::raw("  ")
-            };
-            ListItem::new(Line::from(vec![dot, Span::styled(&m.app.name, Style::default().fg(Color::White))]))
-        })
-        .collect();
+    let items: Vec<ListItem> = app.installed.iter().map(|m| {
+        let dot = if app.update_available.contains_key(&m.app.name) {
+            Span::styled(" ●", Style::default().fg(C_YELLOW))
+        } else {
+            Span::raw("  ")
+        };
+        ListItem::new(Line::from(vec![dot, Span::styled(&m.app.name, Style::default().fg(Color::White))]))
+    }).collect();
 
     let list = List::new(items)
         .block(Block::default().borders(Borders::ALL).title(" Apps ").title_style(Style::default().fg(C_ACCENT)))
@@ -121,10 +118,8 @@ fn draw_installed(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Details ")
-        .title_style(Style::default().fg(C_ACCENT));
+    let block = Block::default().borders(Borders::ALL)
+        .title(" Details ").title_style(Style::default().fg(C_ACCENT));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -140,25 +135,16 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
         .map(|p| p.version.as_str()).unwrap_or("?");
     let installed = m.app.installed_at.get(..10).unwrap_or(&m.app.installed_at);
     let launchers = m.app.launchers.join(", ");
-
     let dim = Style::default().fg(C_DIM);
+
     let mut lines = vec![
         Line::from(vec![
             Span::styled("  Name:       ", dim),
             Span::styled(&m.app.name, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
         ]),
-        Line::from(vec![
-            Span::styled("  Version:    ", dim),
-            Span::styled(ver, Style::default().fg(C_GREEN)),
-        ]),
-        Line::from(vec![
-            Span::styled("  Installed:  ", dim),
-            Span::raw(installed),
-        ]),
-        Line::from(vec![
-            Span::styled("  Launchers:  ", dim),
-            Span::raw(launchers),
-        ]),
+        Line::from(vec![Span::styled("  Version:    ", dim), Span::styled(ver, Style::default().fg(C_GREEN))]),
+        Line::from(vec![Span::styled("  Installed:  ", dim), Span::raw(installed)]),
+        Line::from(vec![Span::styled("  Launchers:  ", dim), Span::raw(launchers)]),
         Line::from(vec![
             Span::styled("  Packages:   ", dim),
             Span::styled(m.packages.len().to_string(), Style::default().fg(C_ACCENT)),
@@ -175,7 +161,7 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
 
     lines.push(Line::raw(""));
     lines.push(Line::from(Span::styled(
-        "  [r] Run  [d] Delete  [b] Backup  [c] Check  [u] Update",
+        "  [r] Run  [d] Delete  [b] Backup  [c] Check  [u] Update  [s] Config",
         dim,
     )));
 
@@ -190,64 +176,36 @@ fn draw_install(f: &mut Frame, app: &mut App, area: Rect) {
         .constraints([Constraint::Length(3), Constraint::Min(0), Constraint::Length(1)])
         .split(area);
 
-    // Search bar — active border when typing, dim when list is focused
     let bar_active = !app.search_list_focused;
     let cursor = if bar_active { "█" } else { "" };
-    let search_title = if app.search_searching {
-        " Search — searching… "
-    } else {
-        " Search "
-    };
-    let search_widget = Paragraph::new(format!("{}{}", app.search_input, cursor))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(search_title)
-                .title_style(Style::default().fg(if bar_active { Color::White } else { C_DIM }))
-                .border_style(Style::default().fg(if bar_active { C_ACCENT } else { C_DIM })),
-        )
-        .style(Style::default().fg(Color::White));
-    f.render_widget(search_widget, chunks[0]);
+    let search_title = if app.search_searching { " Search — searching… " } else { " Search " };
 
-    // Results
+    f.render_widget(
+        Paragraph::new(format!("{}{}", app.search_input, cursor))
+            .block(Block::default().borders(Borders::ALL).title(search_title)
+                .title_style(Style::default().fg(if bar_active { Color::White } else { C_DIM }))
+                .border_style(Style::default().fg(if bar_active { C_ACCENT } else { C_DIM })))
+            .style(Style::default().fg(Color::White)),
+        chunks[0],
+    );
+
     let installed_names: std::collections::HashSet<&str> =
         app.installed.iter().map(|m| m.app.name.as_str()).collect();
 
-    let items: Vec<ListItem> = app
-        .search_results
-        .iter()
-        .map(|pkg| {
-            if installed_names.contains(pkg.as_str()) {
-                ListItem::new(Line::from(vec![
-                    Span::styled("✓ ", Style::default().fg(C_GREEN)),
-                    Span::styled(pkg.as_str(), Style::default().fg(Color::White)),
-                    Span::styled(" [installed]", Style::default().fg(C_GREEN)),
-                ]))
-            } else {
-                ListItem::new(Line::from(vec![
-                    Span::raw("  "),
-                    Span::styled(pkg.as_str(), Style::default().fg(Color::White)),
-                ]))
-            }
-        })
-        .collect();
-
-    // Detail line for selected result
-    let selected_hint = app.avail_state.selected().and_then(|i| app.search_results.get(i)).map(|pkg| {
+    let items: Vec<ListItem> = app.search_results.iter().map(|pkg| {
         if installed_names.contains(pkg.as_str()) {
-            Line::from(vec![
-                Span::styled(" Already installed — ", Style::default().fg(C_GREEN)),
-                Span::styled("Enter", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-                Span::styled(" to uninstall", Style::default().fg(C_GREEN)),
-            ])
+            ListItem::new(Line::from(vec![
+                Span::styled("✓ ", Style::default().fg(C_GREEN)),
+                Span::styled(pkg.as_str(), Style::default().fg(Color::White)),
+                Span::styled(" [installed]", Style::default().fg(C_GREEN)),
+            ]))
         } else {
-            Line::from(vec![
-                Span::styled(" Press ", Style::default().fg(C_DIM)),
-                Span::styled("Enter", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-                Span::styled(" to install", Style::default().fg(C_DIM)),
-            ])
+            ListItem::new(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(pkg.as_str(), Style::default().fg(Color::White)),
+            ]))
         }
-    });
+    }).collect();
 
     let results_title = if app.search_results.is_empty() {
         " Results "
@@ -256,29 +214,38 @@ fn draw_install(f: &mut Frame, app: &mut App, area: Rect) {
     };
 
     let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(results_title)
-                .title_style(Style::default().fg(C_ACCENT)),
-        )
+        .block(Block::default().borders(Borders::ALL).title(results_title).title_style(Style::default().fg(C_ACCENT)))
         .highlight_style(Style::default().bg(C_SELECT).fg(Color::White).add_modifier(Modifier::BOLD))
         .highlight_symbol("▶ ");
 
     f.render_stateful_widget(list, chunks[1], &mut app.avail_state);
 
-    if let Some(hint) = selected_hint {
-        f.render_widget(Paragraph::new(hint), chunks[2]);
+    // Hint for selected item
+    if let Some(i) = app.avail_state.selected() {
+        if let Some(pkg) = app.search_results.get(i) {
+            let hint = if installed_names.contains(pkg.as_str()) {
+                Line::from(vec![
+                    Span::styled(" Already installed — ", Style::default().fg(C_GREEN)),
+                    Span::styled("Enter", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                    Span::styled(" to uninstall", Style::default().fg(C_GREEN)),
+                ])
+            } else {
+                Line::from(vec![
+                    Span::styled(" Press ", Style::default().fg(C_DIM)),
+                    Span::styled("Enter", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                    Span::styled(" to install", Style::default().fg(C_DIM)),
+                ])
+            };
+            f.render_widget(Paragraph::new(hint), chunks[2]);
+        }
     }
 }
 
 // ── Import tab ────────────────────────────────────────────────────────────────
 
 fn draw_import(f: &mut Frame, app: &App, area: Rect) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Import Backup ")
-        .title_style(Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD));
+    let block = Block::default().borders(Borders::ALL)
+        .title(" Import Backup ").title_style(Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -288,35 +255,33 @@ fn draw_import(f: &mut Frame, app: &App, area: Rect) {
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(1),
+            Constraint::Length(3),
             Constraint::Length(1),
             Constraint::Min(0),
         ])
         .split(inner);
 
     f.render_widget(
-        Paragraph::new("  Paste or type the path to a .zip backup file, then press Enter.")
+        Paragraph::new("  Type or paste the path to a .zip backup file, then press Enter.")
             .style(Style::default().fg(C_DIM)),
         chunks[0],
     );
     f.render_widget(
-        Paragraph::new("  Supports ~ expansion.").style(Style::default().fg(C_DIM)),
+        Paragraph::new("  ~ is expanded automatically.  Press Esc to clear.")
+            .style(Style::default().fg(C_DIM)),
         chunks[1],
     );
     f.render_widget(Paragraph::new(""), chunks[2]);
     f.render_widget(
         Paragraph::new(format!("  {}{}", app.import_input, "█"))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" Path ")
-                    .title_style(Style::default().fg(Color::White))
-                    .border_style(Style::default().fg(C_ACCENT)),
-            )
+            .block(Block::default().borders(Borders::ALL)
+                .title(" Path ").title_style(Style::default().fg(Color::White))
+                .border_style(Style::default().fg(C_ACCENT)))
             .style(Style::default().fg(Color::White)),
         chunks[3],
     );
     f.render_widget(
-        Paragraph::new("  [Enter] Start import   [Tab] Switch tabs   [q] Quit")
+        Paragraph::new("  [Enter] Start import   [Tab] Switch tabs   [Shift+Q] Quit")
             .style(Style::default().fg(C_DIM)),
         chunks[4],
     );
@@ -326,36 +291,37 @@ fn draw_import(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_statusbar(f: &mut Frame, app: &App, area: Rect) {
     let hint = match app.tab {
-        Tab::Installed => "[Tab] Next tab  [r] Run  [d] Delete  [b] Backup  [c] Check  [u] Update  [q] Quit",
-        Tab::Install => "[Tab] Next tab  Type to search  [↓] Select result  [Enter] Install  [q] Quit",
-        Tab::Import => "[Tab] Next tab  Type zip path  [Enter] Import  [q] Quit",
+        Tab::Installed => "[Tab/Shift+Tab] Switch  [r] Run  [d] Delete  [b] Backup  [c] Check  [u] Update  [s] Config  [q] Quit",
+        Tab::Install => "[Tab/Shift+Tab] Switch  Type to search  [↓] Select  [Enter] Install/Uninstall  [q] Quit",
+        Tab::Import => "[Tab/Shift+Tab] Switch  Type zip path  [Enter] Import  [Esc] Clear  [Shift+Q] Quit",
     };
-
     let msg = if app.status.is_empty() {
         format!(" {hint}")
     } else {
         format!(" {}  │  {hint}", app.status)
     };
-
     f.render_widget(Paragraph::new(msg).style(Style::default().fg(C_DIM)), area);
 }
 
 // ── Confirm overlay ───────────────────────────────────────────────────────────
 
-fn draw_confirm(f: &mut Frame, area: Rect, title: &str, body: &[String]) {
-    let popup = centered_rect(50, 40, area);
+fn draw_confirm(f: &mut Frame, area: Rect, title: &str, body: &[String], danger: bool) {
+    let popup = centered_rect(52, 40, area);
     f.render_widget(Clear, popup);
+
+    let (border_color, title_color) = if danger {
+        (C_RED, C_RED)
+    } else {
+        (C_YELLOW, C_YELLOW)
+    };
 
     let lines: Vec<Line> = body.iter().map(|l| Line::from(format!("  {l}"))).collect();
     f.render_widget(
         Paragraph::new(lines)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(format!(" {title} "))
-                    .title_style(Style::default().fg(C_YELLOW).add_modifier(Modifier::BOLD))
-                    .border_style(Style::default().fg(C_YELLOW)),
-            )
+            .block(Block::default().borders(Borders::ALL)
+                .title(format!(" {title} "))
+                .title_style(Style::default().fg(title_color).add_modifier(Modifier::BOLD))
+                .border_style(Style::default().fg(border_color)))
             .wrap(Wrap { trim: false }),
         popup,
     );
@@ -407,11 +373,9 @@ fn draw_operation(
             format!(" {mb:.1} MB — ~{remaining:.0}s remaining ")
         };
         f.render_widget(
-            Gauge::default()
-                .block(header_block)
+            Gauge::default().block(header_block)
                 .gauge_style(Style::default().fg(border_color).bg(Color::Black))
-                .ratio(ratio)
-                .label(label),
+                .ratio(ratio).label(label),
             chunks[0],
         );
     } else {
@@ -420,13 +384,11 @@ fn draw_operation(
         let spinner = if done { if success { "✓" } else { "✗" } } else { spin[frame] };
         f.render_widget(
             Paragraph::new(format!(" {spinner} {}", status_line.trim()))
-                .block(header_block)
-                .style(Style::default().fg(border_color)),
+                .block(header_block).style(Style::default().fg(border_color)),
             chunks[0],
         );
     }
 
-    // Log area
     let log_block = Block::default()
         .borders(Borders::LEFT | Borders::RIGHT)
         .border_style(Style::default().fg(border_color));
@@ -435,36 +397,206 @@ fn draw_operation(
 
     let visible = inner.height as usize;
     let scroll = app.log_scroll.min(log.len().saturating_sub(visible));
-    let lines: Vec<Line> = log
-        .iter()
-        .skip(scroll)
-        .take(visible)
-        .map(|l| {
-            let color = if l.starts_with("error") || l.contains("Error") || l.contains("failed") {
-                C_RED
-            } else if l.starts_with("warning") || l.contains("Warning") || l.starts_with('!') {
-                C_YELLOW
-            } else if l.contains("Done") || l.contains("complete") || l.contains("Updated") || l.contains("Saved") {
-                C_GREEN
-            } else {
-                Color::White
-            };
-            Line::from(Span::styled(format!(" {l}"), Style::default().fg(color)))
-        })
-        .collect();
+    let lines: Vec<Line> = log.iter().skip(scroll).take(visible).map(|l| {
+        let color = if l.starts_with("error") || l.contains("Error") || l.contains("failed") {
+            C_RED
+        } else if l.starts_with("warning") || l.contains("Warning") || l.starts_with('!') {
+            C_YELLOW
+        } else if l.contains("Done") || l.contains("complete") || l.contains("Updated") || l.contains("Saved") {
+            C_GREEN
+        } else {
+            Color::White
+        };
+        Line::from(Span::styled(format!(" {l}"), Style::default().fg(color)))
+    }).collect();
     f.render_widget(Paragraph::new(lines), inner);
 
-    // Bottom status bar of the overlay
     f.render_widget(
         Paragraph::new(status_line.as_str())
             .style(Style::default().fg(border_color).add_modifier(Modifier::BOLD))
             .alignment(Alignment::Center)
-            .block(
-                Block::default()
-                    .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
-                    .border_style(Style::default().fg(border_color)),
-            ),
+            .block(Block::default()
+                .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
+                .border_style(Style::default().fg(border_color))),
         chunks[2],
+    );
+}
+
+// ── Config overlay ────────────────────────────────────────────────────────────
+
+fn draw_config(f: &mut Frame, area: Rect, app_name: &str, config: &AppConfig, selected: usize) {
+    let popup = centered_rect(54, 80, area);
+    f.render_widget(Clear, popup);
+
+    let block = Block::default().borders(Borders::ALL)
+        .title(format!(" Config — {app_name} "))
+        .title_style(Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD))
+        .border_style(Style::default().fg(C_ACCENT));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let b = |v: bool| if v { "  on " } else { " off " };
+    let rows: &[(&str, &str)] = &[
+        ("Network    ", b(config.network)),
+        ("Camera     ", b(config.camera)),
+        ("Microphone ", b(config.microphone)),
+        ("Audio      ", b(config.audio)),
+        ("Temp mode  ", match config.temp_mode {
+            TempMode::System  => " system  ",
+            TempMode::Ramdisk => " ramdisk ",
+            TempMode::Local   => " local   ",
+            TempMode::Uuid    => " uuid    ",
+        }),
+        ("Temp delete", match config.temp_delete {
+            LocalDelete::Never   => " never    ",
+            LocalDelete::OnStart => " on_start ",
+            LocalDelete::OnClose => " on_close ",
+        }),
+    ];
+
+    let row_h = 2u16;
+
+    for (idx, (label, value)) in rows.iter().enumerate() {
+        let is_sel = idx == selected;
+        let y = inner.y + idx as u16 * row_h;
+        if y >= inner.y + inner.height.saturating_sub(3) { break; }
+
+        let val_color = match value.trim() {
+            "on"  => C_GREEN,
+            "off" => C_RED,
+            _     => C_YELLOW,
+        };
+        let bg = if is_sel { C_SELECT } else { Color::Reset };
+        let row = Rect { x: inner.x, y, width: inner.width, height: 1 };
+
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(if is_sel { " ▶ " } else { "   " }, Style::default().fg(C_ACCENT)),
+                Span::styled(format!("{label}  "), Style::default().fg(if is_sel { Color::White } else { C_DIM }).bg(bg)),
+                Span::styled(format!("[{value}]"), Style::default().fg(val_color).bg(bg)
+                    .add_modifier(if is_sel { Modifier::BOLD } else { Modifier::empty() })),
+            ])),
+            row,
+        );
+
+        if y + 1 < inner.y + inner.height.saturating_sub(3) {
+            f.render_widget(
+                Paragraph::new(Span::styled("─".repeat(inner.width as usize), Style::default().fg(Color::Rgb(50, 50, 60)))),
+                Rect { x: inner.x, y: y + 1, width: inner.width, height: 1 },
+            );
+        }
+    }
+
+    // Save button
+    let save_y = inner.y + CFG_SAVE as u16 * row_h;
+    if save_y + 1 < inner.y + inner.height {
+        let is_sel = selected == CFG_SAVE;
+        let btn_style = if is_sel {
+            Style::default().fg(Color::Black).bg(C_GREEN).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(C_GREEN)
+        };
+        let sep_y = save_y.saturating_sub(1);
+        if sep_y > inner.y {
+            f.render_widget(
+                Paragraph::new(Span::styled("─".repeat(inner.width as usize), Style::default().fg(Color::Rgb(50, 50, 60)))),
+                Rect { x: inner.x, y: sep_y, width: inner.width, height: 1 },
+            );
+        }
+        let btn_area = Rect { x: inner.x, y: save_y, width: inner.width, height: 1 };
+        let prefix = if is_sel { " ▶ " } else { "   " };
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(prefix, Style::default().fg(C_ACCENT)),
+                Span::styled("[ Save & Close ]", btn_style),
+            ])),
+            btn_area,
+        );
+    }
+
+    // Microphone warning
+    if !config.microphone && config.audio {
+        let warn_y = inner.y + inner.height.saturating_sub(2);
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                "  ⚠  PipeWire/PA mic not blocked — set audio off",
+                Style::default().fg(C_YELLOW),
+            )),
+            Rect { x: inner.x, y: warn_y, width: inner.width, height: 1 },
+        );
+    }
+
+    // Footer
+    let footer_y = inner.y + inner.height.saturating_sub(1);
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            " [↑↓] Navigate  [Space/Enter] Toggle  [Esc/q] Discard",
+            Style::default().fg(C_DIM),
+        )),
+        Rect { x: inner.x, y: footer_y, width: inner.width, height: 1 },
+    );
+}
+
+// ── File browser overlay ──────────────────────────────────────────────────────
+
+fn draw_file_browser(
+    f: &mut Frame,
+    area: Rect,
+    current_dir: &str,
+    entries: &[(String, bool, bool)], // (name, is_dir, is_zip)
+    selected: Option<usize>,
+) {
+    let popup = centered_rect(70, 80, area);
+    f.render_widget(Clear, popup);
+
+    let block = Block::default().borders(Borders::ALL)
+        .title(format!(" Browse: {current_dir} "))
+        .title_style(Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD))
+        .border_style(Style::default().fg(C_ACCENT));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .split(inner);
+
+    let items: Vec<ListItem> = entries.iter().map(|(name, is_dir, is_zip)| {
+        if *is_dir {
+            ListItem::new(Line::from(vec![
+                Span::styled("📁 ", Style::default().fg(C_YELLOW)),
+                Span::styled(name.as_str(), Style::default().fg(C_YELLOW)),
+                Span::styled("/", Style::default().fg(C_DIM)),
+            ]))
+        } else if *is_zip {
+            ListItem::new(Line::from(vec![
+                Span::styled("📦 ", Style::default().fg(C_GREEN)),
+                Span::styled(name.as_str(), Style::default().fg(C_GREEN)),
+            ]))
+        } else {
+            ListItem::new(Line::from(vec![
+                Span::raw("   "),
+                Span::styled(name.as_str(), Style::default().fg(C_DIM)),
+            ]))
+        }
+    }).collect();
+
+    let mut list_state = ListState::default();
+    list_state.select(selected);
+
+    let list = List::new(items)
+        .block(Block::default())
+        .highlight_style(Style::default().bg(C_SELECT).fg(Color::White).add_modifier(Modifier::BOLD))
+        .highlight_symbol("▶ ");
+
+    f.render_stateful_widget(list, chunks[0], &mut list_state);
+
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            " [↑↓/jk] Navigate  [Enter/→] Open  [Backspace/←] Up  [q/Esc] Cancel",
+            Style::default().fg(C_DIM),
+        )),
+        chunks[1],
     );
 }
 
