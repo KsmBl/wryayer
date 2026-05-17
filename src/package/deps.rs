@@ -184,7 +184,7 @@ fn pacman_si(pkg_name: &str) -> Result<Option<(String, Vec<String>)>> {
     Ok(Some((version, deps)))
 }
 
-fn parse_pacman_field(stdout: &str, field: &str) -> Option<String> {
+pub fn parse_pacman_field(stdout: &str, field: &str) -> Option<String> {
     for line in stdout.lines() {
         if line.starts_with(field) && line.contains(':') {
             let value = line.splitn(2, ':').nth(1)?.trim().to_string();
@@ -194,7 +194,7 @@ fn parse_pacman_field(stdout: &str, field: &str) -> Option<String> {
     None
 }
 
-fn parse_pacman_depends(stdout: &str) -> Vec<String> {
+pub fn parse_pacman_depends(stdout: &str) -> Vec<String> {
     for line in stdout.lines() {
         if line.starts_with("Depends On") {
             let value = match line.splitn(2, ':').nth(1) {
@@ -214,7 +214,7 @@ fn parse_pacman_depends(stdout: &str) -> Vec<String> {
     vec![]
 }
 
-fn strip_version_constraint(dep: &str) -> &str {
+pub fn strip_version_constraint(dep: &str) -> &str {
     dep.split(|c| matches!(c, '>' | '<' | '=' | '!'))
         .next()
         .unwrap_or(dep)
@@ -222,7 +222,7 @@ fn strip_version_constraint(dep: &str) -> &str {
 
 // Soname virtual provides like "libreadline.so" or "libreadline.so=8"
 // are not real installable package names — skip them entirely.
-fn is_soname_dep(name: &str) -> bool {
+pub fn is_soname_dep(name: &str) -> bool {
     name.contains(".so") && (name.ends_with(".so") || name.contains(".so=") || name.contains(".so."))
 }
 

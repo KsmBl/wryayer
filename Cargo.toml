@@ -3,12 +3,17 @@ name = "wryayer"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "wryayer"
+path = "src/lib.rs"
+
 [[bin]]
 name = "wryayer"
 path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
@@ -20,3 +25,7 @@ zip = "2"
 ratatui = "0.29"
 crossterm = "0.28"
 shellexpand = "3"
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"

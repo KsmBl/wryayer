@@ -75,7 +75,7 @@ pub fn write_config(app_name: &str, config: &AppConfig) -> Result<()> {
         .with_context(|| format!("failed to write {}", path.display()))
 }
 
-fn parse_ini(content: &str) -> Result<AppConfig> {
+pub fn parse_ini(content: &str) -> Result<AppConfig> {
     let mut config = AppConfig::default();
     for line in content.lines() {
         let line = line.trim();
@@ -126,7 +126,7 @@ fn parse_ini(content: &str) -> Result<AppConfig> {
     Ok(config)
 }
 
-fn parse_bool(v: &str) -> Result<bool, ()> {
+pub fn parse_bool(v: &str) -> Result<bool, ()> {
     match v {
         "on" | "true" | "1" => Ok(true),
         "off" | "false" | "0" => Ok(false),
@@ -134,7 +134,7 @@ fn parse_bool(v: &str) -> Result<bool, ()> {
     }
 }
 
-fn format_ini(config: &AppConfig) -> String {
+pub fn format_ini(config: &AppConfig) -> String {
     let mode = match config.temp_mode {
         TempMode::System  => "system",
         TempMode::Ramdisk => "ramdisk",

@@ -30,7 +30,7 @@ pub fn remove_launcher(binary_name: &str) -> Result<()> {
     }
     let content = fs::read_to_string(&path)
         .with_context(|| format!("failed to read launcher at {}", path.display()))?;
-    if !content.contains("wryayer run") && !content.contains(".wryayer/") {
+    if !content.contains("# wryayer managed launcher") {
         eprintln!(
             "warning: skipping {} — does not look like a wryayer launcher",
             path.display()
