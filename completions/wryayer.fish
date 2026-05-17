@@ -24,18 +24,22 @@ end
 complete -c wryayer -f
 
 # ── Top-level subcommands ─────────────────────────────────────────────────────
-set -l cmds install remove list run update repair config backup import tui help
-complete -c wryayer -n "not __fish_seen_subcommand_from $cmds" -a install -d 'Install a package in an isolated directory'
-complete -c wryayer -n "not __fish_seen_subcommand_from $cmds" -a remove  -d 'Remove an installed app and its launchers'
-complete -c wryayer -n "not __fish_seen_subcommand_from $cmds" -a list    -d 'List all installed apps'
-complete -c wryayer -n "not __fish_seen_subcommand_from $cmds" -a run     -d 'Run an installed app in its isolated environment'
-complete -c wryayer -n "not __fish_seen_subcommand_from $cmds" -a update  -d 'Update one or all installed apps'
-complete -c wryayer -n "not __fish_seen_subcommand_from $cmds" -a repair  -d 'Fix missing shared library deps in an installed app'
-complete -c wryayer -n "not __fish_seen_subcommand_from $cmds" -a config  -d 'View or change per-app configuration'
-complete -c wryayer -n "not __fish_seen_subcommand_from $cmds" -a backup  -d 'Create a zip backup of an installed app'
-complete -c wryayer -n "not __fish_seen_subcommand_from $cmds" -a import  -d 'Import an app from a wryayer backup zip'
-complete -c wryayer -n "not __fish_seen_subcommand_from $cmds" -a tui     -d 'Launch the interactive TUI'
-complete -c wryayer -n "not __fish_seen_subcommand_from $cmds" -a help    -d 'Print help'
+set -l cmds install remove list run update repair config export import snapshot rollback snapshots tui dedup completions
+complete -c wryayer -n "not __fish_seen_subcommand_from $cmds" -a install     -d 'Install a package in an isolated directory'
+complete -c wryayer -n "not __fish_seen_subcommand_from $cmds" -a remove      -d 'Remove an installed app and its launchers'
+complete -c wryayer -n "not __fish_seen_subcommand_from $cmds" -a list        -d 'List all installed apps'
+complete -c wryayer -n "not __fish_seen_subcommand_from $cmds" -a run         -d 'Run an installed app in its isolated environment'
+complete -c wryayer -n "not __fish_seen_subcommand_from $cmds" -a update      -d 'Update one or all installed apps'
+complete -c wryayer -n "not __fish_seen_subcommand_from $cmds" -a repair      -d 'Fix missing shared library deps in an installed app'
+complete -c wryayer -n "not __fish_seen_subcommand_from $cmds" -a config      -d 'View or change per-app configuration'
+complete -c wryayer -n "not __fish_seen_subcommand_from $cmds" -a export      -d 'Pack an app into a portable zip'
+complete -c wryayer -n "not __fish_seen_subcommand_from $cmds" -a import      -d 'Import an app from a wryayer export zip'
+complete -c wryayer -n "not __fish_seen_subcommand_from $cmds" -a snapshot    -d 'Create a hard-linked snapshot of an installed app'
+complete -c wryayer -n "not __fish_seen_subcommand_from $cmds" -a rollback    -d 'Roll an app back to a previous snapshot'
+complete -c wryayer -n "not __fish_seen_subcommand_from $cmds" -a snapshots   -d 'List snapshots for an installed app'
+complete -c wryayer -n "not __fish_seen_subcommand_from $cmds" -a tui         -d 'Launch the interactive TUI'
+complete -c wryayer -n "not __fish_seen_subcommand_from $cmds" -a dedup       -d 'Hard-link identical files across app directories'
+complete -c wryayer -n "not __fish_seen_subcommand_from $cmds" -a completions -d 'Print shell completion script to stdout'
 
 # ── install ───────────────────────────────────────────────────────────────────
 complete -c wryayer -n '__fish_seen_subcommand_from install' -a '(__wryayer_pkgs)' -d 'package'
@@ -46,9 +50,11 @@ complete -c wryayer -n '__fish_seen_subcommand_from install' -l into      -d 'Me
 
 # ── remove ────────────────────────────────────────────────────────────────────
 complete -c wryayer -n '__fish_seen_subcommand_from remove' -a '(__wryayer_apps)' -d 'installed app'
+complete -c wryayer -n '__fish_seen_subcommand_from remove' -l cascade -d 'Also remove all alias apps that point at this target'
 
 # ── run ───────────────────────────────────────────────────────────────────────
 complete -c wryayer -n '__fish_seen_subcommand_from run' -a '(__wryayer_apps)' -d 'installed app'
+complete -c wryayer -n '__fish_seen_subcommand_from run' -l bin -d 'Run a specific binary registered for the app' -r
 
 # ── update ────────────────────────────────────────────────────────────────────
 complete -c wryayer -n '__fish_seen_subcommand_from update' -a '(__wryayer_apps)' -d 'installed app (omit to update all)'
@@ -57,30 +63,47 @@ complete -c wryayer -n '__fish_seen_subcommand_from update' -l check -d 'Show av
 # ── repair ────────────────────────────────────────────────────────────────────
 complete -c wryayer -n '__fish_seen_subcommand_from repair' -a '(__wryayer_apps)' -d 'installed app'
 
-# ── backup ────────────────────────────────────────────────────────────────────
-complete -c wryayer -n '__fish_seen_subcommand_from backup' -a '(__wryayer_apps)' -d 'installed app'
-complete -c wryayer -n '__fish_seen_subcommand_from backup' -l output -s o -d 'Output zip file path' -r
+# ── export ────────────────────────────────────────────────────────────────────
+complete -c wryayer -n '__fish_seen_subcommand_from export' -a '(__wryayer_apps)' -d 'installed app'
+complete -c wryayer -n '__fish_seen_subcommand_from export' -l output -s o -d 'Output zip file path' -r
 
 # ── import ────────────────────────────────────────────────────────────────────
 # Re-enable file completions for import so the user can tab-complete zip paths
 complete -c wryayer -n '__fish_seen_subcommand_from import' -F
 
+# ── snapshot ──────────────────────────────────────────────────────────────────
+complete -c wryayer -n '__fish_seen_subcommand_from snapshot' -a '(__wryayer_apps)' -d 'installed app'
+
+# ── rollback ──────────────────────────────────────────────────────────────────
+complete -c wryayer -n '__fish_seen_subcommand_from rollback' -a '(__wryayer_apps)' -d 'installed app'
+
+# ── snapshots ─────────────────────────────────────────────────────────────────
+complete -c wryayer -n '__fish_seen_subcommand_from snapshots' -a '(__wryayer_apps)' -d 'installed app'
+
+# ── dedup ─────────────────────────────────────────────────────────────────────
+complete -c wryayer -n '__fish_seen_subcommand_from dedup' -l verbose -s v -d 'Print every file that gets linked'
+
+# ── completions ───────────────────────────────────────────────────────────────
+complete -c wryayer -n '__fish_seen_subcommand_from completions' -a 'bash fish zsh elvish powershell' -d 'shell'
+
 # ── config ────────────────────────────────────────────────────────────────────
 #
 # Completion tree:
 #   wryayer config <TAB>                       → app names
-#   wryayer config firefox <TAB>               → tempmode | tempdelete | network
+#   wryayer config firefox <TAB>               → tempmode | tempdelete | network | ... | share
 #   wryayer config firefox tempmode <TAB>      → system | ramdisk | local | uuid
 #   wryayer config firefox tempdelete <TAB>    → never | on_start | on_close
 #   wryayer config firefox network <TAB>       → on | off
+#   wryayer config firefox share <TAB>         → add | remove | list
 #
 # Level 1 (app names):   config seen  AND  no app in line yet      AND  no setting keyword
 # Level 2 (settings):    config seen  AND  an app IS in line        AND  no setting keyword
 # Level 3a (tempmode):   tempmode seen
 # Level 3b (tempdelete): tempdelete seen
-# Level 3c (network):    network seen
+# Level 3c-f (toggles):  network | camera | microphone | audio seen
+# Level 3g (share):      share seen
 
-set -l settings tempmode tempdelete network camera microphone audio
+set -l settings tempmode tempdelete network camera microphone audio share
 
 # Level 1 — app name
 complete -c wryayer -n "__fish_seen_subcommand_from config; and not __wryayer_config_has_app; and not __fish_seen_subcommand_from $settings" -a '(__wryayer_apps)' -d 'installed app'
@@ -92,6 +115,7 @@ complete -c wryayer -n "__fish_seen_subcommand_from config; and __wryayer_config
 complete -c wryayer -n "__fish_seen_subcommand_from config; and __wryayer_config_has_app; and not __fish_seen_subcommand_from $settings" -a camera     -d 'Enable or disable camera access'
 complete -c wryayer -n "__fish_seen_subcommand_from config; and __wryayer_config_has_app; and not __fish_seen_subcommand_from $settings" -a microphone -d 'Enable or disable microphone input'
 complete -c wryayer -n "__fish_seen_subcommand_from config; and __wryayer_config_has_app; and not __fish_seen_subcommand_from $settings" -a audio      -d 'Enable or disable audio output'
+complete -c wryayer -n "__fish_seen_subcommand_from config; and __wryayer_config_has_app; and not __fish_seen_subcommand_from $settings" -a share      -d 'Manage shared directories'
 
 # Level 3a — tempmode values
 complete -c wryayer -n "__fish_seen_subcommand_from tempmode; and not __fish_seen_subcommand_from tempdelete $settings[3..]" -a system   -d 'Share host /tmp with all other apps (default)'
@@ -109,3 +133,8 @@ for _setting in network camera microphone audio
     complete -c wryayer -n "__fish_seen_subcommand_from $_setting; and not __fish_seen_subcommand_from tempmode tempdelete" -a on  -d 'Enable (default)'
     complete -c wryayer -n "__fish_seen_subcommand_from $_setting; and not __fish_seen_subcommand_from tempmode tempdelete" -a off -d 'Disable'
 end
+
+# Level 3g — share subcommands
+complete -c wryayer -n "__fish_seen_subcommand_from share; and not __fish_seen_subcommand_from add remove list" -a add    -d 'Add a directory to the shared list'
+complete -c wryayer -n "__fish_seen_subcommand_from share; and not __fish_seen_subcommand_from add remove list" -a remove -d 'Remove a directory from the shared list'
+complete -c wryayer -n "__fish_seen_subcommand_from share; and not __fish_seen_subcommand_from add remove list" -a list   -d 'List currently shared directories'

@@ -226,10 +226,13 @@ wryayer run firefox
 wryayer run firefox -- --new-window        # pass -- to separate wryayer flags from app flags
 wryayer run firefox -- ~/Documents/doc.pdf
 
-# Multi-binary apps: pick which binary to invoke. Must be one of the
-# launchers registered for the app (otherwise wryayer refuses to run it).
+# Multi-binary apps installed with --bin-names: pick which binary to invoke.
+# Must be one of the launchers registered for the app.
 wryayer run neovim --bin nvim
-wryayer run neovim --bin rg -- --json "TODO" .
+
+# Aliases (installed via --into) are run via their own alias name, not the target.
+# After: wryayer install ripgrep --into neovim
+wryayer run ripgrep -- --json "TODO" .   # or just: rg --json "TODO" .
 ```
 
 ### List installed apps
@@ -406,7 +409,7 @@ The config is stored as a human-readable INI file at `~/.wryayer/<app>/config.in
 - **AUR packages with custom build steps** (non-standard `PKGBUILD` layouts) may produce a `.pkg.tar.zst` that doesn't extract cleanly. Check the build log with `[t]` in the TUI.
 - **GLib apps may miss GSettings schemas** if a dependency ships schemas that aren't compiled after extraction. wryayer runs `glib-compile-schemas` on the main app's schema dir, but not on dependency dirs. Workaround: run `glib-compile-schemas ~/.wryayer/<app>/usr/share/glib-2.0/schemas/` manually.
 - **The TUI progress bar is indeterminate** during install and update operations because pacman doesn't emit structured progress on stderr. The actual log is one `[t]` keypress away.
-- **Disk usage figures in `wryayer list`** are per-app apparent sizes; they don't subtract hard-linked savings. Use the Space tab in the TUI or run `wryayer list` for the combined total with savings noted.
+- **Disk usage figures in `wryayer list`** are per-app apparent sizes; they don't subtract hard-linked savings. The footer line of `wryayer list` and the Space tab in the TUI both show the combined total with savings noted.
 
 ---
 
