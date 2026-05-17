@@ -114,6 +114,9 @@ pub enum Screen {
 pub enum PendingAction {
     Remove(String),
     ConfirmedRemove(String),
+    /// Remove a target app together with all aliases that point at it.
+    RemoveCascade(String, Vec<String>),
+    ConfirmedRemoveCascade(String),
     Update(String),
     Install { pkg: String, into: Option<String> },
     Export(String),
@@ -468,6 +471,27 @@ fn on_installed(app: &mut App, code: KeyCode) {
         KeyCode::Char('d') | KeyCode::Delete => {
             if let Some(m) = app.selected_installed() {
                 let name = m.app.name.clone();
+                if m.app.alias_of.is_none() {
+                    let dependents: Vec<String> = app.installed
+                        .iter()
+                        .filter(|other| other.app.alias_of.as_deref() == Some(&name))
+                        .map(|other| other.app.name.clone())
+                        .collect();
+                    if !dependents.is_empty() {
+                        let n = dependents.len();
+                        app.screen = Screen::Confirm {
+                            title: format!("Remove '{name}' and {n} alias(es)?"),
+                            body: vec![
+                                format!("Also removes: {}", dependents.join(", ")),
+                                String::new(),
+                                "Press y to delete all, n or Esc to cancel.".into(),
+                            ],
+                            action: PendingAction::RemoveCascade(name, dependents),
+                            danger: true,
+                        };
+                        return;
+                    }
+                }
                 app.screen = Screen::Confirm {
                     title: format!("Remove '{name}'?"),
                     body: vec![
@@ -632,6 +656,7 @@ fn on_install(app: &mut App, code: KeyCode) {
                         // into an existing app (-> `wryayer install --into`).
                         let targets: Vec<String> = app.installed
                             .iter()
+                            .filter(|m| m.app.alias_of.is_none())
                             .map(|m| m.app.name.clone())
                             .collect();
                         if targets.is_empty() {
@@ -810,6 +835,22 @@ fn execute_action(app: &mut App, action: PendingAction) {
         }
         PendingAction::ConfirmedRemove(name) =>
             launch_op(app, format!("Remove — {name}"), vec!["remove".into(), name], None, true),
+        PendingAction::RemoveCascade(name, aliases) => {
+            let alias_list = aliases.join(", ");
+            app.screen = Screen::Confirm {
+                title: format!("PERMANENTLY delete '{name}' and all aliases?"),
+                body: vec![
+                    format!("Will delete: {name}, {alias_list}"),
+                    "This cannot be undone.".into(),
+                    String::new(),
+                    "Press y again to confirm, n or Esc to cancel.".into(),
+                ],
+                action: PendingAction::ConfirmedRemoveCascade(name),
+                danger: true,
+            };
+        }
+        PendingAction::ConfirmedRemoveCascade(name) =>
+            launch_op(app, format!("Remove — {name}"), vec!["remove".into(), "--cascade".into(), name], None, true),
         PendingAction::Update(name) =>
             launch_op(app, format!("Update — {name}"), vec!["update".into(), name], None, true),
         PendingAction::Install { pkg, into: None } =>

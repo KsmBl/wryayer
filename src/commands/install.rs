@@ -25,7 +25,20 @@ pub fn run(
     // alias_name: the dir under ~/.wryayer/ that holds this install's manifest.
     //   - fresh mode: the only dir that exists for this app
     //   - merge mode: a thin alias dir holding a manifest with alias_of = target_name
-    let target_name = into.unwrap_or(pkg_name).to_string();
+    //
+    // In merge mode, follow one hop of the alias chain: if the user passes
+    // --into fastfetch and fastfetch is itself an alias of cpufetch, the real
+    // filesystem tree is cpufetch's. Extracting into the alias dir would leave
+    // the binary in a near-empty directory without the shared library tree.
+    let target_name = if let Some(into_name) = into {
+        let resolved = read_manifest(into_name)
+            .ok()
+            .and_then(|m| m.app.alias_of)
+            .unwrap_or_else(|| into_name.to_string());
+        resolved
+    } else {
+        pkg_name.to_string()
+    };
     let alias_name = app_name.unwrap_or(pkg_name).to_string();
     let target_dir = app_dir(&target_name)?;
     let alias_dir = app_dir(&alias_name)?;
@@ -175,13 +188,17 @@ pub fn run(
             }
         }
 
-        // Launchers always point at target_name (where the binary lives), even
-        // for aliases — the launcher script bind-mounts the target's tree.
+        // In merge mode the launcher must use alias_name so it calls
+        // `wryayer run <alias>`, which reads the alias manifest and follows
+        // alias_of to find the right filesystem tree and main_binary.
+        // Using target_name here would call `wryayer run cpufetch` for every
+        // merged binary regardless of which binary was actually requested.
+        let launcher_app = if merge_mode { &alias_name_owned } else { &target_name_owned };
         for bin in &bin_names_for_closure {
             if created_launchers.contains(bin) {
                 continue;
             }
-            let launcher_path = create_launcher(&target_name_owned, bin)
+            let launcher_path = create_launcher(launcher_app, bin)
                 .with_context(|| format!("failed to create launcher for {bin}"))?;
             created_launchers.push(bin.to_string());
             eprintln!("Created launcher: {}", launcher_path.display());

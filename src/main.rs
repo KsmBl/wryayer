@@ -40,6 +40,9 @@ enum Commands {
     Remove {
         /// The app name as shown by `wryayer list`
         app_name: String,
+        /// Also remove all alias apps that point at this target
+        #[arg(long)]
+        cascade: bool,
     },
     /// List all installed apps
     List,
@@ -193,7 +196,13 @@ fn main() {
             };
             commands::install::run(&pkg, app_name.as_deref(), &names, into.as_deref())
         }
-        Commands::Remove { app_name } => commands::remove::run(&app_name),
+        Commands::Remove { app_name, cascade } => {
+            if cascade {
+                commands::remove::run_cascade(&app_name)
+            } else {
+                commands::remove::run(&app_name)
+            }
+        }
         Commands::List => commands::list::run(),
         Commands::Run { app_name, bin, args } => commands::run::run(&app_name, bin.as_deref(), &args),
         Commands::Update { app_name, check } => {

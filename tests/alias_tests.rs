@@ -6,7 +6,7 @@
 // bwrap.
 
 use std::sync::Mutex;
-use wryayer::commands::remove;
+use wryayer::commands::remove::{self, run_cascade};
 use wryayer::launcher::create_launcher;
 use wryayer::manifest::*;
 
@@ -139,8 +139,9 @@ fn remove_alias_deletes_alias_dir_only() {
         write_app(root, "hyfetch", Some("fastfetch"));
         // Pretend ~/bin/hyfetch was created by install; remove::run would
         // call remove_launcher on it. Create it via the real helper so the
-        // safety header is present.
-        create_launcher("fastfetch", "hyfetch").unwrap();
+        // safety header is present. Must use the alias name ("hyfetch"), not
+        // the target ("fastfetch"), matching the fixed install behaviour.
+        create_launcher("hyfetch", "hyfetch").unwrap();
 
         remove::run("hyfetch").unwrap();
 
@@ -212,15 +213,75 @@ fn remove_target_succeeds_once_aliases_are_gone() {
     with_temp_home(|root| {
         write_app(root, "fastfetch", None);
         write_app(root, "hyfetch", Some("fastfetch"));
-        // Pre-create the alias's launcher so remove::run doesn't choke.
-        create_launcher("fastfetch", "hyfetch").unwrap();
+        // Pre-create launchers so remove::run doesn't choke.
+        // Alias launcher uses alias name; target launcher uses target name.
+        create_launcher("hyfetch", "hyfetch").unwrap();
         create_launcher("fastfetch", "fastfetch").unwrap();
 
-        remove::run("hyfetch").unwrap();
-        remove::run("fastfetch").unwrap();
+        remove::run("hyfetch").unwrap();   // removes alias launcher + alias dir
+        remove::run("fastfetch").unwrap(); // removes target launcher + target dir
 
         assert!(!root.join(".wryayer/fastfetch").exists());
         assert!(!root.join(".wryayer/hyfetch").exists());
+    });
+}
+
+// ── run_cascade ───────────────────────────────────────────────────────────────
+
+#[test]
+fn run_cascade_removes_target_and_all_aliases() {
+    with_temp_home(|root| {
+        write_app(root, "fastfetch", None);
+        write_app(root, "hyfetch", Some("fastfetch"));
+        write_app(root, "neofetch-alt", Some("fastfetch"));
+        create_launcher("fastfetch", "fastfetch").unwrap();
+        create_launcher("hyfetch", "hyfetch").unwrap();
+        create_launcher("neofetch-alt", "neofetch-alt").unwrap();
+
+        run_cascade("fastfetch").unwrap();
+
+        assert!(!root.join(".wryayer/fastfetch").exists(), "target dir must be removed");
+        assert!(!root.join(".wryayer/hyfetch").exists(), "alias hyfetch dir must be removed");
+        assert!(!root.join(".wryayer/neofetch-alt").exists(), "alias neofetch-alt dir must be removed");
+        assert!(!root.join("bin/fastfetch").exists(), "target launcher must be removed");
+        assert!(!root.join("bin/hyfetch").exists(), "alias launcher must be removed");
+        assert!(!root.join("bin/neofetch-alt").exists(), "alias launcher must be removed");
+    });
+}
+
+#[test]
+fn run_cascade_on_alias_acts_like_plain_remove() {
+    with_temp_home(|root| {
+        write_app(root, "fastfetch", None);
+        write_app(root, "hyfetch", Some("fastfetch"));
+        create_launcher("hyfetch", "hyfetch").unwrap();
+
+        run_cascade("hyfetch").unwrap();
+
+        assert!(!root.join(".wryayer/hyfetch").exists(), "alias dir must be removed");
+        assert!(root.join(".wryayer/fastfetch").exists(), "target dir must remain");
+    });
+}
+
+// ── launcher content for aliases ──────────────────────────────────────────────
+
+#[test]
+fn alias_launcher_invokes_alias_not_target() {
+    // Regression: install --into used to create the launcher with the target
+    // app name, so ~/bin/hyfetch would exec `wryayer run cpufetch` and always
+    // run cpufetch's main_binary regardless of which binary was requested.
+    // The fix passes alias_name to create_launcher; verify the content here.
+    with_temp_home(|root| {
+        create_launcher("hyfetch", "hyfetch").unwrap();
+        let content = std::fs::read_to_string(root.join("bin/hyfetch")).unwrap();
+        assert!(
+            content.contains(r#"run "hyfetch""#),
+            "alias launcher must invoke `wryayer run hyfetch`; got:\n{content}",
+        );
+        assert!(
+            !content.contains(r#"run "cpufetch""#),
+            "alias launcher must not reference the target app name; got:\n{content}",
+        );
     });
 }
 

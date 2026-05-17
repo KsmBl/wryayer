@@ -3,6 +3,34 @@ use crate::manifest::{app_dir, list_all_apps, read_manifest};
 use anyhow::{bail, Result};
 use std::fs;
 
+pub fn run_cascade(app_name: &str) -> Result<()> {
+    let manifest = match read_manifest(app_name) {
+        Ok(m) => m,
+        Err(_) => {
+            eprintln!("'{app_name}' is not installed.");
+            return Ok(());
+        }
+    };
+
+    if manifest.app.alias_of.is_some() {
+        return run(app_name);
+    }
+
+    let dependents: Vec<String> = list_all_apps()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|m| m.app.alias_of.as_deref() == Some(app_name))
+        .map(|m| m.app.name)
+        .collect();
+
+    for alias in &dependents {
+        eprintln!("Removing alias '{alias}'...");
+        run(alias)?;
+    }
+
+    run(app_name)
+}
+
 pub fn run(app_name: &str) -> Result<()> {
     let manifest = match read_manifest(app_name) {
         Ok(m) => m,
