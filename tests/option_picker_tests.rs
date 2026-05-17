@@ -1,0 +1,207 @@
+use wryayer::config::{AppConfig, LocalDelete, TempMode};
+use wryayer::tui::{
+    apply_setting, cycle_setting, setting_current, setting_options, setting_title,
+};
+
+// ── setting_options: shape of each row's choice list ─────────────────────────
+
+#[test]
+fn options_for_bool_rows_are_on_off() {
+    for idx in 0..=3 {
+        assert_eq!(setting_options(idx), vec!["on", "off"], "row {idx}");
+    }
+}
+
+#[test]
+fn options_for_temp_mode_has_four_choices() {
+    assert_eq!(setting_options(4), vec!["system", "ramdisk", "local", "uuid"]);
+}
+
+#[test]
+fn options_for_temp_delete_has_three_choices() {
+    assert_eq!(setting_options(5), vec!["never", "on_start", "on_close"]);
+}
+
+#[test]
+fn options_for_non_picker_rows_are_empty() {
+    // CFG_SHARES (6) and CFG_SAVE (7) are handled by their own screens.
+    assert!(setting_options(6).is_empty());
+    assert!(setting_options(7).is_empty());
+    assert!(setting_options(999).is_empty());
+}
+
+// ── setting_title: human-readable label per row ──────────────────────────────
+
+#[test]
+fn titles_match_known_rows() {
+    assert_eq!(setting_title(0), "Network");
+    assert_eq!(setting_title(1), "Camera");
+    assert_eq!(setting_title(2), "Microphone");
+    assert_eq!(setting_title(3), "Audio");
+    assert_eq!(setting_title(4), "Temp mode");
+    assert_eq!(setting_title(5), "Temp delete");
+}
+
+#[test]
+fn title_for_unknown_row_falls_back() {
+    assert_eq!(setting_title(99), "Option");
+}
+
+// ── setting_current: round-trips with the underlying enum ────────────────────
+
+#[test]
+fn current_index_matches_default_config() {
+    let c = AppConfig::default();
+    // Defaults: network/camera/mic/audio = on → index 0
+    for idx in 0..=3 {
+        assert_eq!(setting_current(&c, idx), 0, "row {idx} should be 'on'");
+    }
+    // Default temp_mode = System → index 0
+    assert_eq!(setting_current(&c, 4), 0);
+    // Default temp_delete = OnStart → index 1
+    assert_eq!(setting_current(&c, 5), 1);
+}
+
+#[test]
+fn current_index_reflects_off_values() {
+    let mut c = AppConfig::default();
+    c.network = false;
+    c.camera = false;
+    c.microphone = false;
+    c.audio = false;
+    for idx in 0..=3 {
+        assert_eq!(setting_current(&c, idx), 1, "row {idx} should be 'off'");
+    }
+}
+
+#[test]
+fn current_index_for_temp_mode_each_variant() {
+    let mut c = AppConfig::default();
+    c.temp_mode = TempMode::System;  assert_eq!(setting_current(&c, 4), 0);
+    c.temp_mode = TempMode::Ramdisk; assert_eq!(setting_current(&c, 4), 1);
+    c.temp_mode = TempMode::Local;   assert_eq!(setting_current(&c, 4), 2);
+    c.temp_mode = TempMode::Uuid;    assert_eq!(setting_current(&c, 4), 3);
+}
+
+#[test]
+fn current_index_for_temp_delete_each_variant() {
+    let mut c = AppConfig::default();
+    c.temp_delete = LocalDelete::Never;   assert_eq!(setting_current(&c, 5), 0);
+    c.temp_delete = LocalDelete::OnStart; assert_eq!(setting_current(&c, 5), 1);
+    c.temp_delete = LocalDelete::OnClose; assert_eq!(setting_current(&c, 5), 2);
+}
+
+// ── apply_setting: writes the right field/variant ────────────────────────────
+
+#[test]
+fn apply_writes_each_bool_row() {
+    let mut c = AppConfig::default();
+    apply_setting(&mut c, 0, 1); assert!(!c.network);
+    apply_setting(&mut c, 0, 0); assert!(c.network);
+    apply_setting(&mut c, 1, 1); assert!(!c.camera);
+    apply_setting(&mut c, 2, 1); assert!(!c.microphone);
+    apply_setting(&mut c, 3, 1); assert!(!c.audio);
+}
+
+#[test]
+fn apply_writes_each_temp_mode_variant() {
+    let mut c = AppConfig::default();
+    apply_setting(&mut c, 4, 3); assert_eq!(c.temp_mode, TempMode::Uuid);
+    apply_setting(&mut c, 4, 2); assert_eq!(c.temp_mode, TempMode::Local);
+    apply_setting(&mut c, 4, 1); assert_eq!(c.temp_mode, TempMode::Ramdisk);
+    apply_setting(&mut c, 4, 0); assert_eq!(c.temp_mode, TempMode::System);
+}
+
+#[test]
+fn apply_writes_each_temp_delete_variant() {
+    let mut c = AppConfig::default();
+    apply_setting(&mut c, 5, 0); assert_eq!(c.temp_delete, LocalDelete::Never);
+    apply_setting(&mut c, 5, 2); assert_eq!(c.temp_delete, LocalDelete::OnClose);
+    apply_setting(&mut c, 5, 1); assert_eq!(c.temp_delete, LocalDelete::OnStart);
+}
+
+#[test]
+fn apply_out_of_range_is_silent_noop() {
+    let mut c = AppConfig::default();
+    let before = c.clone();
+    apply_setting(&mut c, 4, 99); // bogus choice for temp_mode
+    apply_setting(&mut c, 99, 0); // bogus row
+    assert_eq!(c.temp_mode, before.temp_mode);
+    assert_eq!(c.temp_delete, before.temp_delete);
+    assert_eq!(c.network, before.network);
+}
+
+// ── cycle_setting: forward and inverse round-trip ────────────────────────────
+//
+// The user requested Left as the inverse of Right. Strongest guarantee we can
+// assert: cycling forward once then back once returns to the original value.
+
+#[test]
+fn cycle_forward_then_back_is_identity_for_bool_rows() {
+    for idx in 0..=3 {
+        let mut c = AppConfig::default();
+        let before = setting_current(&c, idx);
+        cycle_setting(&mut c, idx, 1);
+        cycle_setting(&mut c, idx, -1);
+        assert_eq!(setting_current(&c, idx), before, "row {idx} round-trip failed");
+    }
+}
+
+#[test]
+fn cycle_forward_then_back_is_identity_for_temp_mode() {
+    let mut c = AppConfig::default();
+    for start in [TempMode::System, TempMode::Ramdisk, TempMode::Local, TempMode::Uuid] {
+        c.temp_mode = start.clone();
+        cycle_setting(&mut c, 4, 1);
+        cycle_setting(&mut c, 4, -1);
+        assert_eq!(c.temp_mode, start);
+    }
+}
+
+#[test]
+fn cycle_forward_then_back_is_identity_for_temp_delete() {
+    let mut c = AppConfig::default();
+    for start in [LocalDelete::Never, LocalDelete::OnStart, LocalDelete::OnClose] {
+        c.temp_delete = start.clone();
+        cycle_setting(&mut c, 5, 1);
+        cycle_setting(&mut c, 5, -1);
+        assert_eq!(c.temp_delete, start);
+    }
+}
+
+#[test]
+fn cycle_forward_wraps_at_end_for_temp_mode() {
+    let mut c = AppConfig::default();
+    c.temp_mode = TempMode::Uuid; // last option (index 3)
+    cycle_setting(&mut c, 4, 1);
+    assert_eq!(c.temp_mode, TempMode::System, "Uuid → System (wrap)");
+}
+
+#[test]
+fn cycle_backward_wraps_at_start_for_temp_mode() {
+    let mut c = AppConfig::default();
+    c.temp_mode = TempMode::System; // first option (index 0)
+    cycle_setting(&mut c, 4, -1);
+    assert_eq!(c.temp_mode, TempMode::Uuid, "System → Uuid (wrap)");
+}
+
+#[test]
+fn cycle_backward_steps_through_temp_mode_in_reverse() {
+    let mut c = AppConfig::default();
+    c.temp_mode = TempMode::Uuid;
+    cycle_setting(&mut c, 4, -1); assert_eq!(c.temp_mode, TempMode::Local);
+    cycle_setting(&mut c, 4, -1); assert_eq!(c.temp_mode, TempMode::Ramdisk);
+    cycle_setting(&mut c, 4, -1); assert_eq!(c.temp_mode, TempMode::System);
+    cycle_setting(&mut c, 4, -1); assert_eq!(c.temp_mode, TempMode::Uuid); // wrap
+}
+
+#[test]
+fn cycle_on_empty_options_is_noop() {
+    let mut c = AppConfig::default();
+    let before = c.clone();
+    cycle_setting(&mut c, 6, 1);  // CFG_SHARES — no options
+    cycle_setting(&mut c, 7, -1); // CFG_SAVE — no options
+    assert_eq!(c.network, before.network);
+    assert_eq!(c.temp_mode, before.temp_mode);
+    assert_eq!(c.temp_delete, before.temp_delete);
+}
