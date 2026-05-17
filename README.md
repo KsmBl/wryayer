@@ -1,0 +1,484 @@
+# wryayer
+
+> Isolated per-app package management for Arch Linux — no root, no containers, no daemon.
+
+[![License: LGPL-3.0-or-later](https://img.shields.io/badge/License-LGPL%203.0-blue.svg)](LICENSE)
+[![Platform: Arch Linux](https://img.shields.io/badge/platform-Arch%20Linux-1793d1?logo=arch-linux&logoColor=white)](https://archlinux.org)
+[![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange?logo=rust)](https://rustup.rs)
+
+wryayer wraps `pacman` and the AUR to install packages into fully-isolated per-app directory trees under `~/.wryayer/<app>/`. Each app and all its transitive dependencies live in their own private filesystem root and are launched inside a **bubblewrap** (`bwrap`) sandbox. No root access, no systemd units, no Flatpak runtimes — just ordinary files, hard links, and Linux namespaces.
+
+---
+
+## Why this exists
+
+Arch Linux has one of the richest package ecosystems on the planet, but its single-root package model means:
+
+- Installing an old or alternate version of an app is painful or impossible without AUR hacks.
+- A poorly-packaged AUR tool can clobber shared libraries used by other apps.
+- There is no per-app permission model: once installed, an app can read your entire home directory.
+
+wryayer solves all three by extracting packages into self-contained directory trees that are bind-mounted as `/` at runtime. Apps can't see your home directory unless you explicitly share a folder. Conflicting dependency versions coexist without interference. Removing an app is a single `rm -rf`.
+
+**It is not a security sandbox.** The goal is isolation and disk-space efficiency, not hardened confinement. A determined app can still escape via `/proc`, shared IPC, or device access; `audio=off` and `network=off` raise the bar but are not guarantees.
+
+---
+
+## Architecture
+
+```
+                          ┌──────────────────────────────────────────┐
+                          │                 wryayer                   │
+                          └──────────────┬───────────────────────────┘
+              ┌───────────────────────────┴──────────────────────────┐
+              │  TUI (ratatui / crossterm)    CLI (clap)             │
+              │  ┌─────────────────────┐   install   remove  list   │
+              │  │ Installed │ Install │   run       update  repair  │
+              │  │ Import    │ Space   │   config    export  import  │
+              │  └─────────────────────┘   snapshot  rollback        │
+              │                            snapshots dedup completions│
+              └────────────────────────┬─────────────────────────────┘
+                                       │
+          ┌────────────────────────────┼──────────────────────────────┐
+          │                      Core layer                           │
+          │                                                           │
+          │  manifest.rs           config.rs          launcher.rs     │
+          │  ┌──────────────┐   ┌────────────────┐  ┌─────────────┐   │
+          │  │ .manifest.   │   │ config.ini     │  │ ~/bin/<app> │   │
+          │  │ toml R/W     │   │ INI parse/write│  │ shell wrap  │   │
+          │  │ list apps    │   │ sandbox options│  │ create/rm   │   │
+          │  └──────────────┘   └────────────────┘  └─────────────┘   │
+          │                                                           │
+          │  package/                        commands/dedup.rs        │
+          │  ┌──────────────────────────┐   ┌─────────────────────┐   │
+          │  │ deps.rs                  │   │ hard-link identical │   │
+          │  │  BFS dep resolver        │   │ files across apps   │   │
+          │  │  pacman -Si + AUR RPC    │   │ (dev,ino) accounting│   │
+          │  │  virtual/soname fallback │   │ format_bytes / du   │   │
+          │  │ download.rs              │   └─────────────────────┘   │
+          │  │  official: pacman -Sp    │                             │
+          │  │  AUR: git clone+makepkg  │                             │
+          │  │ extract.rs               │                             │
+          │  │  tar --zstd -xf          │                             │
+          │  │ soname_check.rs          │                             │
+          │  │  ldd + pacman -Qqo       │                             │
+          │  └──────────────────────────┘                             │
+          └───────────────────────────────────────────────────────────┘
+
+Filesystem layout:
+─────────────────
+~/.wryayer/
+├── firefox/                 ← isolated root (bind-mounted as / at runtime)
+│   ├── usr/
+│   │   ├── bin/firefox
+│   │   └── lib/             ← shared libs, hard-linked with other apps
+│   │        libz.so.1       │  where content is identical (dedup)
+│   │        libpng.so.16    │
+│   ├── etc/                 ← app-specific /etc
+│   ├── .manifest.toml       ← package list + install metadata
+│   └── config.ini           ← per-app sandbox settings
+├── fastfetch/               ← target of an `install --into` chain
+│   ├── usr/bin/{fastfetch,hyfetch}
+│   └── .manifest.toml
+├── hyfetch/                 ← thin alias dir — no extracted files
+│   ├── .manifest.toml       ← alias_of = "fastfetch"
+│   └── config.ini           ← independent sandbox config
+└── vlc/
+     └── ...
+
+~/bin/
+├── firefox    ──►  exec wryayer run firefox "$@"
+├── fastfetch  ──►  exec wryayer run fastfetch "$@"
+├── hyfetch    ──►  exec wryayer run hyfetch "$@"   (bwrap roots on fastfetch/)
+└── vlc
+
+bwrap sandbox at runtime:
+──────────────────────────
+~/.wryayer/<app>/   ──► /           (app root, rw)
+/dev                ──► /dev        (devices, configurable)
+/proc               ──► /proc
+/sys                ──► /sys        (read-only)
+/run                ──► /run
+/tmp                ──► /tmp        (system | tmpfs | local dir | uuid dir)
+/etc/resolv.conf    ──► /etc/...    (read-only host network/identity files)
+/etc/hosts               ...
+/etc/ssl/certs           ...
+<shared_dirs>       ──► <same>      (user-configured, read-write)
+```
+
+---
+
+## Prerequisites
+
+| Requirement | Notes |
+|---|---|
+| **Arch Linux** (or derivative) | `pacman` and AUR are required for dep resolution and downloads |
+| **bubblewrap** (`bwrap`) | `sudo pacman -S bubblewrap` — needed at runtime |
+| **Rust toolchain** | `curl https://sh.rustup.rs -sSf \| sh` — for building |
+| **git** | AUR package builds: `sudo pacman -S git` |
+| **base-devel** | AUR builds: `sudo pacman -S base-devel` |
+| **yay** (optional) | AUR builds fall back to `makepkg`; yay cache reused when present |
+| `vercmp` | Bundled with `pacman`, used for version comparison |
+| `ldconfig` | Bundled with `glibc`, used after installation |
+| `glib-compile-schemas` | Optional — GLib apps need it; from `glib2` package |
+
+---
+
+## Building from source
+
+```fish
+# Clone
+git clone https://github.com/KsmBl/wryayer.git
+cd wryayer
+
+# Build release binary
+cargo build --release
+
+# Install to ~/bin/ (already on PATH if you followed setup)
+cp target/release/wryayer ~/bin/
+```
+
+For development builds (faster compile, debug symbols):
+
+```fish
+cargo build
+cp target/debug/wryayer ~/bin/
+```
+
+---
+
+## Shell completions
+
+Generate and install completions once; they are auto-loaded by fish:
+
+```fish
+# fish
+wryayer completions fish > ~/.config/fish/completions/wryayer.fish
+
+# bash
+wryayer completions bash >> ~/.bashrc
+
+# zsh
+wryayer completions zsh >> ~/.zshrc
+```
+
+Re-run after updating the binary to pick up new subcommands.
+
+---
+
+## Usage
+
+### Install an app
+
+```fish
+# From the official repos or AUR — wryayer detects automatically
+wryayer install firefox
+wryayer install neovim
+
+# Override the app directory name and/or the ~/bin/ launcher name
+wryayer install python --app-name py312 --bin-name python3.12
+
+# Multiple launchers from one package (e.g. a toolkit shipping several CLIs)
+wryayer install imagemagick --bin-names convert,identify,mogrify
+
+# Install additively into an existing app's directory — useful for plugins
+# and multi-tool bundles. The new package's files land in the target's
+# tree (sharing deps already extracted there), but the new package gets
+# its own thin manifest dir at ~/.wryayer/<pkg>/ that carries an
+# `alias_of` pointer back to the target. Each alias is a first-class
+# entry in `wryayer list` and `wryayer tui`, gets its own ~/bin/<name>
+# launcher, and can have its own sandbox config.
+wryayer install neovim
+wryayer install ripgrep --into neovim
+wryayer install fd      --into neovim
+
+# Pick a different name for the alias dir (defaults to the package name)
+wryayer install hyfetch --into fastfetch --app-name hf
+```
+
+The resulting layout:
+
+```
+~/.wryayer/
+├── neovim/
+│   ├── usr/bin/nvim, rg, fd  ← all the real binaries live here
+│   └── .manifest.toml         ← lists neovim, ripgrep, fd packages
+├── ripgrep/
+│   └── .manifest.toml         ← alias_of = "neovim", launchers = [rg]
+└── fd/
+    └── .manifest.toml         ← alias_of = "neovim", launchers = [fd]
+```
+
+Aliases run inside the target's tree but read **their own** `config.ini`, so
+you can give a plugin a different sandbox profile (e.g. `network=off`) than
+the host app. Removing an alias deletes only the alias dir + its launcher;
+the target's tree is left intact. Removing a target while aliases still point
+at it is refused with an explicit error listing the blocking aliases.
+
+### Run an app
+
+```fish
+# Via the generated launcher (preferred)
+firefox
+
+# Via wryayer run
+wryayer run firefox
+wryayer run firefox -- --new-window        # pass -- to separate wryayer flags from app flags
+wryayer run firefox -- ~/Documents/doc.pdf
+
+# Multi-binary apps: pick which binary to invoke. Must be one of the
+# launchers registered for the app (otherwise wryayer refuses to run it).
+wryayer run neovim --bin nvim
+wryayer run neovim --bin rg -- --json "TODO" .
+```
+
+### List installed apps
+
+```fish
+wryayer list
+```
+
+Output:
+
+```
+name       version      installed            size       launchers
+------------------------------------------------------------------------
+firefox    130.0.1-1    2026-05-10T14:23:00  847.3 MiB  firefox
+vlc        3.0.21-1     2026-05-11T09:01:00  312.7 MiB  vlc
+------------------------------------------------------------------------
+apparent: 1.1 GiB   on disk: 960 MiB   saves: 200 MiB
+```
+
+### Remove an app
+
+```fish
+wryayer remove firefox
+```
+
+If the app has any aliases pointing at it (created via `install --into`),
+removal is refused until those aliases are removed first — otherwise their
+launcher scripts would silently target a missing directory. Removing the
+alias itself is always safe and never touches the target tree.
+
+### Update apps
+
+```fish
+wryayer update            # check and update all apps
+wryayer update firefox    # update one app
+wryayer update --check    # report available updates without installing
+```
+
+### Export and import
+
+```fish
+# Pack an app's entire directory tree into a portable zip
+wryayer export firefox
+wryayer export firefox --output /mnt/backup/firefox-2026.zip
+
+# Import a previously-exported zip (re-creates the app as if freshly installed)
+wryayer import firefox-2026.zip
+```
+
+The export progress bar in the TUI is real — wryayer pre-counts entries, then emits `PROGRESS n/total` markers during the zip write so the gauge and ETA reflect actual work done.
+
+### Snapshot and rollback
+
+Snapshots are **instant and near-free in disk space** — they create a hard-linked clone of the live app dir under `~/.wryayer/<app>/.snapshots/<timestamp>/`. Rollbacks atomically restore the live tree from a chosen snapshot.
+
+```fish
+# Snapshot the current state of an app
+wryayer snapshot firefox
+
+# List snapshots for an app, newest first
+wryayer snapshots firefox
+
+# Roll back to the most recent snapshot
+wryayer rollback firefox
+
+# Roll back to a specific labelled snapshot
+wryayer rollback firefox 20260516-141022
+```
+
+Snapshots survive updates because wryayer extracts new packages with `tar --unlink-first`: a re-extracted file gets a new inode while the snapshot's hard link keeps pointing at the old content. The cross-app dedup pass at the end of every install re-establishes shared-library hard links.
+
+Snapshots are excluded from `wryayer list` size totals, `wryayer dedup`, and the export zip.
+
+### Deduplicate shared files
+
+After installing multiple apps that share libraries, identical files are automatically hard-linked. Run manually at any time:
+
+```fish
+wryayer dedup           # silent
+wryayer dedup --verbose # print every file linked
+```
+
+### Scan for missing shared libraries
+
+If an app crashes with a missing `.so` error, this command finds and installs the missing package:
+
+```fish
+wryayer repair firefox
+```
+
+### Interactive TUI
+
+```fish
+wryayer tui
+```
+
+Key bindings:
+
+| Key | Action |
+|---|---|
+| `Tab` / `Shift+Tab` | Switch tabs (Installed / Install / Import / Space) |
+| `↑` / `↓` or `j` / `k` | Navigate lists |
+| `r` | Run selected app |
+| `d` / `Delete` | Remove selected app (double-confirm) |
+| `e` | Export selected app to a zip |
+| `p` | Snapshot selected app (hard-linked clone) |
+| `o` | Roll selected app back to its latest snapshot |
+| `u` | Update selected app |
+| `c` | Check for updates |
+| `s` | Open per-app config |
+| `q` / `Esc` | Quit / close overlay |
+| `t` | Toggle debug log during install/remove operations |
+| `Shift+Q` | Force-quit from anywhere |
+
+---
+
+## Per-app configuration
+
+```fish
+# Show current config
+wryayer config firefox
+
+# Change settings
+wryayer config firefox network off        # block internet access
+wryayer config firefox audio off          # mute audio output + mic
+wryayer config firefox tempmode ramdisk   # private in-memory /tmp
+
+# Shared directories (bind-mounted read-write into the sandbox)
+wryayer config firefox share add ~/Documents
+wryayer config firefox share add ~/Downloads
+wryayer config firefox share remove ~/Documents
+wryayer config firefox share list
+```
+
+### Config reference
+
+| Setting | Values | Default | Description |
+|---|---|---|---|
+| `tempmode` | `system` `ramdisk` `local` `uuid` | `system` | How `/tmp` is provided inside the sandbox |
+| `tempdelete` | `never` `on_start` `on_close` | `on_start` | When to clean up local temp dirs (only with `tempmode local`) |
+| `network` | `on` `off` | `on` | Allow outgoing network access |
+| `camera` | `on` `off` | `on` | Allow `/dev/video*` camera access |
+| `microphone` | `on` `off` | `on` | Mask ALSA capture devices (see caveat below) |
+| `audio` | `on` `off` | `on` | Mask ALSA + PipeWire/PulseAudio sockets |
+| `share add <path>` | Any existing directory | — | Bind-mount `<path>` read-write inside the sandbox |
+
+The config is stored as a human-readable INI file at `~/.wryayer/<app>/config.ini`.
+
+---
+
+## Caveats
+
+**Arch Linux only.** The dependency resolver calls `pacman -Si` and the AUR RPC. Debian, Fedora, and other distros are not supported.
+
+**glibc version pinning.** The sandbox root's glibc must match the host dynamic linker (`/lib/ld-linux-x86-64.so.2`). wryayer excludes `glibc` from extraction by default, relying on the host linker. If you install an app built against a significantly different glibc, it may crash with `version GLIBC_X.XX not found`.
+
+**Microphone isolation is incomplete.** Setting `microphone=off` masks ALSA capture devices (`/dev/snd/pcmC*D*c`). Apps using PipeWire or PulseAudio can still access the microphone socket in `XDG_RUNTIME_DIR`. To fully block mic access, also set `audio=off`.
+
+**No D-Bus session bus isolation.** The sandbox inherits the host `DBUS_SESSION_BUS_ADDRESS`. Apps that use D-Bus can still talk to other session services (Notifications, portal services, etc.).
+
+**Hard links require same filesystem.** Deduplication only works when all `~/.wryayer/<app>/` directories are on the same filesystem. If you mount `~/.wryayer` on a separate partition from another app, `dedup` will silently skip cross-device hard-links.
+
+**AUR builds run makepkg as your user.** This is the same trust model as using yay directly. Build scripts execute arbitrary code. Only install from AUR packages you trust.
+
+**Wayland socket not isolated.** The Wayland display socket (`$XDG_RUNTIME_DIR/wayland-0`) is accessible inside the sandbox via `/run`. Apps have full Wayland access.
+
+**No SETUID/SETCAP binaries.** bwrap drops most capabilities. Apps that rely on setuid helpers (e.g., some network tools) will fail unless you add the helper to your system installation.
+
+---
+
+## Known issues
+
+- **soname resolution occasionally misses packages.** If `wryayer repair` can't find a `.so`, it usually means the owning package uses an unusual installation path. Workaround: install the package system-wide and copy the `.so` into `~/.wryayer/<app>/usr/lib/`.
+- **AUR packages with custom build steps** (non-standard `PKGBUILD` layouts) may produce a `.pkg.tar.zst` that doesn't extract cleanly. Check the build log with `[t]` in the TUI.
+- **GLib apps may miss GSettings schemas** if a dependency ships schemas that aren't compiled after extraction. wryayer runs `glib-compile-schemas` on the main app's schema dir, but not on dependency dirs. Workaround: run `glib-compile-schemas ~/.wryayer/<app>/usr/share/glib-2.0/schemas/` manually.
+- **The TUI progress bar is indeterminate** during install and update operations because pacman doesn't emit structured progress on stderr. The actual log is one `[t]` keypress away.
+- **Disk usage figures in `wryayer list`** are per-app apparent sizes; they don't subtract hard-linked savings. Use the Space tab in the TUI or run `wryayer list` for the combined total with savings noted.
+
+---
+
+## Planned features
+
+- [x] **Multi-binary apps** — install an app that ships more than one launcher binary (`--bin-names a,b,c`)
+- [x] **Rollback support** — `wryayer snapshot` + `wryayer rollback` (hard-linked, instant)
+- [x] **Install into existing app** — `wryayer install <pkg> --into <existing>` for plugins and bundles; alias gets its own first-class entry under `~/.wryayer/<pkg>/` with `alias_of` pointer
+- [x] **TUI install target picker** — choosing Install on a search result now prompts whether to start a new app or merge into an existing one
+- [ ] **Wayland isolation** — bind a private Wayland socket so apps can't impersonate each other
+- [ ] **D-Bus portal forwarding** — route file-chooser and notification portals through `xdg-desktop-portal` without exposing the full session bus
+- [ ] **Package signing verification** — validate `.pkg.tar.zst` signatures before extraction
+- [ ] **Delta updates** — only re-download changed packages instead of the full dep tree
+- [ ] **Export/import via SSH or SFTP** — `wryayer export --remote user@host:/path`
+- [ ] **TUI package search from AUR** — the Install tab currently searches pacman only
+- [ ] **Per-app env var overrides** — let users set `LANG`, `QT_SCALE_FACTOR`, etc. in `config.ini`
+- [ ] **Dependency graph viewer** — TUI screen showing the full package tree for an installed app
+- [ ] **Auto-snapshot on update** — capture a snapshot automatically before each update so failures can be undone with one keystroke
+
+---
+
+## Developing and testing
+
+### Build
+
+```fish
+cargo build
+```
+
+### Run tests
+
+Tests that touch the filesystem isolate themselves by temporarily redirecting `HOME` to a temp directory. Run with a single thread to avoid races on the `HOME` environment variable:
+
+```fish
+cargo test -- --test-threads=1
+```
+
+Or set a thread-safe count per test binary:
+
+```fish
+RUST_TEST_THREADS=1 cargo test
+```
+
+### Test coverage
+
+The test suite targets **≥ 90 % branch coverage** on all pure and filesystem-dependent logic. Coverage is achieved through **equivalence class partitioning** — one representative value per class rather than exhaustive enumeration — combined with explicit boundary and error-path tests.
+
+| Module | What is covered |
+|---|---|
+| `config.rs` | `parse_ini` (all keys, all enum variants, error paths), `format_ini`, `parse_bool` (3 EC), round-trip |
+| `manifest.rs` | `write_manifest`/`read_manifest` round-trip, `list_all_apps` (empty, sorted, skips bad dirs), atomicity |
+| `launcher.rs` | `create_launcher` (content, permissions), `remove_launcher` (missing, non-wryayer, valid) |
+| `commands/dedup.rs` | `format_bytes` (4 EC + 7 boundaries), `du_walk` (SKIP_DIRS, hard-link accounting) |
+| `package/deps.rs` | `strip_version_constraint` (7 operators), `is_soname_dep` (5 EC), `parse_pacman_field`, `parse_pacman_depends` (5 EC) |
+| `commands/run.rs` | Arg stripping (5 cases), `no_other_instance` (missing file, bad content, live PID, dead PID) |
+| `commands/install.rs` | `ensure_base_layout` (creates all symlinks, idempotent, preserves real dirs) |
+| `commands/snapshot.rs` | `create` / `labels` / `latest` round-trip, inode sharing, `.snapshots` recursion guard, `rollback` (restores modifications, errors on missing label, preserves snapshots dir) |
+| `commands/remove.rs` + alias model | `alias_of` serde round-trip, `skip_serializing_if` for `None`, legacy manifests without the field still parse, `list_all_apps` surfaces aliases as own entries, removing an alias leaves the target tree + manifest untouched, removing a target with dependent aliases is blocked with all blockers named, standalone removal unaffected |
+| `tui/mod.rs` | `parse_progress` (`PROGRESS n/total` parsing + garbage rejection), konami FSM (full sequence, wrong-key reset, case-insensitive BA) |
+
+External-tool-dependent code (`query_official`, `bwrap_cmd`, `reinstall`) is covered by integration tests that require a live Arch Linux environment with `pacman` and `bwrap` present.
+
+---
+
+## License
+
+Copyright © 2026 KsmBl and contributors.
+
+wryayer is free software: you can redistribute it and/or modify it under the terms of the **GNU Lesser General Public License** as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful, but **WITHOUT ANY WARRANTY**; without even the implied warranty of **MERCHANTABILITY** or **FITNESS FOR A PARTICULAR PURPOSE**. See the [GNU Lesser General Public License](https://www.gnu.org/licenses/lgpl-3.0.html) for more details.
+
+A copy of the license is included in this repository as [`LICENSE`](LICENSE).
+
+> **Note for package distributors:** The LGPL requires that users be able to relink a modified version of the library. Because wryayer is a standalone binary application (not a shared library), this condition is satisfied by making the source code available, which this repository does.
