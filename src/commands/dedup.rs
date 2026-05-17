@@ -7,7 +7,7 @@ use std::io::{BufReader, Read};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
-const SKIP_DIRS: &[&str] = &["home", ".tmp"];
+const SKIP_DIRS: &[&str] = &["home", ".tmp", ".snapshots"];
 const SKIP_FILES: &[&str] = &[".manifest.toml", "config.ini", ".instance.pid"];
 
 pub fn run(verbose: bool) -> Result<()> {
@@ -121,7 +121,7 @@ pub fn all_du() -> Result<(HashMap<String, u64>, u64, u64)> {
     Ok((per_app, total_apparent, total_actual))
 }
 
-fn du_walk(dir: &Path, apparent: &mut u64, actual: &mut u64, seen: &mut HashSet<(u64, u64)>) {
+pub fn du_walk(dir: &Path, apparent: &mut u64, actual: &mut u64, seen: &mut HashSet<(u64, u64)>) {
     let Ok(rd) = std::fs::read_dir(dir) else { return };
     for entry in rd.flatten() {
         let Ok(meta) = entry.metadata() else { continue };
@@ -202,7 +202,7 @@ fn hash_file(path: &Path) -> Result<u64, std::io::Error> {
 
 /// Atomically replace `dup` with a hard link to `canonical` using a
 /// sibling temp file + rename so the path is never absent.
-fn atomic_hard_link(canonical: &Path, dup: &Path) -> Result<()> {
+pub fn atomic_hard_link(canonical: &Path, dup: &Path) -> Result<()> {
     let mut tmp_name = dup.file_name().unwrap_or_default().to_os_string();
     tmp_name.push(".wry_dedup");
     let tmp = dup.parent().unwrap_or(Path::new(".")).join(tmp_name);
