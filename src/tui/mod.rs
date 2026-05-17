@@ -94,6 +94,21 @@ pub enum Screen {
         setting_idx: usize,
         selected: usize,
     },
+    /// Help popup shown when the user presses `?` on a Config row.
+    /// Dismisses on any key and returns to Config with `back_selected` active.
+    SettingHelp {
+        app_name: String,
+        config: AppConfig,
+        back_selected: usize,
+    },
+    /// Per-option help popup opened from OptionPicker when the user presses `?`
+    /// while hovering over a specific choice.  Dismisses back to OptionPicker.
+    OptionHelp {
+        app_name: String,
+        config: AppConfig,
+        setting_idx: usize,
+        picker_selected: usize,
+    },
 }
 
 pub enum PendingAction {
@@ -358,6 +373,8 @@ fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
         Screen::SharedDirs { .. } => 6,
         Screen::InstallTarget { .. } => 7,
         Screen::OptionPicker { .. } => 8,
+        Screen::SettingHelp { .. } => 9,
+        Screen::OptionHelp { .. } => 10,
     };
 
     match tag {
@@ -370,6 +387,8 @@ fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
         6 => on_shared_dirs(app, code),
         7 => on_install_target(app, code),
         8 => on_option_picker(app, code),
+        9 => on_setting_help(app, code),
+        10 => on_option_help(app, code),
         _ => {}
     }
     Ok(())
@@ -948,6 +967,13 @@ fn on_config(app: &mut App, code: KeyCode) {
             };
             app.needs_clear = true;
         }
+        KeyCode::Char('?') => {
+            let name = app_name.clone();
+            let cfg = config.clone();
+            let sel = *selected;
+            app.screen = Screen::SettingHelp { app_name: name, config: cfg, back_selected: sel };
+            app.needs_clear = true;
+        }
         _ => {}
     }
 }
@@ -975,6 +1001,48 @@ pub fn setting_title(idx: usize) -> &'static str {
         4 => "Temp mode",
         5 => "Temp delete",
         _ => "Option",
+    }
+}
+
+/// One-paragraph description of what each config row controls.
+pub fn setting_description(idx: usize) -> &'static str {
+    match idx {
+        0 => "Allow outgoing internet access from the sandbox. Disable to run the app fully offline and prevent all network calls.",
+        1 => "Allow the app to access webcam devices (/dev/video*). Disable to block camera access entirely.",
+        2 => "Allow microphone access. Note: PipeWire/PulseAudio mic is only fully blocked when Audio is also disabled.",
+        3 => "Allow audio playback and capture via PipeWire/PulseAudio. Disabling this also helps block microphone access through the sound server.",
+        4 => "Where the app's /tmp lives: 'system' shares the host /tmp; 'ramdisk' uses an in-memory tmpfs (fast, private); 'local' uses ~/.wryayer/<app>/.tmp/; 'uuid' creates a fresh private dir on each launch.",
+        5 => "When to clean up the local temp dir (local/uuid modes): 'never' keeps it between launches; 'on_start' deletes it before each launch; 'on_close' deletes it after the app exits.",
+        6 => "Host directories bind-mounted read-write into the sandbox. Useful for sharing downloads, projects, or config files between the app and your system.",
+        _ => "No description available.",
+    }
+}
+
+/// Description of the specific choice `choice_idx` within the setting at `idx`.
+pub fn option_description(setting_idx: usize, choice_idx: usize) -> &'static str {
+    match (setting_idx, choice_idx) {
+        // Network
+        (0, 0) => "on — Allow outgoing network connections from the sandbox.",
+        (0, 1) => "off — Block all network access; the app runs fully offline.",
+        // Camera
+        (1, 0) => "on — Allow the app to access webcam devices (/dev/video*).",
+        (1, 1) => "off — Block access to all camera devices.",
+        // Microphone
+        (2, 0) => "on — Allow microphone access. For full isolation also turn Audio off.",
+        (2, 1) => "off — Block microphone access via device permissions.",
+        // Audio
+        (3, 0) => "on — Allow audio playback and capture via PipeWire/PulseAudio.",
+        (3, 1) => "off — Block PipeWire/PulseAudio sockets; also cuts off the sound-server mic path.",
+        // Temp mode
+        (4, 0) => "system — Use the host /tmp. Fast, but shared with the rest of the system.",
+        (4, 1) => "ramdisk — Mount a private in-memory tmpfs as /tmp. Fast, fully isolated, and wiped when the app exits.",
+        (4, 2) => "local — Use ~/.wryayer/<app>/.tmp/ as /tmp. Persists across launches; controlled by Temp delete.",
+        (4, 3) => "uuid — Create a fresh private temp dir on each launch. Maximum isolation; nothing from prior runs is reused.",
+        // Temp delete
+        (5, 0) => "never — Keep the temp dir between launches. Useful for apps that cache heavy data in /tmp.",
+        (5, 1) => "on_start — Delete and recreate the temp dir before each launch; always starts fresh.",
+        (5, 2) => "on_close — Delete the temp dir after the app exits; cleans up automatically.",
+        _ => "No description available.",
     }
 }
 
@@ -1077,8 +1145,49 @@ fn on_option_picker(app: &mut App, code: KeyCode) {
             app.screen = Screen::Config { app_name: name, config: cfg, selected: idx };
             app.needs_clear = true;
         }
+        KeyCode::Char('?') => {
+            let name = app_name.clone();
+            let cfg = config.clone();
+            let idx = *setting_idx;
+            let sel = *selected;
+            app.screen = Screen::OptionHelp {
+                app_name: name,
+                config: cfg,
+                setting_idx: idx,
+                picker_selected: sel,
+            };
+            app.needs_clear = true;
+        }
         _ => {}
     }
+}
+
+// ── Option help popup ─────────────────────────────────────────────────────────
+
+fn on_option_help(app: &mut App, _code: KeyCode) {
+    let Screen::OptionHelp { app_name, config, setting_idx, picker_selected } = &mut app.screen else { return };
+    let name = app_name.clone();
+    let cfg = config.clone();
+    let idx = *setting_idx;
+    let sel = *picker_selected;
+    app.screen = Screen::OptionPicker {
+        app_name: name,
+        config: cfg,
+        setting_idx: idx,
+        selected: sel,
+    };
+    app.needs_clear = true;
+}
+
+// ── Setting help popup ────────────────────────────────────────────────────────
+
+fn on_setting_help(app: &mut App, _code: KeyCode) {
+    let Screen::SettingHelp { app_name, config, back_selected } = &mut app.screen else { return };
+    let name = app_name.clone();
+    let cfg = config.clone();
+    let sel = *back_selected;
+    app.screen = Screen::Config { app_name: name, config: cfg, selected: sel };
+    app.needs_clear = true;
 }
 
 // ── Space tab ─────────────────────────────────────────────────────────────────

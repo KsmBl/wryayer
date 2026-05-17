@@ -1,6 +1,7 @@
 use wryayer::config::{AppConfig, LocalDelete, TempMode};
 use wryayer::tui::{
-    apply_setting, cycle_setting, setting_current, setting_options, setting_title,
+    apply_setting, cycle_setting, option_description, setting_current, setting_description,
+    setting_options, setting_title,
 };
 
 // ── setting_options: shape of each row's choice list ─────────────────────────
@@ -204,4 +205,100 @@ fn cycle_on_empty_options_is_noop() {
     assert_eq!(c.network, before.network);
     assert_eq!(c.temp_mode, before.temp_mode);
     assert_eq!(c.temp_delete, before.temp_delete);
+}
+
+// ── setting_description: each known row has a non-empty description ───────────
+
+#[test]
+fn description_for_each_picker_row_is_nonempty() {
+    for idx in 0..=6 {
+        let d = setting_description(idx);
+        assert!(!d.is_empty(), "row {idx} should have a description");
+        assert!(d.len() > 10, "row {idx} description is suspiciously short: {d:?}");
+    }
+}
+
+#[test]
+fn description_for_unknown_row_has_fallback() {
+    let d = setting_description(999);
+    assert!(!d.is_empty(), "fallback description must not be empty");
+}
+
+#[test]
+fn descriptions_are_distinct() {
+    let descs: Vec<&str> = (0..=6).map(setting_description).collect();
+    for i in 0..descs.len() {
+        for j in (i + 1)..descs.len() {
+            assert_ne!(descs[i], descs[j], "rows {i} and {j} share the same description");
+        }
+    }
+}
+
+// ── option_description: per-choice descriptions ───────────────────────────────
+
+#[test]
+fn option_description_boolean_rows_lead_with_on_or_off() {
+    // Rows 0–3 are boolean (on/off). The convention is that choice 0 starts
+    // with "on" and choice 1 starts with "off" so the popup title matches.
+    for idx in 0..=3 {
+        assert!(
+            option_description(idx, 0).starts_with("on"),
+            "row {idx} choice 0 should start with 'on', got: {:?}",
+            option_description(idx, 0),
+        );
+        assert!(
+            option_description(idx, 1).starts_with("off"),
+            "row {idx} choice 1 should start with 'off', got: {:?}",
+            option_description(idx, 1),
+        );
+    }
+}
+
+#[test]
+fn option_description_all_known_choices_are_nonempty() {
+    for idx in 0..=5 {
+        let opts = setting_options(idx);
+        for (choice, opt) in opts.iter().enumerate() {
+            let d = option_description(idx, choice);
+            assert!(!d.is_empty(), "row {idx} choice {choice} ({opt}) has empty description");
+            assert!(d.len() > 10, "row {idx} choice {choice} ({opt}) description is too short: {d:?}");
+        }
+    }
+}
+
+#[test]
+fn option_description_contains_option_name_for_temp_mode() {
+    assert!(option_description(4, 0).contains("system"),  "system choice should mention 'system'");
+    assert!(option_description(4, 1).contains("ramdisk"), "ramdisk choice should mention 'ramdisk'");
+    assert!(option_description(4, 2).contains("local"),   "local choice should mention 'local'");
+    assert!(option_description(4, 3).contains("uuid"),    "uuid choice should mention 'uuid'");
+}
+
+#[test]
+fn option_description_contains_option_name_for_temp_delete() {
+    assert!(option_description(5, 0).contains("never"),    "never choice should mention 'never'");
+    assert!(option_description(5, 1).contains("on_start"), "on_start choice should mention 'on_start'");
+    assert!(option_description(5, 2).contains("on_close"), "on_close choice should mention 'on_close'");
+}
+
+#[test]
+fn option_description_fallback_for_unknown_pair() {
+    let d = option_description(99, 99);
+    assert!(!d.is_empty(), "fallback must not be empty");
+}
+
+#[test]
+fn option_descriptions_within_same_setting_are_distinct() {
+    for idx in 0..=5 {
+        let opts = setting_options(idx);
+        let descs: Vec<&str> = (0..opts.len()).map(|c| option_description(idx, c)).collect();
+        for i in 0..descs.len() {
+            for j in (i + 1)..descs.len() {
+                assert_ne!(
+                    descs[i], descs[j],
+                    "row {idx} choices {i} and {j} share the same option description",
+                );
+            }
+        }
+    }
 }

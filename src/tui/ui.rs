@@ -94,6 +94,22 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             draw_config(f, area, &app_name, &config, setting_idx);
             draw_option_picker(f, area, setting_idx, selected, &config);
         }
+        Screen::SettingHelp { app_name, config, back_selected } => {
+            let app_name = app_name.clone();
+            let config = config.clone();
+            let back_selected = *back_selected;
+            draw_config(f, area, &app_name, &config, back_selected);
+            draw_setting_help(f, area, back_selected);
+        }
+        Screen::OptionHelp { app_name, config, setting_idx, picker_selected } => {
+            let app_name = app_name.clone();
+            let config = config.clone();
+            let setting_idx = *setting_idx;
+            let picker_selected = *picker_selected;
+            draw_config(f, area, &app_name, &config, setting_idx);
+            draw_option_picker(f, area, setting_idx, picker_selected, &config);
+            draw_option_help(f, area, setting_idx, picker_selected);
+        }
     }
 }
 
@@ -851,7 +867,7 @@ fn draw_config(f: &mut Frame, area: Rect, app_name: &str, config: &AppConfig, se
     let footer_y = inner.y + inner.height.saturating_sub(1);
     f.render_widget(
         Paragraph::new(Span::styled(
-            " [↑↓] Navigate  [←/→] Cycle  [Enter] Choose…  [Esc/q] Discard",
+            " [↑↓] Navigate  [←/→] Cycle  [Enter] Choose…  [?] Help  [Esc/q] Discard",
             Style::default().fg(C_DIM),
         )),
         Rect { x: inner.x, y: footer_y, width: inner.width, height: 1 },
@@ -910,7 +926,82 @@ fn draw_option_picker(
 
     f.render_widget(
         Paragraph::new(Span::styled(
-            " [↑↓/jk] Navigate  [Enter] Select  [Esc] Cancel",
+            " [↑↓/jk] Navigate  [Enter] Select  [?] Help  [Esc] Cancel",
+            Style::default().fg(C_DIM),
+        )),
+        chunks[1],
+    );
+}
+
+// ── Setting help popup ────────────────────────────────────────────────────────
+
+fn draw_setting_help(f: &mut Frame, area: Rect, setting_idx: usize) {
+    let title = super::setting_title(setting_idx);
+    let desc  = super::setting_description(setting_idx);
+
+    let popup = centered_rect(54, 40, area);
+    f.render_widget(Clear, popup);
+
+    let block = Block::default().borders(Borders::ALL)
+        .title(format!(" ? {title} "))
+        .title_style(Style::default().fg(C_YELLOW).add_modifier(Modifier::BOLD))
+        .border_style(Style::default().fg(C_YELLOW));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .split(inner);
+
+    f.render_widget(
+        Paragraph::new(format!("  {desc}"))
+            .style(Style::default().fg(Color::White))
+            .wrap(Wrap { trim: false }),
+        chunks[0],
+    );
+
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            " Press any key to close",
+            Style::default().fg(C_DIM),
+        )),
+        chunks[1],
+    );
+}
+
+// ── Option help popup ─────────────────────────────────────────────────────────
+
+fn draw_option_help(f: &mut Frame, area: Rect, setting_idx: usize, choice_idx: usize) {
+    let options = super::setting_options(setting_idx);
+    let opt_name = options.get(choice_idx).copied().unwrap_or("?");
+    let desc = super::option_description(setting_idx, choice_idx);
+
+    let popup = centered_rect(54, 35, area);
+    f.render_widget(Clear, popup);
+
+    let block = Block::default().borders(Borders::ALL)
+        .title(format!(" ? {opt_name} "))
+        .title_style(Style::default().fg(C_YELLOW).add_modifier(Modifier::BOLD))
+        .border_style(Style::default().fg(C_YELLOW));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .split(inner);
+
+    f.render_widget(
+        Paragraph::new(format!("  {desc}"))
+            .style(Style::default().fg(Color::White))
+            .wrap(Wrap { trim: false }),
+        chunks[0],
+    );
+
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            " Press any key to close",
             Style::default().fg(C_DIM),
         )),
         chunks[1],

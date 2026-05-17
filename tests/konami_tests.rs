@@ -19,6 +19,13 @@ fn parse_progress_garbage_returns_none() {
     assert_eq!(parse_progress(""), None);
 }
 
+#[test]
+fn parse_progress_trims_whitespace_around_numbers() {
+    // The parser calls trim() on both sides of '/'; verify it actually works.
+    assert_eq!(parse_progress("PROGRESS 42 / 100"), Some((42, 100)));
+    assert_eq!(parse_progress("PROGRESS  0 / 1"),   Some((0, 1)));
+}
+
 // ── konami sequence FSM ──────────────────────────────────────────────────────
 
 #[test]
