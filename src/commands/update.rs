@@ -133,6 +133,7 @@ fn reinstall(manifest: &crate::manifest::Manifest) -> Result<()> {
             main_binary: bin_name.clone(),
             installed_at: now_rfc3339(),
             launchers: manifest.app.launchers.clone(),
+            alias_of: manifest.app.alias_of.clone(),
         },
         packages,
     };

@@ -5,7 +5,7 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub fn run(app_name: &str, args: &[String]) -> Result<()> {
+pub fn run(app_name: &str, bin: Option<&str>, args: &[String]) -> Result<()> {
     // Strip a leading "--" separator (e.g. `wryayer run firefox -- file.pdf`)
     let args = match args {
         [first, rest @ ..] if first == "--" => rest,
@@ -14,14 +14,35 @@ pub fn run(app_name: &str, args: &[String]) -> Result<()> {
 
     let manifest = read_manifest(app_name)
         .with_context(|| format!("'{app_name}' is not installed"))?;
+
+    // Aliases (created by `install --into`) carry the binaries' real location
+    // in `alias_of`. The alias has its own config and launchers list; the
+    // filesystem tree (bwrap root) belongs to the target.
+    let fs_root_name = manifest.app.alias_of.clone().unwrap_or_else(|| app_name.to_string());
+    let app_root = app_dir(&fs_root_name)?;
+    if !app_root.exists() {
+        bail!(
+            "app directory missing: {} (target of alias '{app_name}')",
+            app_root.display(),
+        );
+    }
     let config = read_config(app_name)?;
 
-    let app_root = app_dir(app_name)?;
-    if !app_root.exists() {
-        bail!("app directory missing: {}", app_root.display());
-    }
-
-    let binary = format!("/usr/bin/{}", manifest.app.main_binary);
+    // bin override: must be one of the app's registered launchers, otherwise
+    // anyone could trick `wryayer run` into invoking arbitrary binaries.
+    let bin_name = match bin {
+        None => manifest.app.main_binary.clone(),
+        Some(b) => {
+            if !manifest.app.launchers.iter().any(|l| l == b) {
+                bail!(
+                    "binary '{b}' is not registered for {app_name} (launchers: {})",
+                    manifest.app.launchers.join(", ")
+                );
+            }
+            b.to_string()
+        }
+    };
+    let binary = format!("/usr/bin/{bin_name}");
     let app_root_str = app_root.to_string_lossy().into_owned();
 
     let (temp, cleanup) = prepare_temp(&config, &app_root)?;
@@ -93,7 +114,7 @@ fn prepare_temp(config: &AppConfig, app_root: &Path) -> Result<(TempBind, Option
     }
 }
 
-fn no_other_instance(pid_file: &Path) -> bool {
+pub fn no_other_instance(pid_file: &Path) -> bool {
     let Ok(content) = std::fs::read_to_string(pid_file) else {
         return true;
     };

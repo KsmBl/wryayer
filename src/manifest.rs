@@ -16,6 +16,11 @@ pub struct AppMeta {
     pub main_binary: String,
     pub installed_at: String,
     pub launchers: Vec<String>,
+    /// Set when this app is a thin alias whose binaries actually live inside
+    /// another app's tree (created by `install --into <target>`). The alias
+    /// dir holds just this manifest and its own config — no extracted files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias_of: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

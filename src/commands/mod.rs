@@ -1,4 +1,4 @@
-pub mod backup;
+pub mod export;
 pub mod snapshot;
 pub mod config;
 pub mod dedup;

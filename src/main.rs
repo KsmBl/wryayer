@@ -1,11 +1,7 @@
-mod commands;
-mod config;
-mod launcher;
-mod manifest;
-mod package;
-mod tui;
+use wryayer::{commands, tui};
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::{generate, Shell};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -31,6 +27,14 @@ enum Commands {
         /// Override the launcher binary name placed in ~/bin/ (default: pkg name)
         #[arg(long)]
         bin_name: Option<String>,
+        /// Create multiple launchers — comma-separated list of binary names
+        /// (overrides --bin-name). Each binary must exist in the package.
+        #[arg(long, value_delimiter = ',')]
+        bin_names: Vec<String>,
+        /// Install this package additively into an existing app's directory
+        /// instead of creating a new one. Useful for plugins, multi-tool bundles.
+        #[arg(long)]
+        into: Option<String>,
     },
     /// Remove an installed app and its launchers
     Remove {
@@ -43,6 +47,9 @@ enum Commands {
     Run {
         /// The app name as shown by `wryayer list`
         app_name: String,
+        /// Run a specific binary inside the app (default: app's main binary)
+        #[arg(long)]
+        bin: Option<String>,
         /// Arguments to pass to the app binary
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -67,18 +74,35 @@ enum Commands {
         #[command(subcommand)]
         setting: Option<ConfigSetting>,
     },
-    /// Create a zip backup of an installed app
-    Backup {
+    /// Create a zip export of an installed app
+    Export {
         /// The app name as shown by `wryayer list`
         app_name: String,
         /// Output file path (default: ./<app>-YYYY-MM-DD.zip)
         #[arg(long, short)]
         output: Option<PathBuf>,
     },
-    /// Import an app from a wryayer backup zip
+    /// Import an app from a wryayer export zip
     Import {
-        /// Path to the zip file created by `wryayer backup`
+        /// Path to the zip file created by `wryayer export`
         path: PathBuf,
+    },
+    /// Create a hard-linked snapshot of an installed app (cheap, instant)
+    Snapshot {
+        /// The app name as shown by `wryayer list`
+        app_name: String,
+    },
+    /// Roll an installed app back to a previous snapshot
+    Rollback {
+        /// The app name as shown by `wryayer list`
+        app_name: String,
+        /// Snapshot label to restore (default: most recent)
+        snapshot: Option<String>,
+    },
+    /// List snapshots for an installed app
+    Snapshots {
+        /// The app name as shown by `wryayer list`
+        app_name: String,
     },
     /// Launch the interactive TUI
     Tui,
@@ -87,6 +111,11 @@ enum Commands {
         /// Print every file that gets linked
         #[arg(long, short)]
         verbose: bool,
+    },
+    /// Print shell completion script to stdout
+    Completions {
+        /// Shell to generate completions for (bash, fish, zsh, elvish, powershell)
+        shell: Shell,
     },
 }
 
@@ -154,12 +183,19 @@ fn main() {
     let cli = Cli::parse();
 
     let result = match cli.command {
-        Commands::Install { pkg, app_name, bin_name } => {
-            commands::install::run(&pkg, app_name.as_deref(), bin_name.as_deref())
+        Commands::Install { pkg, app_name, bin_name, bin_names, into } => {
+            let names: Vec<String> = if !bin_names.is_empty() {
+                bin_names
+            } else if let Some(b) = bin_name {
+                vec![b]
+            } else {
+                vec![]
+            };
+            commands::install::run(&pkg, app_name.as_deref(), &names, into.as_deref())
         }
         Commands::Remove { app_name } => commands::remove::run(&app_name),
         Commands::List => commands::list::run(),
-        Commands::Run { app_name, args } => commands::run::run(&app_name, &args),
+        Commands::Run { app_name, bin, args } => commands::run::run(&app_name, bin.as_deref(), &args),
         Commands::Update { app_name, check } => {
             commands::update::run(app_name.as_deref(), check)
         }
@@ -190,12 +226,21 @@ fn main() {
                 ShareAction::List => commands::config::share_list(&app_name),
             },
         },
-        Commands::Backup { app_name, output } => {
-            commands::backup::run(&app_name, output.as_ref())
+        Commands::Export { app_name, output } => {
+            commands::export::run(&app_name, output.as_ref())
         }
         Commands::Import { path } => commands::import::run(&path),
+        Commands::Snapshot { app_name } => commands::snapshot::create(&app_name).map(|_| ()),
+        Commands::Rollback { app_name, snapshot } => {
+            commands::snapshot::rollback(&app_name, snapshot.as_deref())
+        }
+        Commands::Snapshots { app_name } => commands::snapshot::list(&app_name),
         Commands::Tui => tui::run(),
         Commands::Dedup { verbose } => commands::dedup::run(verbose),
+        Commands::Completions { shell } => {
+            generate(shell, &mut Cli::command(), "wryayer", &mut std::io::stdout());
+            Ok(())
+        }
     };
 
     if let Err(e) = result {
