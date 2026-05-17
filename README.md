@@ -1,12 +1,15 @@
 # wryayer
 
-> Isolated per-app package management for Arch Linux — no root, no containers, no daemon.
+> Isolated per-app package management — no root, no containers, no daemon.
+> Supports **Arch Linux** (pacman + AUR) and **Debian / Ubuntu** (apt).
 
 [![License: LGPL-3.0-or-later](https://img.shields.io/badge/License-LGPL%203.0-blue.svg)](LICENSE)
-[![Platform: Arch Linux](https://img.shields.io/badge/platform-Arch%20Linux-1793d1?logo=arch-linux&logoColor=white)](https://archlinux.org)
+[![Platform: Arch / Debian](https://img.shields.io/badge/platform-Arch%20%7C%20Debian%20%7C%20Ubuntu-blue)](https://github.com/KsmBl/wryayer)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange?logo=rust)](https://rustup.rs)
 
-wryayer wraps `pacman` and the AUR to install packages into fully-isolated per-app directory trees under `~/.wryayer/<app>/`. Each app and all its transitive dependencies live in their own private filesystem root and are launched inside a **bubblewrap** (`bwrap`) sandbox. No root access, no systemd units, no Flatpak runtimes — just ordinary files, hard links, and Linux namespaces.
+wryayer installs packages into fully-isolated per-app directory trees under `~/.wryayer/<app>/`. Each app and all its transitive dependencies live in their own private filesystem root and are launched inside a **bubblewrap** (`bwrap`) sandbox. No root access, no systemd units, no Flatpak runtimes — just ordinary files, hard links, and Linux namespaces.
+
+On **Arch Linux** it resolves and downloads packages via `pacman` and the AUR. On **Debian / Ubuntu** it uses `apt-get download` and `dpkg-deb`. The distro is detected automatically from `/etc/os-release`.
 
 ---
 
@@ -53,16 +56,23 @@ wryayer solves all three by extracting packages into self-contained directory tr
           │  ┌──────────────────────────┐   ┌─────────────────────┐   │
           │  │ deps.rs                  │   │ hard-link identical │   │
           │  │  BFS dep resolver        │   │ files across apps   │   │
-          │  │  pacman -Si + AUR RPC    │   │ (dev,ino) accounting│   │
-          │  │  virtual/soname fallback │   │ format_bytes / du   │   │
-          │  │ download.rs              │   └─────────────────────┘   │
-          │  │  official: pacman -Sp    │                             │
-          │  │  AUR: git clone+makepkg  │                             │
+          │  │  virtual/soname fallback │   │ (dev,ino) accounting│   │
+          │  │ download.rs              │   │ format_bytes / du   │   │
+          │  │  delegates to distro.rs  │   └─────────────────────┘   │
           │  │ extract.rs               │                             │
-          │  │  tar --zstd -xf          │                             │
+          │  │  delegates to distro.rs  │                             │
           │  │ soname_check.rs          │                             │
-          │  │  ldd + pacman -Qqo       │                             │
+          │  │  delegates to distro.rs  │                             │
           │  └──────────────────────────┘                             │
+          │                                                           │
+          │  distro.rs  (auto-detected from /etc/os-release)          │
+          │  ┌──────────────────────────────────────────────────┐     │
+          │  │  Arch: pacman -Si, pacman -Sp, tar --zstd, vercmp│     │
+          │  │         AUR RPC + git clone + makepkg            │     │
+          │  │  Debian: apt-cache show, apt-get download,        │     │
+          │  │          dpkg-deb -x, dpkg -S, dpkg --compare-   │     │
+          │  │          versions                                 │     │
+          │  └──────────────────────────────────────────────────┘     │
           └───────────────────────────────────────────────────────────┘
 
 Filesystem layout:
@@ -110,17 +120,33 @@ bwrap sandbox at runtime:
 
 ## Prerequisites
 
-| Requirement | Notes |
-|---|---|
-| **Arch Linux** (or derivative) | `pacman` and AUR are required for dep resolution and downloads |
-| **bubblewrap** (`bwrap`) | `sudo pacman -S bubblewrap` — needed at runtime |
-| **Rust toolchain** | `curl https://sh.rustup.rs -sSf \| sh` — for building |
-| **git** | AUR package builds: `sudo pacman -S git` |
-| **base-devel** | AUR builds: `sudo pacman -S base-devel` |
-| **yay** (optional) | AUR builds fall back to `makepkg`; yay cache reused when present |
-| `vercmp` | Bundled with `pacman`, used for version comparison |
-| `ldconfig` | Bundled with `glibc`, used after installation |
-| `glib-compile-schemas` | Optional — GLib apps need it; from `glib2` package |
+wryayer auto-detects your distro from `/etc/os-release` and uses the appropriate package backend. Install the tools for your distro before building.
+
+### Arch Linux
+
+| Requirement | How to install | Notes |
+|---|---|---|
+| **bubblewrap** | `sudo pacman -S bubblewrap` | Required at runtime |
+| **Rust toolchain** | `curl https://sh.rustup.rs -sSf \| sh` | For building |
+| **git** | `sudo pacman -S git` | AUR package builds |
+| **base-devel** | `sudo pacman -S base-devel` | AUR builds (`makepkg`) |
+| **yay** (optional) | AUR | Cache reused when present; fallback is `makepkg` |
+| `vercmp` | Bundled with `pacman` | Version comparison |
+| `ldconfig` | Bundled with `glibc` | Library cache rebuild after install |
+| `glib-compile-schemas` | `sudo pacman -S glib2` | Optional — GLib apps only |
+
+### Debian / Ubuntu
+
+| Requirement | How to install | Notes |
+|---|---|---|
+| **bubblewrap** | `sudo apt install bubblewrap` | Required at runtime |
+| **Rust toolchain** | `curl https://sh.rustup.rs -sSf \| sh` | For building |
+| **binutils** | `sudo apt install binutils` | Provides `readelf` — used by soname scanner |
+| **dpkg** | Pre-installed | Package extraction (`dpkg-deb`) |
+| **apt** | Pre-installed | Dep resolution and download |
+| `ldconfig` | `sudo apt install libc-bin` | Library cache rebuild after install |
+
+> **AUR packages are Arch-only.** On Debian/Ubuntu, only packages from `apt` repos are available. Attempting to install an AUR-only package will print a warning and skip that dep.
 
 ---
 
@@ -256,11 +282,15 @@ apparent: 1.1 GiB   on disk: 960 MiB   saves: 200 MiB
 
 ```fish
 wryayer remove firefox
+
+# Remove an app and all aliases that point at it in one shot
+wryayer remove firefox --cascade
 ```
 
 If the app has any aliases pointing at it (created via `install --into`),
 removal is refused until those aliases are removed first — otherwise their
-launcher scripts would silently target a missing directory. Removing the
+launcher scripts would silently target a missing directory. Use `--cascade`
+to remove the target and all its aliases in one command. Removing the
 alias itself is always safe and never touches the target tree.
 
 ### Update apps
@@ -302,7 +332,7 @@ wryayer rollback firefox
 wryayer rollback firefox 20260516-141022
 ```
 
-Snapshots survive updates because wryayer extracts new packages with `tar --unlink-first`: a re-extracted file gets a new inode while the snapshot's hard link keeps pointing at the old content. The cross-app dedup pass at the end of every install re-establishes shared-library hard links.
+Snapshots survive updates because wryayer unlinks any existing file before overwriting it during extraction — a re-extracted file always gets a fresh inode, while the snapshot's hard link continues pointing at the old content. The cross-app dedup pass at the end of every install re-establishes shared-library hard links.
 
 Snapshots are excluded from `wryayer list` size totals, `wryayer dedup`, and the export zip.
 
@@ -385,7 +415,7 @@ The config is stored as a human-readable INI file at `~/.wryayer/<app>/config.in
 
 ## Caveats
 
-**Arch Linux only.** The dependency resolver calls `pacman -Si` and the AUR RPC. Debian, Fedora, and other distros are not supported.
+**AUR is Arch-only.** On Debian/Ubuntu the AUR code path is never reached; deps are resolved via `apt-cache` only. Fedora and other distros are not currently supported.
 
 **glibc version pinning.** The sandbox root's glibc must match the host dynamic linker (`/lib/ld-linux-x86-64.so.2`). wryayer excludes `glibc` from extraction by default, relying on the host linker. If you install an app built against a significantly different glibc, it may crash with `version GLIBC_X.XX not found`.
 
@@ -470,7 +500,7 @@ The test suite targets **≥ 90 % branch coverage** on all pure and filesystem-d
 | `commands/remove.rs` + alias model | `alias_of` serde round-trip, `skip_serializing_if` for `None`, legacy manifests without the field still parse, `list_all_apps` surfaces aliases as own entries, removing an alias leaves the target tree + manifest untouched, removing a target with dependent aliases is blocked with all blockers named, standalone removal unaffected |
 | `tui/mod.rs` | `parse_progress` (`PROGRESS n/total` parsing + garbage rejection), konami FSM (full sequence, wrong-key reset, case-insensitive BA) |
 
-External-tool-dependent code (`query_official`, `bwrap_cmd`, `reinstall`) is covered by integration tests that require a live Arch Linux environment with `pacman` and `bwrap` present.
+External-tool-dependent code (`bwrap_cmd`, `reinstall`, distro backends) is covered by integration tests that require a live environment with `bwrap` and either `pacman` (Arch) or `apt` / `dpkg` (Debian/Ubuntu) present.
 
 ---
 

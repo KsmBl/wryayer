@@ -7,10 +7,9 @@ use crate::package::{
     build_aur, download_official, extract_package, resolve_full_dep_tree,
     satisfy_missing_sonames,
 };
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
 
 pub fn run(app_name: Option<&str>, check_only: bool) -> Result<()> {
     let manifests = match app_name {
@@ -154,21 +153,7 @@ fn reinstall(manifest: &crate::manifest::Manifest) -> Result<()> {
 }
 
 fn get_official_version(pkg_name: &str) -> Result<Option<String>> {
-    let output = Command::new("pacman")
-        .args(["-Si", pkg_name])
-        .output()
-        .context("failed to spawn pacman -Si")?;
-    if !output.status.success() {
-        return Ok(None);
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    for line in stdout.lines() {
-        if line.starts_with("Version") && line.contains(':') {
-            let ver = line.splitn(2, ':').nth(1).unwrap_or("").trim().to_string();
-            return Ok(Some(ver));
-        }
-    }
-    Ok(None)
+    crate::distro::pkg_latest_version(pkg_name)
 }
 
 fn get_aur_version(pkg_name: &str) -> Result<Option<String>> {
@@ -191,22 +176,5 @@ fn get_aur_version(pkg_name: &str) -> Result<Option<String>> {
 }
 
 fn is_newer(candidate: &str, current: &str) -> Result<bool> {
-    if candidate == current {
-        return Ok(false);
-    }
-    let output = Command::new("vercmp")
-        .args([candidate, current])
-        .output()
-        .context("failed to run vercmp")?;
-    if !output.status.success() {
-        bail!(
-            "vercmp failed:\n{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-    let result: i32 = String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .parse()
-        .context("vercmp output was not an integer")?;
-    Ok(result > 0)
+    crate::distro::version_is_newer(candidate, current)
 }

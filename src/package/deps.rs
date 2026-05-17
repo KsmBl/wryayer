@@ -1,8 +1,8 @@
+use crate::distro::{self, Distro};
 use crate::manifest::PackageSource;
 use anyhow::{Context, Result};
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
-use std::process::Command;
 
 #[derive(Debug, Clone)]
 pub struct ResolvedPackage {
@@ -14,7 +14,6 @@ pub struct ResolvedPackage {
 
 pub fn resolve_full_dep_tree(root_pkg: &str) -> Result<Vec<ResolvedPackage>> {
     let mut visited: HashSet<String> = HashSet::new();
-    // Queue holds (requested_name) — may differ from resolved name for virtual deps
     let mut queue: VecDeque<String> = VecDeque::new();
     let mut result: Vec<ResolvedPackage> = Vec::new();
 
@@ -37,7 +36,6 @@ pub fn resolve_full_dep_tree(root_pkg: &str) -> Result<Vec<ResolvedPackage>> {
 
             match query_official(&pkg)? {
                 Some((resolved_name, version, deps)) => {
-                    // Mark both the virtual name and the resolved name as visited
                     visited.insert(pkg.clone());
                     visited.insert(resolved_name.clone());
                     for dep in &deps {
@@ -53,8 +51,6 @@ pub fn resolve_full_dep_tree(root_pkg: &str) -> Result<Vec<ResolvedPackage>> {
                     });
                 }
                 None => {
-                    // Soname deps that didn't resolve via the provider lookup are
-                    // true virtual provides — skip rather than hitting AUR
                     if is_soname_dep(&pkg) {
                         eprintln!("warning: cannot resolve soname dep '{pkg}', skipping");
                         visited.insert(pkg);
@@ -66,30 +62,38 @@ pub fn resolve_full_dep_tree(root_pkg: &str) -> Result<Vec<ResolvedPackage>> {
         }
 
         if !aur_pending.is_empty() {
-            let aur_results = query_aur_batch(&aur_pending)?;
-            for pkg in &aur_pending {
-                if visited.contains(pkg) {
-                    continue;
-                }
-                match aur_results.get(pkg) {
-                    Some(info) => {
-                        visited.insert(pkg.clone());
-                        for dep in &info.depends {
-                            if !visited.contains(dep) {
-                                queue.push_back(dep.clone());
+            if distro::current() == Distro::Arch {
+                let aur_results = query_aur_batch(&aur_pending)?;
+                for pkg in &aur_pending {
+                    if visited.contains(pkg) {
+                        continue;
+                    }
+                    match aur_results.get(pkg) {
+                        Some(info) => {
+                            visited.insert(pkg.clone());
+                            for dep in &info.depends {
+                                if !visited.contains(dep) {
+                                    queue.push_back(dep.clone());
+                                }
                             }
+                            result.push(ResolvedPackage {
+                                name: pkg.clone(),
+                                version: info.version.clone(),
+                                source: PackageSource::Aur,
+                                pkg_path: None,
+                            });
                         }
-                        result.push(ResolvedPackage {
-                            name: pkg.clone(),
-                            version: info.version.clone(),
-                            source: PackageSource::Aur,
-                            pkg_path: None,
-                        });
+                        None => {
+                            eprintln!("warning: skipping virtual/unknown dependency '{pkg}'");
+                            visited.insert(pkg.clone());
+                        }
                     }
-                    None => {
-                        eprintln!("warning: skipping virtual/unknown dependency '{pkg}'");
-                        visited.insert(pkg.clone());
-                    }
+                }
+            } else {
+                // Non-Arch distros have no AUR equivalent; warn and skip.
+                for pkg in &aur_pending {
+                    eprintln!("warning: '{pkg}' not found in package repos, skipping");
+                    visited.insert(pkg.clone());
                 }
             }
         }
@@ -98,49 +102,28 @@ pub fn resolve_full_dep_tree(root_pkg: &str) -> Result<Vec<ResolvedPackage>> {
     Ok(result)
 }
 
-// Returns (resolved_package_name, version, deps).
-// resolved_package_name may differ from pkg_name when pkg_name is a virtual dep
-// (e.g. "jack" resolves to "jack2" or "pipewire-jack").
+/// Resolve a package name through the official repos, following virtual
+/// providers and soname deps as needed.
+/// Returns (resolved_name, version, deps) or None if not found anywhere.
 fn query_official(pkg_name: &str) -> Result<Option<(String, String, Vec<String>)>> {
-    // Direct lookup first
-    if let Some((ver, deps)) = pacman_si(pkg_name)? {
+    // 1. Direct lookup
+    if let Some((ver, deps)) = distro::query_pkg_info(pkg_name)? {
         return Ok(Some((pkg_name.to_string(), ver, deps)));
     }
 
-    // Virtual provider fallback: ask pacman which real package satisfies this dep.
-    // -dd skips dep/conflict checks — we're only interested in the provider name,
-    // not whether a system-wide install would succeed.
-    let output = Command::new("pacman")
-        .args([
-            "-Spdd",
-            "--noconfirm",
-            "--print-format",
-            "%n",
-            pkg_name,
-        ])
-        .output()
-        .context("failed to spawn pacman -Spdd")?;
-
-    if output.status.success() {
-        let provider = String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .next()
-            .unwrap_or("")
-            .trim()
-            .to_string();
+    // 2. Virtual provider fallback
+    if let Some(provider) = distro::resolve_virtual(pkg_name)? {
         if !provider.is_empty() && provider != pkg_name {
-            if let Some((ver, deps)) = pacman_si(&provider)? {
+            if let Some((ver, deps)) = distro::query_pkg_info(&provider)? {
                 return Ok(Some((provider, ver, deps)));
             }
         }
     }
 
-    // Soname fallback: find which installed package owns the .so file on the host.
-    // pacman -Spdd returns nothing when the package is already installed, so we
-    // look up the actual file instead: "libasound.so.2" -> pacman -Qqo /usr/lib/libasound.so.2
+    // 3. Soname fallback: find which installed package on the host owns the .so
     if is_soname_dep(pkg_name) {
-        if let Some(owner) = soname_owner(pkg_name)? {
-            if let Some((ver, deps)) = pacman_si(&owner)? {
+        if let Some(owner) = distro::soname_owner(pkg_name)? {
+            if let Some((ver, deps)) = distro::query_pkg_info(&owner)? {
                 return Ok(Some((owner, ver, deps)));
             }
         }
@@ -149,40 +132,12 @@ fn query_official(pkg_name: &str) -> Result<Option<(String, String, Vec<String>)
     Ok(None)
 }
 
+/// Thin wrapper kept for backwards compat and test accessibility.
 pub fn soname_owner(soname: &str) -> Result<Option<String>> {
-    // Strip =VERSION suffix (e.g. "libreadline.so=8-64" -> "libreadline.so")
-    let filename = soname.split('=').next().unwrap_or(soname);
-    for dir in ["/usr/lib", "/usr/lib64", "/lib", "/lib64"] {
-        let path = format!("{dir}/{filename}");
-        let out = Command::new("pacman")
-            .args(["-Qqo", &path])
-            .output()
-            .context("failed to spawn pacman -Qqo")?;
-        if out.status.success() {
-            let pkg = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !pkg.is_empty() {
-                return Ok(Some(pkg));
-            }
-        }
-    }
-    Ok(None)
+    distro::soname_owner(soname)
 }
 
-fn pacman_si(pkg_name: &str) -> Result<Option<(String, Vec<String>)>> {
-    let output = Command::new("pacman")
-        .args(["-Si", pkg_name])
-        .output()
-        .context("failed to spawn pacman -Si")?;
-
-    if !output.status.success() {
-        return Ok(None);
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let version = parse_pacman_field(&stdout, "Version").unwrap_or_default();
-    let deps = parse_pacman_depends(&stdout);
-    Ok(Some((version, deps)))
-}
+// ── Text parsers (Arch pacman output) — kept pub for integration tests ─────────
 
 pub fn parse_pacman_field(stdout: &str, field: &str) -> Option<String> {
     for line in stdout.lines() {
@@ -220,11 +175,14 @@ pub fn strip_version_constraint(dep: &str) -> &str {
         .unwrap_or(dep)
 }
 
-// Soname virtual provides like "libreadline.so" or "libreadline.so=8"
-// are not real installable package names — skip them entirely.
+/// Soname virtual provides like "libreadline.so" or "libreadline.so=8"
+/// are not real installable package names.
 pub fn is_soname_dep(name: &str) -> bool {
-    name.contains(".so") && (name.ends_with(".so") || name.contains(".so=") || name.contains(".so."))
+    name.contains(".so")
+        && (name.ends_with(".so") || name.contains(".so=") || name.contains(".so."))
 }
+
+// ── AUR batch query (Arch-only) ───────────────────────────────────────────────
 
 struct AurInfo {
     version: String,

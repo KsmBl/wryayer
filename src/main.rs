@@ -7,7 +7,7 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(
     name = "wryayer",
-    about = "Isolated per-app package manager for Arch Linux",
+    about = "Isolated per-app package manager (Arch Linux and Debian/Ubuntu)",
     version
 )]
 struct Cli {

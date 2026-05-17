@@ -1,4 +1,3 @@
-use crate::package::deps::soname_owner;
 use crate::package::{download_official, extract_package};
 use anyhow::{Context, Result};
 use std::collections::{HashSet, VecDeque};
@@ -22,7 +21,7 @@ pub fn satisfy_missing_sonames(app_dir: &Path, cache_dir: &Path) -> Result<Vec<S
 
         let mut progress = false;
         for soname in &missing {
-            match soname_owner(soname) {
+            match crate::distro::soname_owner(soname) {
                 Ok(Some(pkg)) if !visited.contains(&pkg) => {
                     eprintln!("  installing {pkg} (provides {soname})...");
                     let path = download_official(&pkg, cache_dir)
@@ -67,7 +66,6 @@ fn collect_needed(app_dir: &Path) -> Result<HashSet<String>> {
             let path = entry.path();
             let Ok(ft) = entry.file_type() else { continue };
             if ft.is_dir() {
-                // Skip wryayer-internal dot-dirs (.tmp, .store, etc.)
                 let n = entry.file_name();
                 if !n.to_string_lossy().starts_with('.') {
                     queue.push_back(path);
@@ -84,7 +82,6 @@ fn collect_needed(app_dir: &Path) -> Result<HashSet<String>> {
 }
 
 fn elf_needed(path: &Path) -> Result<Vec<String>> {
-    // Cheap magic check before invoking readelf
     let mut f = std::fs::File::open(path)?;
     let mut magic = [0u8; 4];
     f.read_exact(&mut magic)?;
