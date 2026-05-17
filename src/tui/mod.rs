@@ -1,3 +1,4 @@
+pub mod konami;
 mod ui;
 
 use std::collections::HashMap;
@@ -54,8 +55,11 @@ pub enum Screen {
         success: bool,
         rx: Receiver<Msg>,
         total_bytes: Option<u64>,
+        /// (done, total) emitted by the subprocess via `PROGRESS n/total` lines.
+        progress: Option<(u64, u64)>,
         started: Instant,
         reload: bool,
+        show_log: bool,
     },
     Config {
         app_name: String,
@@ -74,14 +78,32 @@ pub enum Screen {
         /// Some(app_name) = dir-pick mode for shared dirs; None = zip import mode
         pick_dir_for: Option<String>,
     },
+    /// Choose between a fresh install and merging into an existing app.
+    /// Row 0 = fresh install; rows 1..=targets.len() = merge into targets[row-1].
+    InstallTarget {
+        pkg: String,
+        targets: Vec<String>,
+        selected: usize,
+    },
+    /// Popup launched from the Config screen with all valid choices for a
+    /// single setting. `setting_idx` is the row index in the Config screen
+    /// (0..=5); `selected` is the highlighted option inside the popup.
+    OptionPicker {
+        app_name: String,
+        config: AppConfig,
+        setting_idx: usize,
+        selected: usize,
+    },
 }
 
 pub enum PendingAction {
     Remove(String),
     ConfirmedRemove(String),
     Update(String),
-    Install(String),
-    Backup(String),
+    Install { pkg: String, into: Option<String> },
+    Export(String),
+    Snapshot(String),
+    Rollback(String, String),
 }
 
 // ── Tabs ──────────────────────────────────────────────────────────────────────
@@ -123,6 +145,13 @@ pub struct App {
     pub status: String,
     pub log_scroll: usize,
     pub needs_clear: bool,
+    /// If Some, the event loop will suspend the TUI, exec `wryayer run <app>`
+    /// with inherited stdio so the user actually interacts with the app,
+    /// then resume. Set by pressing `r`/Enter on an installed app.
+    pub run_request: Option<String>,
+    // ── Easter egg ────────────────────────────────────────────────────────────
+    pub konami_mode: bool,
+    pub konami_state: usize,
 }
 
 impl App {
@@ -156,6 +185,9 @@ impl App {
             status: String::new(),
             log_scroll: 0,
             needs_clear: false,
+            run_request: None,
+            konami_mode: false,
+            konami_state: 0,
         })
     }
 
@@ -208,10 +240,16 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(
 
     loop {
         // Drain op channel
-        if let Screen::Operation { rx, log, done, success, .. } = &mut app.screen {
+        if let Screen::Operation { rx, log, done, success, progress, .. } = &mut app.screen {
             loop {
                 match rx.try_recv() {
-                    Ok(Msg::Line(l)) => log.push(l),
+                    Ok(Msg::Line(l)) => {
+                        if let Some(p) = parse_progress(&l) {
+                            *progress = Some(p);
+                        } else {
+                            log.push(l);
+                        }
+                    }
                     Ok(Msg::Done(ok)) => { *done = true; *success = ok; }
                     Err(_) => break,
                 }
@@ -254,6 +292,9 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(
                 return Ok(());
             }
             handle_key(&mut app, key.code)?;
+            if let Some(name) = app.run_request.take() {
+                run_app_inline(terminal, &name, &mut app)?;
+            }
             if app.needs_clear {
                 app.needs_clear = false;
                 terminal.clear()?;
@@ -262,9 +303,51 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(
     }
 }
 
+/// Suspend the TUI, exec `wryayer run <app>` with inherited stdio so the user
+/// sees and interacts with the app on the real terminal, then resume the TUI.
+fn run_app_inline(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app_name: &str,
+    app: &mut App,
+) -> Result<()> {
+    // Tear down the TUI's terminal state
+    disable_raw_mode()?;
+    terminal.backend_mut().execute(LeaveAlternateScreen)?;
+    terminal.show_cursor()?;
+
+    let exe = std::env::current_exe().unwrap_or_else(|_| "wryayer".into());
+    let status = Command::new(&exe)
+        .args(["run", app_name])
+        .status();
+
+    // Resume the TUI's terminal state
+    enable_raw_mode()?;
+    terminal.backend_mut().execute(EnterAlternateScreen)?;
+    terminal.hide_cursor()?;
+    terminal.clear()?;
+    app.needs_clear = false;
+
+    match status {
+        Ok(s) if !s.success() => {
+            app.status = format!("{app_name} exited with status {}", s.code().unwrap_or(-1));
+        }
+        Err(e) => {
+            app.status = format!("failed to launch {app_name}: {e}");
+        }
+        _ => app.status.clear(),
+    }
+    Ok(())
+}
+
 // ── Key dispatch ──────────────────────────────────────────────────────────────
 
 fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
+    // Konami code detection — only listens on the main screen so it doesn't
+    // interfere with text input or list navigation in modal screens.
+    if matches!(app.screen, Screen::Main) {
+        konami_step(app, code);
+    }
+
     let tag = match &app.screen {
         Screen::Main => 0u8,
         Screen::Confirm { .. } => 1,
@@ -273,6 +356,8 @@ fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
         Screen::Config { .. } => 4,
         Screen::FileBrowser { .. } => 5,
         Screen::SharedDirs { .. } => 6,
+        Screen::InstallTarget { .. } => 7,
+        Screen::OptionPicker { .. } => 8,
     };
 
     match tag {
@@ -283,6 +368,8 @@ fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
         4 => on_config(app, code),
         5 => on_file_browser(app, code),
         6 => on_shared_dirs(app, code),
+        7 => on_install_target(app, code),
+        8 => on_option_picker(app, code),
         _ => {}
     }
     Ok(())
@@ -352,8 +439,11 @@ fn on_installed(app: &mut App, code: KeyCode) {
         }
         KeyCode::Char('r') | KeyCode::Enter => {
             if let Some(m) = app.selected_installed() {
-                let name = m.app.name.clone();
-                launch_op(app, format!("Run — {name}"), vec!["run".into(), name], None, false);
+                // Hand off to the event loop, which will suspend the TUI and
+                // run the app attached to the real terminal. Going through the
+                // operation overlay (with piped stdout) would mangle interactive
+                // and ANSI-art output.
+                app.run_request = Some(m.app.name.clone());
             }
         }
         KeyCode::Char('d') | KeyCode::Delete => {
@@ -371,20 +461,56 @@ fn on_installed(app: &mut App, code: KeyCode) {
                 };
             }
         }
-        KeyCode::Char('b') => {
+        KeyCode::Char('e') => {
             if let Some(m) = app.selected_installed() {
                 let name = m.app.name.clone();
                 let zip = format!("{}-{}.zip", name, chrono::Local::now().format("%Y-%m-%d"));
                 app.screen = Screen::Confirm {
-                    title: format!("Backup '{name}'?"),
+                    title: format!("Export '{name}'?"),
                     body: vec![
                         format!("Output: ~/{zip}"),
                         String::new(),
                         "Press y to confirm, n or Esc to cancel.".into(),
                     ],
-                    action: PendingAction::Backup(name),
+                    action: PendingAction::Export(name),
                     danger: false,
                 };
+            }
+        }
+        KeyCode::Char('p') => {
+            if let Some(m) = app.selected_installed() {
+                let name = m.app.name.clone();
+                app.screen = Screen::Confirm {
+                    title: format!("Snapshot '{name}'?"),
+                    body: vec![
+                        "Creates a hard-linked snapshot (instant, near-zero disk).".into(),
+                        String::new(),
+                        "Press y to confirm, n or Esc to cancel.".into(),
+                    ],
+                    action: PendingAction::Snapshot(name),
+                    danger: false,
+                };
+            }
+        }
+        KeyCode::Char('o') => {
+            if let Some(m) = app.selected_installed() {
+                let name = m.app.name.clone();
+                match crate::commands::snapshot::latest(&name) {
+                    Ok(Some(snap)) => {
+                        app.screen = Screen::Confirm {
+                            title: format!("Rollback '{name}'?"),
+                            body: vec![
+                                format!("Restore from snapshot: {snap}"),
+                                String::new(),
+                                "Press y to roll back, n or Esc to cancel.".into(),
+                            ],
+                            action: PendingAction::Rollback(name, snap),
+                            danger: true,
+                        };
+                    }
+                    Ok(None) => app.status = format!("No snapshots for {name}"),
+                    Err(e) => app.status = format!("snapshot lookup failed: {e:#}"),
+                }
             }
         }
         KeyCode::Char('c') => {
@@ -482,16 +608,27 @@ fn on_install(app: &mut App, code: KeyCode) {
                             danger: true,
                         };
                     } else {
-                        app.screen = Screen::Confirm {
-                            title: format!("Install '{pkg}'?"),
-                            body: vec![
-                                format!("Installs {pkg} into ~/.wryayer/{pkg}/"),
-                                String::new(),
-                                "Press y to confirm, n or Esc to cancel.".into(),
-                            ],
-                            action: PendingAction::Install(pkg),
-                            danger: false,
-                        };
+                        // If there's at least one installed app, offer the
+                        // user a choice between a fresh install and merging
+                        // into an existing app (-> `wryayer install --into`).
+                        let targets: Vec<String> = app.installed
+                            .iter()
+                            .map(|m| m.app.name.clone())
+                            .collect();
+                        if targets.is_empty() {
+                            app.screen = Screen::Confirm {
+                                title: format!("Install '{pkg}'?"),
+                                body: vec![
+                                    format!("Installs {pkg} into ~/.wryayer/{pkg}/"),
+                                    String::new(),
+                                    "Press y to confirm, n or Esc to cancel.".into(),
+                                ],
+                                action: PendingAction::Install { pkg, into: None },
+                                danger: false,
+                            };
+                        } else {
+                            app.screen = Screen::InstallTarget { pkg, targets, selected: 0 };
+                        }
                     }
                 }
             }
@@ -526,6 +663,60 @@ fn trigger_search(app: &mut App) {
         };
         let _ = tx.send((gen, results));
     });
+}
+
+// ── Install target picker ─────────────────────────────────────────────────────
+
+fn on_install_target(app: &mut App, code: KeyCode) {
+    let Screen::InstallTarget { pkg, targets, selected } = &mut app.screen else { return };
+    let rows = targets.len() + 1; // row 0 = fresh; rest = merge targets
+
+    match code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            app.screen = Screen::Main;
+            app.needs_clear = true;
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            *selected = if *selected == 0 { rows - 1 } else { *selected - 1 };
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            *selected = (*selected + 1) % rows;
+        }
+        KeyCode::Enter | KeyCode::Char(' ') => {
+            let pkg = pkg.clone();
+            let into = if *selected == 0 {
+                None
+            } else {
+                Some(targets[*selected - 1].clone())
+            };
+            let (title, body) = match &into {
+                None => (
+                    format!("Install '{pkg}'?"),
+                    vec![
+                        format!("Installs {pkg} into ~/.wryayer/{pkg}/"),
+                        String::new(),
+                        "Press y to confirm, n or Esc to cancel.".into(),
+                    ],
+                ),
+                Some(target) => (
+                    format!("Merge '{pkg}' into '{target}'?"),
+                    vec![
+                        format!("Adds {pkg} (and missing deps) to ~/.wryayer/{target}/"),
+                        format!("A launcher ~/bin/{pkg} will be created."),
+                        String::new(),
+                        "Press y to confirm, n or Esc to cancel.".into(),
+                    ],
+                ),
+            };
+            app.screen = Screen::Confirm {
+                title,
+                body,
+                action: PendingAction::Install { pkg, into },
+                danger: false,
+            };
+        }
+        _ => {}
+    }
 }
 
 // ── Import tab ────────────────────────────────────────────────────────────────
@@ -602,32 +793,70 @@ fn execute_action(app: &mut App, action: PendingAction) {
             launch_op(app, format!("Remove — {name}"), vec!["remove".into(), name], None, true),
         PendingAction::Update(name) =>
             launch_op(app, format!("Update — {name}"), vec!["update".into(), name], None, true),
-        PendingAction::Install(pkg) =>
+        PendingAction::Install { pkg, into: None } =>
             launch_op(app, format!("Install — {pkg}"), vec!["install".into(), pkg], None, true),
-        PendingAction::Backup(name) => {
+        PendingAction::Install { pkg, into: Some(target) } => launch_op(
+            app,
+            format!("Install — {pkg} → {target}"),
+            vec!["install".into(), pkg, "--into".into(), target],
+            None,
+            true,
+        ),
+        PendingAction::Export(name) => {
             let total = dir_bytes(&format!(
                 "{}/.wryayer/{name}",
                 std::env::var("HOME").unwrap_or_default()
             ));
-            launch_op(app, format!("Backup — {name}"), vec!["backup".into(), name], total, false);
+            launch_op(app, format!("Export — {name}"), vec!["export".into(), name], total, false);
         }
+        PendingAction::Snapshot(name) =>
+            launch_op(app, format!("Snapshot — {name}"), vec!["snapshot".into(), name], None, true),
+        PendingAction::Rollback(name, snap) =>
+            launch_op(app, format!("Rollback — {name}"), vec!["rollback".into(), name, snap], None, true),
     }
 }
 
 // ── Operation screens ─────────────────────────────────────────────────────────
 
 fn on_op_running(app: &mut App, code: KeyCode) {
-    match code {
-        KeyCode::Up | KeyCode::Char('k') => { if app.log_scroll > 0 { app.log_scroll -= 1; } }
-        KeyCode::Down | KeyCode::Char('j') => { app.log_scroll += 1; }
-        _ => {}
+    if let Screen::Operation { show_log, log, .. } = &mut app.screen {
+        match code {
+            KeyCode::Char('t') => {
+                *show_log = !*show_log;
+                // When opening the log, jump to the bottom.
+                if *show_log {
+                    app.log_scroll = log.len().saturating_sub(1);
+                }
+            }
+            KeyCode::Up | KeyCode::Char('k') if *show_log => {
+                if app.log_scroll > 0 { app.log_scroll -= 1; }
+            }
+            KeyCode::Down | KeyCode::Char('j') if *show_log => {
+                app.log_scroll += 1;
+            }
+            _ => {}
+        }
     }
 }
 
 fn on_op_done(app: &mut App, code: KeyCode) -> Result<()> {
+    if let Screen::Operation { show_log, log, .. } = &mut app.screen {
+        if code == KeyCode::Char('t') {
+            *show_log = !*show_log;
+            if *show_log {
+                app.log_scroll = log.len().saturating_sub(1);
+            }
+            return Ok(());
+        }
+        if *show_log {
+            match code {
+                KeyCode::Up | KeyCode::Char('k') => { if app.log_scroll > 0 { app.log_scroll -= 1; } }
+                KeyCode::Down | KeyCode::Char('j') => { app.log_scroll += 1; }
+                _ => {}
+            }
+        }
+    }
     match code {
-        KeyCode::Up | KeyCode::Char('k') => { if app.log_scroll > 0 { app.log_scroll -= 1; } }
-        KeyCode::Down | KeyCode::Char('j') => { app.log_scroll += 1; }
         KeyCode::Char('q') | KeyCode::Esc | KeyCode::Enter => {
             let screen = std::mem::replace(&mut app.screen, Screen::Main);
             if let Screen::Operation { reload, success, .. } = screen {
@@ -657,7 +886,6 @@ fn on_config(app: &mut App, code: KeyCode) {
             // Discard changes
             app.screen = Screen::Main;
             app.needs_clear = true;
-            return;
         }
         KeyCode::Up | KeyCode::Char('k') => {
             *selected = selected.saturating_sub(1);
@@ -665,7 +893,7 @@ fn on_config(app: &mut App, code: KeyCode) {
         KeyCode::Down | KeyCode::Char('j') => {
             *selected = (*selected + 1).min(CFG_LEN - 1);
         }
-        KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') | KeyCode::Enter => {
+        KeyCode::Right | KeyCode::Char(' ') => {
             if *selected == CFG_SAVE {
                 let name = app_name.clone();
                 let cfg = config.clone();
@@ -682,28 +910,172 @@ fn on_config(app: &mut App, code: KeyCode) {
                 app.needs_clear = true;
                 return;
             }
-            match *selected {
-                0 => config.network = !config.network,
-                1 => config.camera = !config.camera,
-                2 => config.microphone = !config.microphone,
-                3 => config.audio = !config.audio,
-                4 => {
-                    config.temp_mode = match config.temp_mode {
-                        TempMode::System  => TempMode::Ramdisk,
-                        TempMode::Ramdisk => TempMode::Local,
-                        TempMode::Local   => TempMode::Uuid,
-                        TempMode::Uuid    => TempMode::System,
-                    };
-                }
-                5 => {
-                    config.temp_delete = match config.temp_delete {
-                        LocalDelete::Never   => LocalDelete::OnStart,
-                        LocalDelete::OnStart => LocalDelete::OnClose,
-                        LocalDelete::OnClose => LocalDelete::Never,
-                    };
-                }
-                _ => {}
+            cycle_setting(config, *selected, 1);
+        }
+        KeyCode::Left => {
+            // Inverse of Right — cycle backward. Special rows are no-ops.
+            if *selected != CFG_SAVE && *selected != CFG_SHARES {
+                cycle_setting(config, *selected, -1);
             }
+        }
+        KeyCode::Enter => {
+            if *selected == CFG_SAVE {
+                let name = app_name.clone();
+                let cfg = config.clone();
+                app.screen = Screen::Main;
+                let _ = write_config(&name, &cfg);
+                app.needs_clear = true;
+                return;
+            }
+            if *selected == CFG_SHARES {
+                let name = app_name.clone();
+                let dirs = config.shared_dirs.clone();
+                let sel = if dirs.is_empty() { 0 } else { dirs.len() - 1 };
+                app.screen = Screen::SharedDirs { app_name: name, dirs, selected: sel };
+                app.needs_clear = true;
+                return;
+            }
+            // Open the option picker for this row.
+            let name = app_name.clone();
+            let cfg = config.clone();
+            let idx = *selected;
+            let cur = setting_current(&cfg, idx);
+            app.screen = Screen::OptionPicker {
+                app_name: name,
+                config: cfg,
+                setting_idx: idx,
+                selected: cur,
+            };
+            app.needs_clear = true;
+        }
+        _ => {}
+    }
+}
+
+// ── Setting helpers (shared by Config screen + OptionPicker) ─────────────────
+
+/// The list of valid choices for the config row at `idx`.
+/// Rows 0..=3 are booleans; 4 = temp_mode; 5 = temp_delete.
+pub fn setting_options(idx: usize) -> Vec<&'static str> {
+    match idx {
+        0..=3 => vec!["on", "off"],
+        4 => vec!["system", "ramdisk", "local", "uuid"],
+        5 => vec!["never", "on_start", "on_close"],
+        _ => vec![],
+    }
+}
+
+/// Human-readable title for the popup that edits the row at `idx`.
+pub fn setting_title(idx: usize) -> &'static str {
+    match idx {
+        0 => "Network",
+        1 => "Camera",
+        2 => "Microphone",
+        3 => "Audio",
+        4 => "Temp mode",
+        5 => "Temp delete",
+        _ => "Option",
+    }
+}
+
+/// Which option index in `setting_options(idx)` matches the current value
+/// stored in `config`.
+pub fn setting_current(config: &AppConfig, idx: usize) -> usize {
+    match idx {
+        0 => if config.network { 0 } else { 1 },
+        1 => if config.camera { 0 } else { 1 },
+        2 => if config.microphone { 0 } else { 1 },
+        3 => if config.audio { 0 } else { 1 },
+        4 => match config.temp_mode {
+            TempMode::System  => 0,
+            TempMode::Ramdisk => 1,
+            TempMode::Local   => 2,
+            TempMode::Uuid    => 3,
+        },
+        5 => match config.temp_delete {
+            LocalDelete::Never   => 0,
+            LocalDelete::OnStart => 1,
+            LocalDelete::OnClose => 2,
+        },
+        _ => 0,
+    }
+}
+
+/// Write the option `choice` (an index into `setting_options(idx)`) into the
+/// matching config field. Out-of-range pairs are silent no-ops.
+pub fn apply_setting(config: &mut AppConfig, idx: usize, choice: usize) {
+    match (idx, choice) {
+        (0, 0) => config.network = true,
+        (0, 1) => config.network = false,
+        (1, 0) => config.camera = true,
+        (1, 1) => config.camera = false,
+        (2, 0) => config.microphone = true,
+        (2, 1) => config.microphone = false,
+        (3, 0) => config.audio = true,
+        (3, 1) => config.audio = false,
+        (4, 0) => config.temp_mode = TempMode::System,
+        (4, 1) => config.temp_mode = TempMode::Ramdisk,
+        (4, 2) => config.temp_mode = TempMode::Local,
+        (4, 3) => config.temp_mode = TempMode::Uuid,
+        (5, 0) => config.temp_delete = LocalDelete::Never,
+        (5, 1) => config.temp_delete = LocalDelete::OnStart,
+        (5, 2) => config.temp_delete = LocalDelete::OnClose,
+        _ => {}
+    }
+}
+
+/// Cycle the setting at `idx` forward (`dir == 1`) or backward (`dir == -1`).
+/// Wraps at the ends of the option list.
+pub fn cycle_setting(config: &mut AppConfig, idx: usize, dir: i32) {
+    let n = setting_options(idx).len();
+    if n == 0 { return; }
+    let cur = setting_current(config, idx);
+    let next = if dir > 0 {
+        (cur + 1) % n
+    } else {
+        (cur + n - 1) % n
+    };
+    apply_setting(config, idx, next);
+}
+
+// ── Option picker overlay ─────────────────────────────────────────────────────
+
+fn on_option_picker(app: &mut App, code: KeyCode) {
+    let Screen::OptionPicker { app_name, config, setting_idx, selected } = &mut app.screen else { return };
+    let n = setting_options(*setting_idx).len();
+    if n == 0 {
+        // Pathological: pop back to config
+        let name = app_name.clone();
+        let cfg = config.clone();
+        let idx = *setting_idx;
+        app.screen = Screen::Config { app_name: name, config: cfg, selected: idx };
+        app.needs_clear = true;
+        return;
+    }
+
+    match code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            // Discard the picker choice, return to Config unchanged.
+            let name = app_name.clone();
+            let cfg = config.clone();
+            let idx = *setting_idx;
+            app.screen = Screen::Config { app_name: name, config: cfg, selected: idx };
+            app.needs_clear = true;
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            *selected = if *selected == 0 { n - 1 } else { *selected - 1 };
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            *selected = (*selected + 1) % n;
+        }
+        KeyCode::Enter | KeyCode::Char(' ') => {
+            let name = app_name.clone();
+            let mut cfg = config.clone();
+            let idx = *setting_idx;
+            let choice = *selected;
+            apply_setting(&mut cfg, idx, choice);
+            app.screen = Screen::Config { app_name: name, config: cfg, selected: idx };
+            app.needs_clear = true;
         }
         _ => {}
     }
@@ -906,9 +1278,68 @@ fn launch_op(app: &mut App, title: String, args: Vec<String>, total_bytes: Optio
         success: false,
         rx,
         total_bytes,
+        progress: None,
         started: Instant::now(),
         reload,
+        show_log: false,
     };
+}
+
+/// Parse `PROGRESS <done>/<total>` lines emitted by subprocess commands.
+pub fn parse_progress(line: &str) -> Option<(u64, u64)> {
+    let rest = line.strip_prefix("PROGRESS ")?;
+    let (a, b) = rest.split_once('/')?;
+    Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
+}
+
+/// The canonical konami code: ↑↑↓↓←→←→BA.
+pub const KONAMI: &[KeyCode] = &[
+    KeyCode::Up, KeyCode::Up,
+    KeyCode::Down, KeyCode::Down,
+    KeyCode::Left, KeyCode::Right,
+    KeyCode::Left, KeyCode::Right,
+    KeyCode::Char('b'), KeyCode::Char('a'),
+];
+
+/// Advance the konami detection FSM by one keystroke. Returns true iff the
+/// code was just completed on this step (used by tests).
+pub fn konami_advance(state: &mut usize, code: KeyCode) -> bool {
+    let expected = KONAMI[*state];
+    // Match — including case-insensitive char compare so SHIFT doesn't break it.
+    let matches = match (expected, code) {
+        (KeyCode::Char(a), KeyCode::Char(b)) => a.eq_ignore_ascii_case(&b),
+        (a, b) => a == b,
+    };
+    if matches {
+        *state += 1;
+        if *state == KONAMI.len() {
+            *state = 0;
+            return true;
+        }
+    } else {
+        // Allow the failed key to be the start of a new attempt
+        *state = if code == KONAMI[0] { 1 } else { 0 };
+    }
+    false
+}
+
+fn konami_step(app: &mut App, code: KeyCode) {
+    if konami_advance(&mut app.konami_state, code) {
+        app.konami_mode = !app.konami_mode;
+        app.status = konami_status_for_toggle(app.konami_mode);
+    }
+}
+
+/// What to write into `app.status` after a konami toggle. The statusbar
+/// already renders a dedicated `★ konami mode` chip from `app.konami_mode`,
+/// so mirroring the same text into `app.status` would double-render. We only
+/// emit a status string when toggling OFF, since the chip is gone by then.
+pub fn konami_status_for_toggle(now_active: bool) -> String {
+    if now_active {
+        String::new()
+    } else {
+        "konami mode off".to_string()
+    }
 }
 
 fn spawn_wryayer(args: Vec<String>, tx: mpsc::Sender<Msg>) {

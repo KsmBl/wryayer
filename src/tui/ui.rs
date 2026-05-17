@@ -45,14 +45,16 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             let danger = *danger;
             draw_confirm(f, area, &title, &body, danger);
         }
-        Screen::Operation { title, log, done, success, total_bytes, started, .. } => {
+        Screen::Operation { title, log, done, success, total_bytes, progress, started, show_log, .. } => {
             let title = title.clone();
             let log = log.clone();
             let done = *done;
             let success = *success;
             let total_bytes = *total_bytes;
+            let progress = *progress;
             let elapsed = started.elapsed();
-            draw_operation(f, area, app, &title, &log, done, success, total_bytes, elapsed);
+            let show_log = *show_log;
+            draw_operation(f, area, app, &title, &log, done, success, total_bytes, progress, elapsed, show_log);
         }
         Screen::Config { app_name, config, selected } => {
             let app_name = app_name.clone();
@@ -75,6 +77,22 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             let sel = fb_state.selected();
             let pick_dir = pick_dir_for.is_some();
             draw_file_browser(f, area, &title, &entries, sel, pick_dir);
+        }
+        Screen::InstallTarget { pkg, targets, selected } => {
+            let pkg = pkg.clone();
+            let targets = targets.clone();
+            let selected = *selected;
+            draw_install_target(f, area, &pkg, &targets, selected);
+        }
+        Screen::OptionPicker { app_name, config, setting_idx, selected } => {
+            let app_name = app_name.clone();
+            let config = config.clone();
+            let setting_idx = *setting_idx;
+            let selected = *selected;
+            // Draw the underlying Config screen so the picker looks like
+            // it expanded from the matching row.
+            draw_config(f, area, &app_name, &config, setting_idx);
+            draw_option_picker(f, area, setting_idx, selected, &config);
         }
     }
 }
@@ -168,7 +186,11 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
 
     lines.push(Line::raw(""));
     lines.push(Line::from(Span::styled(
-        "  [r] Run  [d] Delete  [b] Backup  [c] Check  [u] Update  [s] Config",
+        "  [r] Run  [d] Delete  [e] Export  [p] Snapshot  [o] Rollback",
+        dim,
+    )));
+    lines.push(Line::from(Span::styled(
+        "  [c] Check  [u] Update  [s] Config",
         dim,
     )));
 
@@ -298,17 +320,25 @@ fn draw_import(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_statusbar(f: &mut Frame, app: &App, area: Rect) {
     let hint = match app.tab {
-        Tab::Installed => "[Tab] Switch  [r] Run  [d] Delete  [b] Backup  [c] Check  [u] Update  [s] Config  [q] Quit",
+        Tab::Installed => "[Tab] Switch  [r] Run  [d] Delete  [e] Export  [p] Snapshot  [o] Rollback  [c] Check  [u] Update  [s] Config  [q] Quit",
         Tab::Install   => "[Tab] Switch  Type to search  [↓] Select  [Enter] Install/Uninstall  [q] Quit",
         Tab::Import    => "[Tab] Switch  Type zip path  [Enter] Import  [Esc] Clear  [Shift+Q] Quit",
         Tab::Space     => "[Tab] Switch  [r] Run dedup  [q] Quit",
     };
-    let msg = if app.status.is_empty() {
-        format!(" {hint}")
-    } else {
-        format!(" {}  │  {hint}", app.status)
-    };
-    f.render_widget(Paragraph::new(msg).style(Style::default().fg(C_DIM)), area);
+    let mut spans: Vec<Span> = vec![];
+    if app.konami_mode {
+        spans.push(Span::styled(
+            " ★ konami mode ",
+            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(" │ ", Style::default().fg(C_DIM)));
+    }
+    if !app.status.is_empty() {
+        spans.push(Span::styled(format!(" {} ", app.status), Style::default().fg(Color::White)));
+        spans.push(Span::styled(" │ ", Style::default().fg(C_DIM)));
+    }
+    spans.push(Span::styled(format!(" {hint}"), Style::default().fg(C_DIM)));
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 // ── Confirm overlay ───────────────────────────────────────────────────────────
@@ -337,6 +367,18 @@ fn draw_confirm(f: &mut Frame, area: Rect, title: &str, body: &[String], danger:
 
 // ── Operation overlay ─────────────────────────────────────────────────────────
 
+fn log_line_color(l: &str) -> Color {
+    if l.starts_with("error") || l.contains("Error") || l.contains("failed") {
+        C_RED
+    } else if l.starts_with("warning") || l.contains("Warning") || l.starts_with('!') {
+        C_YELLOW
+    } else if l.contains("Done") || l.contains("complete") || l.contains("Updated") || l.contains("Saved") {
+        C_GREEN
+    } else {
+        Color::White
+    }
+}
+
 fn draw_operation(
     f: &mut Frame,
     area: Rect,
@@ -346,88 +388,205 @@ fn draw_operation(
     done: bool,
     success: bool,
     total_bytes: Option<u64>,
+    progress: Option<(u64, u64)>,
     elapsed: std::time::Duration,
+    show_log: bool,
 ) {
-    let popup = centered_rect(80, 70, area);
-    f.render_widget(Clear, popup);
-
-    let (border_color, status_line) = if !done {
-        (C_ACCENT, format!(" Running… {:.1}s ", elapsed.as_secs_f32()))
-    } else if success {
-        (C_GREEN, " Done ✓  [Enter/q] Close ".to_string())
-    } else {
-        (C_RED, " Failed ✗  [Enter/q] Close ".to_string())
-    };
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(0), Constraint::Length(1)])
-        .split(popup);
-
-    let header_block = Block::default()
-        .borders(Borders::LEFT | Borders::RIGHT | Borders::TOP)
-        .title(format!(" {title} "))
-        .title_style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD))
-        .border_style(Style::default().fg(border_color));
-
-    if let Some(total) = total_bytes {
-        let mb = total as f64 / 1_048_576.0;
-        let ratio = if done { 1.0f64 } else { 0.0 };
-        let label = if done {
-            format!(" {mb:.1} MB — Done ")
-        } else {
-            let est = (mb / 20.0).max(1.0);
-            let remaining = (est - elapsed.as_secs_f64()).max(0.0);
-            format!(" {mb:.1} MB — ~{remaining:.0}s remaining ")
-        };
-        f.render_widget(
-            Gauge::default().block(header_block)
-                .gauge_style(Style::default().fg(border_color).bg(Color::Black))
-                .ratio(ratio).label(label),
-            chunks[0],
-        );
-    } else {
-        let spin = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-        let frame = (elapsed.as_millis() / 100) as usize % spin.len();
-        let spinner = if done { if success { "✓" } else { "✗" } } else { spin[frame] };
-        f.render_widget(
-            Paragraph::new(format!(" {spinner} {}", status_line.trim()))
-                .block(header_block).style(Style::default().fg(border_color)),
-            chunks[0],
-        );
+    // ── Konami mode: take over the full operation overlay with animations ─────
+    if app.konami_mode && !show_log {
+        let kind = crate::tui::konami::Anim::from_title(title);
+        draw_konami_overlay(f, area, kind, elapsed, done, success);
+        return;
     }
 
-    let log_block = Block::default()
-        .borders(Borders::LEFT | Borders::RIGHT)
-        .border_style(Style::default().fg(border_color));
-    let inner = log_block.inner(chunks[1]);
-    f.render_widget(log_block, chunks[1]);
+    let border_color = if !done { C_ACCENT } else if success { C_GREEN } else { C_RED };
 
-    let visible = inner.height as usize;
-    let scroll = app.log_scroll.min(log.len().saturating_sub(visible));
-    let lines: Vec<Line> = log.iter().skip(scroll).take(visible).map(|l| {
-        let color = if l.starts_with("error") || l.contains("Error") || l.contains("failed") {
-            C_RED
-        } else if l.starts_with("warning") || l.contains("Warning") || l.starts_with('!') {
-            C_YELLOW
-        } else if l.contains("Done") || l.contains("complete") || l.contains("Updated") || l.contains("Saved") {
-            C_GREEN
+    let spin = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    let frame = (elapsed.as_millis() / 100) as usize % spin.len();
+    let spinner = if done { if success { "✓" } else { "✗" } } else { spin[frame] };
+
+    if show_log {
+        // ── Log view: large popup with scrollable terminal ────────────────────
+        let popup = centered_rect(80, 70, area);
+        f.render_widget(Clear, popup);
+
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(3), Constraint::Min(0), Constraint::Length(1)])
+            .split(popup);
+
+        let header_block = Block::default()
+            .borders(Borders::LEFT | Borders::RIGHT | Borders::TOP)
+            .title(format!(" {title} "))
+            .title_style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD))
+            .border_style(Style::default().fg(border_color));
+
+        if let Some((d_now, d_total)) = progress.filter(|(_, t)| *t > 0) {
+            let ratio = (d_now as f64 / d_total as f64).clamp(0.0, 1.0);
+            let label = if done {
+                format!(" {d_total}/{d_total} — Done ")
+            } else {
+                let eta = eta_seconds(d_now, d_total, elapsed);
+                format!(" {d_now}/{d_total} — ~{eta:.0}s remaining ")
+            };
+            f.render_widget(
+                Gauge::default().block(header_block)
+                    .gauge_style(Style::default().fg(border_color).bg(Color::Black))
+                    .ratio(ratio).label(label),
+                chunks[0],
+            );
+        } else if let Some(total) = total_bytes {
+            let mb = total as f64 / 1_048_576.0;
+            let ratio = if done { 1.0f64 } else { 0.0 };
+            let label = if done {
+                format!(" {mb:.1} MB — Done ")
+            } else {
+                let est = (mb / 20.0).max(1.0);
+                let remaining = (est - elapsed.as_secs_f64()).max(0.0);
+                format!(" {mb:.1} MB — ~{remaining:.0}s remaining ")
+            };
+            f.render_widget(
+                Gauge::default().block(header_block)
+                    .gauge_style(Style::default().fg(border_color).bg(Color::Black))
+                    .ratio(ratio).label(label),
+                chunks[0],
+            );
         } else {
-            Color::White
-        };
-        Line::from(Span::styled(format!(" {l}"), Style::default().fg(color)))
-    }).collect();
-    f.render_widget(Paragraph::new(lines), inner);
+            let status = if !done {
+                format!(" {spinner}  Running… {:.1}s", elapsed.as_secs_f32())
+            } else if success {
+                format!(" {spinner}  Done")
+            } else {
+                format!(" {spinner}  Failed")
+            };
+            f.render_widget(
+                Paragraph::new(status).block(header_block).style(Style::default().fg(border_color)),
+                chunks[0],
+            );
+        }
 
-    f.render_widget(
-        Paragraph::new(status_line.as_str())
-            .style(Style::default().fg(border_color).add_modifier(Modifier::BOLD))
-            .alignment(Alignment::Center)
-            .block(Block::default()
-                .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
-                .border_style(Style::default().fg(border_color))),
-        chunks[2],
-    );
+        let log_block = Block::default()
+            .borders(Borders::LEFT | Borders::RIGHT)
+            .border_style(Style::default().fg(border_color));
+        let inner = log_block.inner(chunks[1]);
+        f.render_widget(log_block, chunks[1]);
+
+        let visible = inner.height as usize;
+        let scroll = app.log_scroll.min(log.len().saturating_sub(visible));
+        let lines: Vec<Line> = log.iter().skip(scroll).take(visible).map(|l| {
+            Line::from(Span::styled(format!(" {l}"), Style::default().fg(log_line_color(l))))
+        }).collect();
+        f.render_widget(Paragraph::new(lines), inner);
+
+        let footer = if done {
+            "  [↑↓] Scroll  [t] Hide log  [Enter/q] Close"
+        } else {
+            "  [↑↓] Scroll  [t] Hide log"
+        };
+        f.render_widget(
+            Paragraph::new(Span::styled(footer, Style::default().fg(border_color).add_modifier(Modifier::BOLD)))
+                .alignment(Alignment::Center)
+                .block(Block::default()
+                    .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
+                    .border_style(Style::default().fg(border_color))),
+            chunks[2],
+        );
+    } else {
+        // ── Clean view: small popup with animated bar ─────────────────────────
+        let popup = centered_rect(60, 30, area);
+        f.render_widget(Clear, popup);
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(format!(" {title} "))
+            .title_style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD))
+            .border_style(Style::default().fg(border_color));
+        let inner = block.inner(popup);
+        f.render_widget(block, popup);
+
+        let bar_w = (inner.width as usize).saturating_sub(4).max(8);
+
+        let real_progress = progress.filter(|(_, t)| *t > 0);
+        let bar_str = if done {
+            if success { "█".repeat(bar_w) } else { "░".repeat(bar_w) }
+        } else if let Some((n, t)) = real_progress {
+            let filled = ((n as f64 / t as f64) * bar_w as f64).round() as usize;
+            let filled = filled.min(bar_w);
+            format!("{}{}", "█".repeat(filled), "░".repeat(bar_w - filled))
+        } else {
+            let block_w = (bar_w / 5).max(3);
+            let range = bar_w.saturating_sub(block_w);
+            let cycle = (range * 2).max(1);
+            let raw = (elapsed.as_millis() / 40) as usize % cycle;
+            let pos = if raw <= range { raw } else { cycle - raw }.min(range);
+            format!(
+                "{}{}{}",
+                "░".repeat(pos),
+                "█".repeat(block_w),
+                "░".repeat(bar_w.saturating_sub(pos + block_w)),
+            )
+        };
+        let bar_color = if done && !success { C_DIM } else { border_color };
+
+        let status_str = if !done {
+            match real_progress {
+                Some((n, t)) => {
+                    let pct = (n as f64 / t as f64 * 100.0).round() as u32;
+                    let eta = eta_seconds(n, t, elapsed);
+                    format!("  {spinner}  {n}/{t}  ({pct}%)  ~{eta:.0}s left")
+                }
+                None => format!("  {spinner}  Running… {:.1}s", elapsed.as_secs_f32()),
+            }
+        } else if success {
+            "  ✓  Done".to_string()
+        } else {
+            "  ✗  Failed".to_string()
+        };
+
+        let last_log = log.iter().rev().find(|l| !l.trim().is_empty()).map(String::as_str).unwrap_or("");
+        let last_log_color = log_line_color(last_log);
+        let max_chars = (inner.width as usize).saturating_sub(4);
+        let last_log_truncated: String = last_log.chars().take(max_chars).collect();
+
+        let footer_str = if done {
+            "  [Enter/q] Close  [t] Debug log"
+        } else {
+            "  [t] Debug log"
+        };
+
+        let h = inner.height;
+        if h == 0 { return; }
+
+        f.render_widget(
+            Paragraph::new(Span::styled(&status_str, Style::default().fg(border_color))),
+            Rect { x: inner.x, y: inner.y, width: inner.width, height: 1 },
+        );
+
+        if h >= 2 {
+            f.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(&bar_str, Style::default().fg(bar_color)),
+                ])),
+                Rect { x: inner.x, y: inner.y + 1, width: inner.width, height: 1 },
+            );
+        }
+
+        if h >= 5 && !last_log_truncated.is_empty() {
+            f.render_widget(
+                Paragraph::new(Span::styled(
+                    format!("  {last_log_truncated}"),
+                    Style::default().fg(last_log_color),
+                )),
+                Rect { x: inner.x, y: inner.y + 3, width: inner.width, height: 1 },
+            );
+        }
+
+        f.render_widget(
+            Paragraph::new(Span::styled(footer_str, Style::default().fg(C_DIM))),
+            Rect { x: inner.x, y: inner.y + h.saturating_sub(1), width: inner.width, height: 1 },
+        );
+    }
 }
 
 // ── Space tab ─────────────────────────────────────────────────────────────────
@@ -692,10 +851,69 @@ fn draw_config(f: &mut Frame, area: Rect, app_name: &str, config: &AppConfig, se
     let footer_y = inner.y + inner.height.saturating_sub(1);
     f.render_widget(
         Paragraph::new(Span::styled(
-            " [↑↓] Navigate  [Space/Enter] Toggle  [Esc/q] Discard",
+            " [↑↓] Navigate  [←/→] Cycle  [Enter] Choose…  [Esc/q] Discard",
             Style::default().fg(C_DIM),
         )),
         Rect { x: inner.x, y: footer_y, width: inner.width, height: 1 },
+    );
+}
+
+// ── Option picker overlay ─────────────────────────────────────────────────────
+
+fn draw_option_picker(
+    f: &mut Frame,
+    area: Rect,
+    setting_idx: usize,
+    selected: usize,
+    config: &AppConfig,
+) {
+    let title = super::setting_title(setting_idx);
+    let options = super::setting_options(setting_idx);
+    let current = super::setting_current(config, setting_idx);
+
+    // Size the popup just large enough for header + options + footer.
+    let needed_h = (options.len() as u16) + 4; // borders (2) + footer (1) + breathing room
+    let h_pct = ((needed_h as f32 / area.height.max(1) as f32) * 100.0)
+        .clamp(20.0, 60.0) as u16;
+    let popup = centered_rect(36, h_pct, area);
+    f.render_widget(Clear, popup);
+
+    let block = Block::default().borders(Borders::ALL)
+        .title(format!(" {title} "))
+        .title_style(Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD))
+        .border_style(Style::default().fg(C_ACCENT));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .split(inner);
+
+    let items: Vec<ListItem> = options.iter().enumerate().map(|(i, opt)| {
+        let is_current = i == current;
+        let marker = if is_current { "● " } else { "  " };
+        let marker_color = if is_current { C_GREEN } else { C_DIM };
+        let opt_color = if is_current { C_GREEN } else { Color::White };
+        ListItem::new(Line::from(vec![
+            Span::styled(marker, Style::default().fg(marker_color)),
+            Span::styled(opt.to_string(), Style::default().fg(opt_color)),
+        ]))
+    }).collect();
+
+    let mut list_state = ListState::default();
+    list_state.select(Some(selected));
+    let list = List::new(items)
+        .highlight_style(Style::default().bg(C_SELECT).fg(Color::White).add_modifier(Modifier::BOLD))
+        .highlight_symbol("▶ ");
+    f.render_stateful_widget(list, chunks[0], &mut list_state);
+
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            " [↑↓/jk] Navigate  [Enter] Select  [Esc] Cancel",
+            Style::default().fg(C_DIM),
+        )),
+        chunks[1],
     );
 }
 
@@ -754,6 +972,72 @@ fn draw_shared_dirs(f: &mut Frame, area: Rect, app_name: &str, dirs: &[String], 
             Style::default().fg(C_DIM),
         )),
         chunks[1],
+    );
+}
+
+// ── Install target picker overlay ─────────────────────────────────────────────
+
+fn draw_install_target(f: &mut Frame, area: Rect, pkg: &str, targets: &[String], selected: usize) {
+    let popup = centered_rect(60, 70, area);
+    f.render_widget(Clear, popup);
+
+    let block = Block::default().borders(Borders::ALL)
+        .title(format!(" Install '{pkg}' "))
+        .title_style(Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD))
+        .border_style(Style::default().fg(C_ACCENT));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(2), Constraint::Min(0), Constraint::Length(1)])
+        .split(inner);
+
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            "  Where should it go?",
+            Style::default().fg(C_DIM),
+        )),
+        chunks[0],
+    );
+
+    // Row 0 — fresh install
+    let mut items: Vec<ListItem> = vec![
+        ListItem::new(Line::from(vec![
+            Span::styled("✚ ", Style::default().fg(C_GREEN)),
+            Span::styled("New app", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!("  ~/.wryayer/{pkg}/"),
+                Style::default().fg(C_DIM),
+            ),
+        ])),
+    ];
+    // Rows 1..n — merge targets
+    for t in targets {
+        items.push(ListItem::new(Line::from(vec![
+            Span::styled("⇆ ", Style::default().fg(C_YELLOW)),
+            Span::styled("Merge into ", Style::default().fg(C_DIM)),
+            Span::styled(t.as_str(), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!("  ~/.wryayer/{t}/"),
+                Style::default().fg(C_DIM),
+            ),
+        ])));
+    }
+
+    let mut list_state = ListState::default();
+    list_state.select(Some(selected));
+    let list = List::new(items)
+        .highlight_style(Style::default().bg(C_SELECT).fg(Color::White).add_modifier(Modifier::BOLD))
+        .highlight_symbol("▶ ");
+    f.render_stateful_widget(list, chunks[1], &mut list_state);
+
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            " [↑↓/jk] Navigate  [Enter] Select  [Esc/q] Cancel",
+            Style::default().fg(C_DIM),
+        )),
+        chunks[2],
     );
 }
 
@@ -824,6 +1108,61 @@ fn draw_file_browser(
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+fn draw_konami_overlay(
+    f: &mut Frame,
+    area: Rect,
+    kind: crate::tui::konami::Anim,
+    elapsed: std::time::Duration,
+    done: bool,
+    success: bool,
+) {
+    use crate::tui::konami;
+    let kf = konami::render(
+        kind,
+        area.width,
+        area.height,
+        elapsed.as_millis() as u64,
+        done,
+        success,
+    );
+
+    for y in 0..kf.height {
+        let mut line = Vec::with_capacity(kf.width as usize);
+        for x in 0..kf.width {
+            let (ch, col) = kf.get(x, y);
+            line.push(Span::styled(
+                ch.to_string(),
+                Style::default().fg(col).add_modifier(Modifier::BOLD),
+            ));
+        }
+        f.render_widget(
+            Paragraph::new(Line::from(line)),
+            Rect { x: area.x, y: area.y + y, width: area.width, height: 1 },
+        );
+    }
+
+    // Footer hint
+    let footer = if done {
+        " [Enter/q] Close  [t] Debug log "
+    } else {
+        " [t] Debug log "
+    };
+    let fy = area.y + area.height.saturating_sub(1);
+    f.render_widget(
+        Paragraph::new(Span::styled(footer, Style::default().fg(Color::White).bg(Color::DarkGray))),
+        Rect { x: area.x, y: fy, width: area.width, height: 1 },
+    );
+}
+
+/// Estimate remaining seconds given linear progress so far.
+fn eta_seconds(done: u64, total: u64, elapsed: std::time::Duration) -> f64 {
+    if done == 0 { return 0.0; }
+    let frac = done as f64 / total as f64;
+    if frac <= 0.0 { return 0.0; }
+    let total_estimated = elapsed.as_secs_f64() / frac;
+    (total_estimated - elapsed.as_secs_f64()).max(0.0)
+}
 
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     let v = Layout::default()
