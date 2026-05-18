@@ -189,6 +189,8 @@ mod arch {
     pub fn query_info(pkg: &str) -> Result<Option<(String, Vec<String>)>> {
         let output = Command::new("pacman")
             .args(["-Si", pkg])
+            .env("LANG", "C")
+            .env("LC_ALL", "C")
             .output()
             .context("failed to spawn pacman -Si")?;
         if !output.status.success() {
@@ -331,6 +333,8 @@ mod arch {
     pub fn latest_version(pkg: &str) -> Result<Option<String>> {
         let output = Command::new("pacman")
             .args(["-Si", pkg])
+            .env("LANG", "C")
+            .env("LC_ALL", "C")
             .output()
             .context("failed to spawn pacman -Si")?;
         if !output.status.success() {

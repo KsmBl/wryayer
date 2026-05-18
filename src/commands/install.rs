@@ -318,6 +318,20 @@ pub fn ensure_base_layout(app_dir: &Path) -> Result<()> {
         symlink(target, &full)
             .with_context(|| format!("failed to symlink {} -> {target}", full.display()))?;
     }
+
+    // Create a per-app home directory so browsers and GUI apps can store their
+    // profiles across launches.  The bwrap sandbox binds app_dir as its root,
+    // so app_dir/home/<username>/ is visible as /home/<username>/ inside —
+    // matching the inherited $HOME env var without touching the real home.
+    if let Ok(home_val) = std::env::var("HOME") {
+        let username = home_val.trim_end_matches('/').rsplit('/').next().unwrap_or("user");
+        let sandbox_home = app_dir.join("home").join(username);
+        if !sandbox_home.exists() {
+            fs::create_dir_all(&sandbox_home)
+                .with_context(|| format!("failed to create sandbox home {}", sandbox_home.display()))?;
+        }
+    }
+
     Ok(())
 }
 

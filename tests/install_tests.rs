@@ -56,3 +56,24 @@ fn ensure_base_layout_creates_parent_for_usr_sbin() {
     let target = std::fs::read_link(tmp.path().join("usr/sbin")).unwrap();
     assert_eq!(target.to_string_lossy(), "bin");
 }
+
+#[test]
+fn ensure_base_layout_creates_sandbox_home_dir() {
+    let tmp = tempfile::tempdir().unwrap();
+    ensure_base_layout(tmp.path()).unwrap();
+
+    if let Ok(home_val) = std::env::var("HOME") {
+        let username = home_val.trim_end_matches('/').rsplit('/').next().unwrap_or("user");
+        let sandbox_home = tmp.path().join("home").join(username);
+        assert!(sandbox_home.is_dir(),
+            "home/{username} should be a directory so browsers can store profiles");
+    }
+}
+
+#[test]
+fn ensure_base_layout_home_dir_is_idempotent() {
+    let tmp = tempfile::tempdir().unwrap();
+    ensure_base_layout(tmp.path()).unwrap();
+    // Second call must not error even though home/<username> already exists.
+    ensure_base_layout(tmp.path()).unwrap();
+}
