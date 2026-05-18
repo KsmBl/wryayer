@@ -83,6 +83,16 @@ pub fn run(app_name: &str, bin: Option<&str>, args: &[String]) -> Result<()> {
 
     let mut cmd = bwrap_cmd(&app_root_str, &binary, args, &temp, &config);
     cmd.env("FONTCONFIG_CACHE", "/tmp/.wryayer-fc-cache");
+    // Chromium-based renderers (QtWebEngine, Electron) crash inside bwrap because
+    // their subprocesses cannot set up their own namespace sandboxes.
+    // --no-sandbox: skip Chromium's internal sandbox
+    // --no-zygote:  skip the zygote fork relay (also tries sandbox setup)
+    // --in-process-gpu: run GPU code in the browser process instead of a
+    //   separate GPU subprocess; the GPU subprocess fails to init EGL because
+    //   the sandbox app root may not have mesa, while the main browser process
+    //   already has working OpenGL (confirmed by Qt's OpenGL init log).
+    cmd.env("QTWEBENGINE_CHROMIUM_FLAGS", "--no-sandbox --no-zygote --in-process-gpu --single-process --disable-gpu");
+    cmd.env("ELECTRON_DISABLE_SANDBOX", "1");
 
     if let Some(cleanup_path) = cleanup {
         // on_close / uuid modes: run as child so we can clean up after exit
