@@ -118,6 +118,14 @@ pub fn pkg_latest_version(pkg: &str) -> Result<Option<String>> {
     }
 }
 
+/// Search available packages matching `query`. Returns a list of package names.
+pub fn pkg_search(query: &str) -> Vec<String> {
+    match current() {
+        Distro::Arch   => arch::search(query),
+        Distro::Debian => debian::search(query),
+    }
+}
+
 /// Return true if candidate is strictly newer than current_ver.
 pub fn version_is_newer(candidate: &str, current_ver: &str) -> Result<bool> {
     if candidate == current_ver {
@@ -346,6 +354,16 @@ mod arch {
             .context("vercmp output was not an integer")?;
         Ok(result > 0)
     }
+
+    pub fn search(query: &str) -> Vec<String> {
+        let Ok(out) = Command::new("pacman").args(["-Ssq", query]).output() else {
+            return vec![];
+        };
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
 }
 
 // ── Debian / apt / dpkg ───────────────────────────────────────────────────────
@@ -523,6 +541,19 @@ mod debian {
             .output()
             .context("failed to run dpkg --compare-versions")?;
         Ok(output.status.success())
+    }
+
+    pub fn search(query: &str) -> Vec<String> {
+        // apt-cache search outputs "pkg - description" one per line
+        let Ok(out) = Command::new("apt-cache").args(["search", "--names-only", query]).output() else {
+            return vec![];
+        };
+        let mut names: Vec<String> = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|line| line.split_once(" - ").map(|(name, _)| name.to_string()))
+            .collect();
+        names.sort_unstable();
+        names
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

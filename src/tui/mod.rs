@@ -700,11 +700,7 @@ fn trigger_search(app: &mut App) {
     let gen = app.search_gen;
     let tx = app.search_tx.clone();
     thread::spawn(move || {
-        let out = Command::new("pacman").args(["-Ssq", &query]).output();
-        let results = match out {
-            Ok(o) => String::from_utf8_lossy(&o.stdout).lines().map(str::to_string).collect(),
-            Err(_) => vec![],
-        };
+        let results = crate::distro::pkg_search(&query);
         let _ = tx.send((gen, results));
     });
 }
