@@ -1,4 +1,4 @@
-q# wryayer
+# wryayer
 
 > Isolated per-app package management — no root, no containers, no daemon.
 > Supports **Arch Linux** (pacman + AUR) and **Debian / Ubuntu** (apt).
@@ -126,7 +126,7 @@ bwrap sandbox at runtime:
 | **CachyOS** | ✅ Fully supported | Arch-based; primary test environment |
 | **Manjaro** | ✅ Fully supported | Arch-based; detected via `ID_LIKE=manjaro` |
 | **EndeavourOS / Garuda / other Arch derivatives** | ✅ Fully supported | Detected via `ID_LIKE=arch` or presence of `/usr/bin/pacman` |
-| **Debian 13** | ✅ Fully supported | apt + dpkg backend; actively tested |
+| **Debian 12 / 13** | ✅ Fully supported | apt + dpkg backend; actively tested |
 | **Ubuntu 22.04 / 24.04** | ✅ Expected to work | Detected via `ID_LIKE=ubuntu`; same apt/dpkg toolchain as Debian — not separately tested |
 | **Linux Mint** | ✅ Expected to work | Ubuntu-based; detected via `ID_LIKE=ubuntu`; not separately tested |
 | **Void Linux** | ❌ Not supported | Uses xbps — no supported backend |
@@ -239,6 +239,12 @@ wryayer install fd      --into neovim
 
 # Pick a different name for the alias dir (defaults to the package name)
 wryayer install hyfetch --into fastfetch --app-name hf
+
+# Some packages install their binary under a name that differs from the
+# package name (e.g. vivaldi installs as vivaldi-stable, google-chrome as
+# google-chrome-stable). If the install fails with "binary not found", the
+# error lists what IS in the bin dirs — re-run with --bin-names:
+wryayer install vivaldi --bin-names vivaldi-stable
 ```
 
 The resulting layout:
@@ -436,7 +442,7 @@ The config is stored as a human-readable INI file at `~/.wryayer/<app>/config.in
 
 **AUR is Arch-only.** On Debian/Ubuntu the AUR code path is never reached; deps are resolved via `apt-cache` only. Fedora and other distros are not currently supported.
 
-**glibc version pinning.** The sandbox root's glibc must match the host dynamic linker (`/lib/ld-linux-x86-64.so.2`). wryayer excludes `glibc` from extraction by default, relying on the host linker. If you install an app built against a significantly different glibc, it may crash with `version GLIBC_X.XX not found`.
+**glibc version pinning.** glibc is resolved and extracted as a normal dependency. The `ld-linux-x86-64.so.2` loader that executes inside the sandbox is therefore the one from the app's own extracted glibc, not the host's. If the app's packages were built against a glibc version that differs significantly from the host kernel's syscall ABI, it may crash with `version GLIBC_X.XX not found` or `Illegal instruction`.
 
 **Microphone isolation is incomplete.** Setting `microphone=off` masks ALSA capture devices (`/dev/snd/pcmC*D*c`). Apps using PipeWire or PulseAudio can still access the microphone socket in `XDG_RUNTIME_DIR`. To fully block mic access, also set `audio=off`.
 
