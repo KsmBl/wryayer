@@ -1,4 +1,4 @@
-# wryayer
+q# wryayer
 
 > Isolated per-app package management — no root, no containers, no daemon.
 > Supports **Arch Linux** (pacman + AUR) and **Debian / Ubuntu** (apt).
@@ -126,7 +126,7 @@ bwrap sandbox at runtime:
 | **CachyOS** | ✅ Fully supported | Arch-based; primary test environment |
 | **Manjaro** | ✅ Fully supported | Arch-based; detected via `ID_LIKE=manjaro` |
 | **EndeavourOS / Garuda / other Arch derivatives** | ✅ Fully supported | Detected via `ID_LIKE=arch` or presence of `/usr/bin/pacman` |
-| **Debian 11 / 12** | ✅ Fully supported | apt + dpkg backend; actively tested |
+| **Debian 13** | ✅ Fully supported | apt + dpkg backend; actively tested |
 | **Ubuntu 22.04 / 24.04** | ✅ Expected to work | Detected via `ID_LIKE=ubuntu`; same apt/dpkg toolchain as Debian — not separately tested |
 | **Linux Mint** | ✅ Expected to work | Ubuntu-based; detected via `ID_LIKE=ubuntu`; not separately tested |
 | **Void Linux** | ❌ Not supported | Uses xbps — no supported backend |

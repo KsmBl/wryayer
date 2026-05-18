@@ -178,12 +178,43 @@ pub fn run(
 
         // Verify each requested launcher actually maps to a real binary in the
         // target's tree (file location is the same for fresh and merge modes).
+        //
+        // Use symlink_metadata (lstat) rather than exists (stat) so that
+        // symlinks with absolute targets (e.g. /usr/bin/vivaldi-stable ->
+        // /opt/vivaldi/vivaldi) are found correctly: exists() follows the link
+        // and resolves the absolute path against the HOST filesystem where the
+        // target doesn't live, returning false even though the link is present.
+        // Inside the bwrap sandbox the absolute path resolves correctly because
+        // the app dir is mounted as /.
+        let bin_dirs = ["usr/bin", "usr/sbin", "bin", "sbin"];
         for bin in &bin_names_for_closure {
-            let binary = target_dir.join("usr/bin").join(bin);
-            if !binary.exists() {
+            let found = bin_dirs
+                .iter()
+                .any(|sub| target_dir.join(sub).join(bin).symlink_metadata().is_ok());
+            if !found {
+                // Collect what IS in the binary dirs to help the user pick the
+                // right name for --bin-names (e.g. vivaldi-stable vs vivaldi).
+                let mut available: Vec<String> = bin_dirs
+                    .iter()
+                    .flat_map(|sub| {
+                        std::fs::read_dir(target_dir.join(sub))
+                            .ok()
+                            .into_iter()
+                            .flatten()
+                            .flatten()
+                            .filter_map(|e| e.file_name().into_string().ok())
+                    })
+                    .collect();
+                available.sort();
+                available.dedup();
+                let hint = if available.is_empty() {
+                    String::new()
+                } else {
+                    format!("\n  available binaries: {}", available.join(", "))
+                };
                 bail!(
-                    "binary '{bin}' not found at {} after install — check --bin-names",
-                    binary.display()
+                    "binary '{bin}' not found in usr/bin, usr/sbin, bin, or sbin — \
+                     re-run with --bin-names <name>{hint}"
                 );
             }
         }

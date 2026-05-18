@@ -2,7 +2,7 @@ use crate::manifest::{
     app_dir, list_all_apps, now_rfc3339, read_manifest, write_manifest, AppMeta, Manifest,
     PackageEntry, PackageSource,
 };
-use crate::commands::install::run_ldconfig;
+use crate::commands::install::{ensure_base_layout, ensure_owner_readable, run_ldconfig};
 use crate::package::{
     build_aur, download_official, extract_package, resolve_full_dep_tree,
     satisfy_missing_sonames,
@@ -26,6 +26,12 @@ pub fn run(app_name: Option<&str>, check_only: bool) -> Result<()> {
     let mut has_updates = false;
 
     for manifest in &manifests {
+        // Alias manifests don't own a filesystem tree — skip them; the target
+        // app is updated separately when its own manifest is processed.
+        if manifest.app.alias_of.is_some() {
+            continue;
+        }
+
         let name = &manifest.app.name;
         let main_pkg = manifest.packages.iter().find(|p| p.name == manifest.app.name);
         let current_version = main_pkg.map(|p| p.version.as_str()).unwrap_or("0");
@@ -137,6 +143,15 @@ fn reinstall(manifest: &crate::manifest::Manifest) -> Result<()> {
         packages,
     };
     write_manifest(app_name, &new_manifest)?;
+
+    ensure_base_layout(&app_dir)
+        .with_context(|| "failed to restore base filesystem symlinks")?;
+
+    let fixed = ensure_owner_readable(&app_dir)
+        .with_context(|| "failed to fix file permissions")?;
+    if fixed > 0 {
+        eprintln!("  Made {fixed} file(s) owner-readable.");
+    }
 
     eprintln!("Checking for missing shared library dependencies...");
     match satisfy_missing_sonames(&app_dir, &cache_dir) {

@@ -3,7 +3,7 @@ use anyhow::Result;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
-use std::io::{BufReader, Read};
+use std::io::{BufRead, BufReader, Read};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
@@ -63,6 +63,11 @@ pub fn run(verbose: bool) -> Result<()> {
             for (ino, ref dup_path) in &group[1..] {
                 if *ino == canonical_ino {
                     continue; // already hard-linked
+                }
+                // Verify byte-for-byte equality before linking: DefaultHasher can
+                // collide, and a false match would silently corrupt a file.
+                if !files_equal(canonical_path, dup_path) {
+                    continue;
                 }
                 match atomic_hard_link(canonical_path, dup_path) {
                     Ok(()) => {
@@ -196,6 +201,26 @@ fn hash_file(path: &Path) -> Result<u64, std::io::Error> {
         buf[..n].hash(&mut hasher);
     }
     Ok(hasher.finish())
+}
+
+fn files_equal(a: &Path, b: &Path) -> bool {
+    let Ok(fa) = std::fs::File::open(a) else { return false };
+    let Ok(fb) = std::fs::File::open(b) else { return false };
+    let mut ra = BufReader::new(fa);
+    let mut rb = BufReader::new(fb);
+    loop {
+        let ba = ra.fill_buf().unwrap_or(&[]);
+        let bb = rb.fill_buf().unwrap_or(&[]);
+        let len = ba.len().min(bb.len());
+        if len == 0 {
+            return ba.len() == bb.len();
+        }
+        if ba[..len] != bb[..len] {
+            return false;
+        }
+        ra.consume(len);
+        rb.consume(len);
+    }
 }
 
 // ── Hard-link replacement ─────────────────────────────────────────────────────
