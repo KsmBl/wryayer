@@ -425,12 +425,14 @@ fn on_main(app: &mut App, code: KeyCode) -> Result<()> {
         _ => {}
     }
 
-    // 'q' / Esc quit only when NOT in the Import text-input tab
-    if !matches!(app.tab, Tab::Import) {
-        if matches!(code, KeyCode::Char('q') | KeyCode::Esc) {
-            app.quit = true;
-            return Ok(());
-        }
+    // 'q' / Esc quit only when NOT in a text-input context.
+    // Install tab: input is active while the search list is not focused.
+    // Import tab: always a text input.
+    let in_text_input = matches!(app.tab, Tab::Import)
+        || (matches!(app.tab, Tab::Install) && !app.search_list_focused);
+    if !in_text_input && matches!(code, KeyCode::Char('q') | KeyCode::Esc) {
+        app.quit = true;
+        return Ok(());
     }
 
     match app.tab {
