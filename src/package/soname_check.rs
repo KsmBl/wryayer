@@ -56,10 +56,37 @@ pub fn find_missing_sonames(app_dir: &Path) -> Result<Vec<String>> {
         .collect())
 }
 
-fn collect_needed(app_dir: &Path) -> Result<HashSet<String>> {
+/// Like `find_missing_sonames` but only scans `scan_dir` for ELF files.
+/// Soname presence is still checked against the full `app_dir` lib tree.
+///
+/// Unlike `find_missing_sonames`, this does NOT skip hidden directories
+/// (e.g. `.config`). User-writable sandbox home dirs routinely place real
+/// app binaries inside hidden subdirectories like `~/.config/discord/`.
+pub fn find_missing_sonames_in(scan_dir: &Path, app_dir: &Path) -> Result<Vec<String>> {
+    let needed = collect_needed_including_hidden(scan_dir)?;
+    Ok(needed
+        .into_iter()
+        .filter(|s| !soname_in_app(app_dir, s))
+        .collect())
+}
+
+/// Walk `start_dir` recursively, skipping directories whose name starts with
+/// `.` (package metadata dirs, wryayer control dirs such as `.tmp`, `.spoof`).
+fn collect_needed(start_dir: &Path) -> Result<HashSet<String>> {
+    collect_needed_impl(start_dir, true)
+}
+
+/// Walk `start_dir` recursively without skipping hidden directories.
+/// Used when scanning the sandbox `home/` tree where real app binaries live
+/// inside hidden dirs like `.config/`.
+fn collect_needed_including_hidden(start_dir: &Path) -> Result<HashSet<String>> {
+    collect_needed_impl(start_dir, false)
+}
+
+fn collect_needed_impl(start_dir: &Path, skip_hidden: bool) -> Result<HashSet<String>> {
     let mut needed: HashSet<String> = HashSet::new();
     let mut queue: VecDeque<PathBuf> = VecDeque::new();
-    queue.push_back(app_dir.to_path_buf());
+    queue.push_back(start_dir.to_path_buf());
 
     while let Some(dir) = queue.pop_front() {
         for entry in std::fs::read_dir(&dir)?.flatten() {
@@ -67,7 +94,7 @@ fn collect_needed(app_dir: &Path) -> Result<HashSet<String>> {
             let Ok(ft) = entry.file_type() else { continue };
             if ft.is_dir() {
                 let n = entry.file_name();
-                if !n.to_string_lossy().starts_with('.') {
+                if !skip_hidden || !n.to_string_lossy().starts_with('.') {
                     queue.push_back(path);
                 }
             } else if ft.is_file() {
@@ -106,7 +133,7 @@ fn elf_needed(path: &Path) -> Result<Vec<String>> {
     Ok(libs)
 }
 
-fn soname_in_app(app_dir: &Path, soname: &str) -> bool {
+pub(crate) fn soname_in_app(app_dir: &Path, soname: &str) -> bool {
     ["usr/lib", "usr/lib64", "lib", "lib64"]
         .iter()
         .any(|sub| app_dir.join(sub).join(soname).exists())

@@ -239,6 +239,36 @@ mod arch {
                 }
             }
         }
+
+        // Fallback: query the file database so we can find the owning package
+        // even when it isn't installed on the host (e.g. alsa-lib on a
+        // PipeWire-only system).  Requires `pacman -Fy` to have been run at
+        // least once, which is standard on any up-to-date Arch install.
+        for dir in ["/usr/lib", "/usr/lib64", "/lib", "/lib64"] {
+            let path = format!("{dir}/{filename}");
+            let Ok(out) = Command::new("pacman")
+                .args(["-F", &path])
+                .env("LANG", "C")
+                .env("LC_ALL", "C")
+                .output()
+            else {
+                continue;
+            };
+            if !out.status.success() {
+                continue;
+            }
+            let text = String::from_utf8_lossy(&out.stdout);
+            for line in text.lines() {
+                // Output format: "repo/pkgname version"
+                if let Some(after_slash) = line.trim().split_once('/').map(|(_, r)| r) {
+                    let pkg = after_slash.split_whitespace().next().unwrap_or("").to_string();
+                    if !pkg.is_empty() {
+                        return Ok(Some(pkg));
+                    }
+                }
+            }
+        }
+
         Ok(None)
     }
 

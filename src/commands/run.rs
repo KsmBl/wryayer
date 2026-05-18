@@ -1,9 +1,12 @@
+use crate::commands::install::run_ldconfig;
 use crate::config::{read_config, AppConfig, LocalDelete, TempMode};
 use crate::manifest::{app_dir, read_manifest};
+use crate::package::{download_official, extract_package, find_missing_sonames_in};
 use anyhow::{bail, Context, Result};
+use std::collections::HashSet;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, ExitStatus};
 
 const CPUINFO_SAMPLE: &str = "\
 processor\t: 0\n\
@@ -79,9 +82,55 @@ pub fn run(app_name: &str, bin: Option<&str>, args: &[String]) -> Result<()> {
         })?;
     let app_root_str = app_root.to_string_lossy().into_owned();
 
+    // Pre-launch: repair any missing sonames in the sandbox home/ tree.
+    // Catches second-and-later launches after a self-updating app (e.g.
+    // Discord) already wrote its downloaded binary to home/.config/... during
+    // a previous session.
+    fix_home_sonames(&app_root);
+
     let (temp, cleanup) = prepare_temp(&config, &app_root)?;
 
-    let mut cmd = bwrap_cmd(&app_root_str, &binary, args, &temp, &config);
+    let status = launch_bwrap(&app_root_str, &binary, args, &temp, &config)?;
+
+    // Post-launch: if bwrap exited abnormally, the app may have written a new
+    // self-updated ELF binary (e.g. Discord bootstrapping app-X.Y.Z/Discord)
+    // that needs libraries not yet in the sandbox tree.  Run the home/ scan
+    // again now that those binaries exist, install any missing packages, and
+    // retry automatically so the user doesn't have to re-launch manually.
+    let repaired = !status.success() && fix_home_sonames(&app_root);
+
+    if let Some(cleanup_path) = cleanup {
+        if repaired {
+            let _ = launch_bwrap(&app_root_str, &binary, args, &temp, &config);
+        }
+        let _ = std::fs::remove_dir_all(&cleanup_path);
+        std::process::exit(status.code().unwrap_or(1));
+    } else if repaired {
+        // Replace this process with a fresh bwrap so the retry gets a clean
+        // exec() hand-off (correct signal disposition, no extra wryayer in the
+        // process tree).
+        let mut cmd = bwrap_cmd(&app_root_str, &binary, args, &temp, &config);
+        set_bwrap_env(&mut cmd);
+        let err = cmd.exec();
+        bail!("failed to exec bwrap: {err}");
+    } else {
+        std::process::exit(status.code().unwrap_or(0));
+    }
+}
+
+fn launch_bwrap(
+    app_root_str: &str,
+    binary: &str,
+    args: &[String],
+    temp: &TempBind,
+    config: &AppConfig,
+) -> Result<ExitStatus> {
+    let mut cmd = bwrap_cmd(app_root_str, binary, args, temp, config);
+    set_bwrap_env(&mut cmd);
+    cmd.status().context("failed to run bwrap")
+}
+
+fn set_bwrap_env(cmd: &mut Command) {
     cmd.env("FONTCONFIG_CACHE", "/tmp/.wryayer-fc-cache");
     // Chromium-based renderers (QtWebEngine, Electron) crash inside bwrap because
     // their subprocesses cannot set up their own namespace sandboxes.
@@ -93,16 +142,6 @@ pub fn run(app_name: &str, bin: Option<&str>, args: &[String]) -> Result<()> {
     //   already has working OpenGL (confirmed by Qt's OpenGL init log).
     cmd.env("QTWEBENGINE_CHROMIUM_FLAGS", "--no-sandbox --no-zygote --in-process-gpu --single-process --disable-gpu");
     cmd.env("ELECTRON_DISABLE_SANDBOX", "1");
-
-    if let Some(cleanup_path) = cleanup {
-        // on_close / uuid modes: run as child so we can clean up after exit
-        let status = cmd.status().context("failed to run bwrap")?;
-        let _ = std::fs::remove_dir_all(&cleanup_path);
-        std::process::exit(status.code().unwrap_or(1));
-    } else {
-        let err = cmd.exec();
-        bail!("failed to exec bwrap: {err}");
-    }
 }
 
 // ── Temp handling ─────────────────────────────────────────────────────────────
@@ -277,6 +316,64 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
     cmd.args(["--", binary]);
     cmd.args(args);
     cmd
+}
+
+/// Scan the sandbox's `home/` subtree for ELF files with missing soname
+/// dependencies and install the owning packages if any are found.  Returns
+/// true if at least one package was installed (caller may retry the app).
+///
+/// Unlike the install-time soname check, this does NOT skip hidden directories
+/// so it correctly reaches binaries in `home/hawky/.config/discord/`.
+fn fix_home_sonames(app_root: &Path) -> bool {
+    let home_subdir = app_root.join("home");
+    if !home_subdir.is_dir() {
+        return false;
+    }
+    let missing = match find_missing_sonames_in(&home_subdir, app_root) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("warning: soname check failed: {e:#}");
+            return false;
+        }
+    };
+    if missing.is_empty() {
+        return false;
+    }
+    let home = match std::env::var("HOME") {
+        Ok(h) => h,
+        Err(_) => return false,
+    };
+    let cache_dir = PathBuf::from(&home).join(".cache").join("wryayer").join("pkg");
+    let _ = std::fs::create_dir_all(&cache_dir);
+
+    let mut visited: HashSet<String> = HashSet::new();
+    let mut any_installed = false;
+
+    for soname in &missing {
+        match crate::distro::soname_owner(soname) {
+            Ok(Some(pkg)) if !visited.contains(&pkg) => {
+                eprintln!("  installing {pkg} (provides {soname})...");
+                match download_official(&pkg, &cache_dir) {
+                    Ok(path) => match extract_package(&path, app_root) {
+                        Ok(()) => {
+                            visited.insert(pkg);
+                            any_installed = true;
+                        }
+                        Err(e) => eprintln!("  warning: failed to extract {pkg}: {e:#}"),
+                    },
+                    Err(e) => eprintln!("  warning: failed to download {pkg}: {e:#}"),
+                }
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => eprintln!("  warning: no package found for {soname}"),
+            Err(e) => eprintln!("  warning: soname lookup for {soname}: {e:#}"),
+        }
+    }
+
+    if any_installed {
+        run_ldconfig(app_root);
+    }
+    any_installed
 }
 
 /// Bind /dev/null over every file in `dir` whose name starts with `prefix`.
