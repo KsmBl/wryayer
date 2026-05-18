@@ -42,7 +42,17 @@ pub fn run(app_name: &str, bin: Option<&str>, args: &[String]) -> Result<()> {
             b.to_string()
         }
     };
-    let binary = format!("/usr/bin/{bin_name}");
+    const BIN_DIRS: &[&str] = &["usr/bin", "usr/sbin", "bin", "sbin"];
+    let binary = BIN_DIRS
+        .iter()
+        .find(|sub| app_root.join(sub).join(&bin_name).symlink_metadata().is_ok())
+        .map(|sub| format!("/{sub}/{bin_name}"))
+        .with_context(|| {
+            format!(
+                "binary '{bin_name}' not found in usr/bin, usr/sbin, bin, or sbin inside {}",
+                app_root.display()
+            )
+        })?;
     let app_root_str = app_root.to_string_lossy().into_owned();
 
     let (temp, cleanup) = prepare_temp(&config, &app_root)?;

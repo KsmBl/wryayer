@@ -107,6 +107,14 @@ enum Commands {
         /// The app name as shown by `wryayer list`
         app_name: String,
     },
+    /// Delete old snapshots, keeping the N most recent
+    SnapshotPrune {
+        /// The app name as shown by `wryayer list`
+        app_name: String,
+        /// Number of most-recent snapshots to keep (default: 3)
+        #[arg(long, default_value = "3")]
+        keep: usize,
+    },
     /// Launch the interactive TUI
     Tui,
     /// Hard-link identical files across app directories to reclaim disk space
@@ -244,6 +252,7 @@ fn main() {
             commands::snapshot::rollback(&app_name, snapshot.as_deref())
         }
         Commands::Snapshots { app_name } => commands::snapshot::list(&app_name),
+        Commands::SnapshotPrune { app_name, keep } => commands::snapshot::prune(&app_name, keep),
         Commands::Tui => tui::run(),
         Commands::Dedup { verbose } => commands::dedup::run(verbose),
         Commands::Completions { shell } => {

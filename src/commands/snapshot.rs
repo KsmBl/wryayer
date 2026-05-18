@@ -117,6 +117,31 @@ pub fn list(app_name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Delete all snapshots for `app_name` beyond the `keep` most recent.
+pub fn prune(app_name: &str, keep: usize) -> Result<()> {
+    read_manifest(app_name)
+        .with_context(|| format!("'{app_name}' is not installed"))?;
+
+    let snaps = labels(app_name)?;
+    if snaps.len() <= keep {
+        eprintln!(
+            "Nothing to prune — {app_name} has {} snapshot(s), keeping {keep}",
+            snaps.len()
+        );
+        return Ok(());
+    }
+
+    let snap_root = snapshots_dir(app_name)?;
+    for label in &snaps[keep..] {
+        let path = snap_root.join(label);
+        fs::remove_dir_all(&path)
+            .with_context(|| format!("failed to remove snapshot {}", path.display()))?;
+        eprintln!("Deleted snapshot {app_name}/{label}");
+    }
+    eprintln!("Kept {} most recent snapshot(s).", keep);
+    Ok(())
+}
+
 pub fn latest(app_name: &str) -> Result<Option<String>> {
     Ok(labels(app_name)?.into_iter().next())
 }

@@ -118,7 +118,7 @@ pub fn parse_ini(content: &str) -> Result<AppConfig> {
                     .map_err(|_| anyhow::anyhow!("unknown audio value '{v}' — valid: on, off"))?;
             }
             ("share_dir", v) if !v.is_empty() => {
-                config.shared_dirs.push(v.to_owned());
+                config.shared_dirs.push(shellexpand::tilde(v).into_owned());
             }
             _ => {}
         }

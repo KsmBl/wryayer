@@ -93,7 +93,7 @@ pub fn list_all_apps() -> Result<Vec<Manifest>> {
         };
         match read_manifest(&app_name) {
             Ok(m) => manifests.push(m),
-            Err(_) => continue,
+            Err(e) => eprintln!("warning: skipping '{}': {e:#}", app_name),
         }
     }
     manifests.sort_by(|a, b| a.app.name.cmp(&b.app.name));
