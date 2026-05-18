@@ -142,7 +142,10 @@ pub fn version_is_newer(candidate: &str, current_ver: &str) -> Result<bool> {
 pub(crate) fn download_url(url: &str, dest: &Path) -> Result<()> {
     use std::io::Read;
 
-    let client = reqwest::blocking::Client::new();
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("curl/7.88.1")
+        .build()
+        .context("failed to build HTTP client")?;
     let mut response = client
         .get(url)
         .send()
@@ -280,13 +283,115 @@ mod arch {
         }
 
         eprintln!("  Downloading {pkg}...");
-        download_url(url, &dest).with_context(|| {
+        let primary_err = match download_url(url, &dest) {
+            Ok(()) => return Ok(dest),
+            Err(e) => {
+                let _ = std::fs::remove_file(&dest);
+                e
+            }
+        };
+
+        // On transient failures (not 404 — that means the package doesn't exist at
+        // that path) try every other mirror from the pacman mirrorlist files.
+        if !format!("{primary_err:#}").contains("404") {
+            for fallback_url in mirror_fallback_urls(url, filename) {
+                eprintln!("  Retrying with fallback mirror...");
+                if download_url(&fallback_url, &dest).is_ok() {
+                    return Ok(dest);
+                }
+                let _ = std::fs::remove_file(&dest);
+            }
+        }
+
+        Err(primary_err).with_context(|| {
             format!(
                 "failed to download '{pkg}'\n  \
                  If you see a 404, your package databases may be out of date: sudo pacman -Sy"
             )
-        })?;
-        Ok(dest)
+        })
+    }
+
+    /// Return alternative download URLs for `filename` by substituting the same
+    /// arch/repo values into every `Server =` line found in `/etc/pacman.d/*mirrorlist*`.
+    ///
+    /// Handles two URL layouts:
+    ///   Standard Arch: …/<repo>/os/<arch>/<filename>
+    ///   CachyOS style: …/<arch_v3>/<repo>/<filename>
+    fn mirror_fallback_urls(failed_url: &str, filename: &str) -> Vec<String> {
+        let parts: Vec<&str> = failed_url.split('/').collect();
+        let n = parts.len();
+        if n < 4 {
+            return vec![];
+        }
+        let p2 = parts[n - 2];
+        let p3 = parts[n - 3];
+
+        // Detect layout from the path components immediately before the filename.
+        //   Standard Arch: …/repo/os/arch/filename  → p3 == "os"
+        //   CachyOS style: …/arch_v3/repo/filename  → p3 != "os"
+        let (arch_v3, base_arch, repo): (&str, &str, &str) = if p3 == "os" {
+            let arch = p2;
+            let Some(repo) = parts.get(n.wrapping_sub(4)).copied() else {
+                return vec![];
+            };
+            (arch, strip_v_suffix(arch), repo)
+        } else {
+            (p3, strip_v_suffix(p3), p2)
+        };
+
+        let mut urls = vec![];
+        for server in read_mirrorlist_servers() {
+            let expanded = server
+                .replace("$arch_v3", arch_v3)
+                .replace("$arch", base_arch)
+                .replace("$repo", repo);
+            let url = format!("{}/{}", expanded.trim_end_matches('/'), filename);
+            if url != failed_url && !urls.contains(&url) {
+                urls.push(url);
+            }
+        }
+        urls
+    }
+
+    /// Strip a `_v<digits>` version suffix from an arch component, e.g.
+    /// `"x86_64_v3"` → `"x86_64"`, `"x86_64"` → `"x86_64"`.
+    fn strip_v_suffix(s: &str) -> &str {
+        if let Some(idx) = s.rfind("_v") {
+            let suffix = &s[idx + 2..];
+            if !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()) {
+                return &s[..idx];
+            }
+        }
+        s
+    }
+
+    /// Read every `Server =` line from files whose name contains "mirrorlist"
+    /// under `/etc/pacman.d/`.
+    fn read_mirrorlist_servers() -> Vec<String> {
+        let mut servers = vec![];
+        let pacman_d = Path::new("/etc/pacman.d");
+        let Ok(entries) = std::fs::read_dir(pacman_d) else {
+            return servers;
+        };
+        let mut sorted: Vec<_> = entries.flatten().collect();
+        sorted.sort_by_key(|e| e.file_name());
+        for entry in sorted {
+            let fname = entry.file_name().to_string_lossy().into_owned();
+            if !fname.contains("mirrorlist") {
+                continue;
+            }
+            let Ok(content) = std::fs::read_to_string(entry.path()) else {
+                continue;
+            };
+            for line in content.lines() {
+                if let Some(server) = line.trim().strip_prefix("Server = ") {
+                    if !server.is_empty() {
+                        servers.push(server.to_string());
+                    }
+                }
+            }
+        }
+        servers
     }
 
     pub fn extract(pkg_path: &Path, dest_dir: &Path) -> Result<()> {
