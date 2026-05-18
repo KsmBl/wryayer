@@ -110,6 +110,16 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             draw_option_picker(f, area, setting_idx, picker_selected, &config);
             draw_option_help(f, area, setting_idx, picker_selected);
         }
+        Screen::TextInput { app_name, config, back_selected, field_idx, value } => {
+            let app_name = app_name.clone();
+            let config = config.clone();
+            let back_selected = *back_selected;
+            let field_idx = *field_idx;
+            let value = value.clone();
+            draw_config(f, area, &app_name, &config, back_selected);
+            let title = super::setting_title(field_idx);
+            draw_text_input(f, area, title, &value);
+        }
     }
 }
 
@@ -756,7 +766,7 @@ fn fractional_bar(width: usize, fraction: f64) -> String {
 // ── Config overlay ────────────────────────────────────────────────────────────
 
 fn draw_config(f: &mut Frame, area: Rect, app_name: &str, config: &AppConfig, selected: usize) {
-    let popup = centered_rect(54, 80, area);
+    let popup = centered_rect(54, 92, area);
     f.render_widget(Clear, popup);
 
     let block = Block::default().borders(Borders::ALL)
@@ -771,6 +781,14 @@ fn draw_config(f: &mut Frame, area: Rect, app_name: &str, config: &AppConfig, se
         " none  →".to_string()
     } else {
         format!(" {}  →", config.shared_dirs.len())
+    };
+    use super::{HOSTNAME_SAMPLE, MACHINE_ID_SAMPLE, USERNAME_SAMPLE};
+    let spoof_label = |v: &Option<String>, sample: &str| -> String {
+        match v.as_deref() {
+            None | Some("") => " system ".to_string(),
+            Some(s) if s == sample => " sample ".to_string(),
+            Some(s) => { let t: String = s.chars().take(12).collect(); format!(" {t} ") }
+        }
     };
     let rows: Vec<(&str, String)> = vec![
         ("Network    ", b(config.network).to_string()),
@@ -789,14 +807,31 @@ fn draw_config(f: &mut Frame, area: Rect, app_name: &str, config: &AppConfig, se
             LocalDelete::OnClose => " on_close ",
         }.to_string()),
         ("Shared dirs", share_label),
+        ("Hostname   ", spoof_label(&config.spoof_hostname, HOSTNAME_SAMPLE)),
+        ("Username   ", spoof_label(&config.spoof_username, USERNAME_SAMPLE)),
+        ("Machine ID ", match config.spoof_machine_id.as_deref() {
+            None            => " system ".to_string(),
+            Some("random")  => " random ".to_string(),
+            Some(v) if v == MACHINE_ID_SAMPLE => " sample ".to_string(),
+            Some(s)         => { let t: String = s.chars().take(12).collect(); format!(" {t} ") }
+        }),
+        ("CPU info   ", match config.spoof_cpuinfo.as_deref() {
+            None           => " system ".to_string(),
+            Some("sample") => " sample ".to_string(),
+            Some(s)        => { let t: String = s.chars().take(12).collect(); format!(" {t} ") }
+        }),
     ];
 
     let row_h = 2u16;
+    // Save is pinned to the bottom so it's always reachable on small terminals.
+    let save_y = inner.y + inner.height.saturating_sub(2);
+    // Stop rendering rows before they collide with the separator + save button.
+    let clip_y = save_y.saturating_sub(2);
 
     for (idx, (label, value)) in rows.iter().enumerate() {
         let is_sel = idx == selected;
         let y = inner.y + idx as u16 * row_h;
-        if y >= inner.y + inner.height.saturating_sub(3) { break; }
+        if y >= clip_y { break; }
 
         let val_color = match value.trim() {
             "on"  => C_GREEN,
@@ -816,7 +851,7 @@ fn draw_config(f: &mut Frame, area: Rect, app_name: &str, config: &AppConfig, se
             row,
         );
 
-        if y + 1 < inner.y + inner.height.saturating_sub(3) {
+        if y + 1 < clip_y {
             f.render_widget(
                 Paragraph::new(Span::styled("─".repeat(inner.width as usize), Style::default().fg(Color::Rgb(50, 50, 60)))),
                 Rect { x: inner.x, y: y + 1, width: inner.width, height: 1 },
@@ -824,53 +859,96 @@ fn draw_config(f: &mut Frame, area: Rect, app_name: &str, config: &AppConfig, se
         }
     }
 
-    // Save button
-    let save_y = inner.y + CFG_SAVE as u16 * row_h;
-    if save_y + 1 < inner.y + inner.height {
-        let is_sel = selected == CFG_SAVE;
-        let btn_style = if is_sel {
-            Style::default().fg(Color::Black).bg(C_GREEN).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(C_GREEN)
-        };
-        let sep_y = save_y.saturating_sub(1);
-        if sep_y > inner.y {
-            f.render_widget(
-                Paragraph::new(Span::styled("─".repeat(inner.width as usize), Style::default().fg(Color::Rgb(50, 50, 60)))),
-                Rect { x: inner.x, y: sep_y, width: inner.width, height: 1 },
-            );
-        }
-        let btn_area = Rect { x: inner.x, y: save_y, width: inner.width, height: 1 };
-        let prefix = if is_sel { " ▶ " } else { "   " };
+    // Save button — always at the bottom
+    let is_sel_save = selected == CFG_SAVE;
+    let btn_style = if is_sel_save {
+        Style::default().fg(Color::Black).bg(C_GREEN).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(C_GREEN)
+    };
+    let sep_y = save_y.saturating_sub(1);
+    if sep_y > inner.y {
+        f.render_widget(
+            Paragraph::new(Span::styled("─".repeat(inner.width as usize), Style::default().fg(Color::Rgb(50, 50, 60)))),
+            Rect { x: inner.x, y: sep_y, width: inner.width, height: 1 },
+        );
+    }
+    if save_y < inner.y + inner.height {
+        let prefix = if is_sel_save { " ▶ " } else { "   " };
         f.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(prefix, Style::default().fg(C_ACCENT)),
                 Span::styled("[ Save & Close ]", btn_style),
             ])),
-            btn_area,
+            Rect { x: inner.x, y: save_y, width: inner.width, height: 1 },
         );
     }
 
     // Microphone warning
     if !config.microphone && config.audio {
-        let warn_y = inner.y + inner.height.saturating_sub(2);
-        f.render_widget(
-            Paragraph::new(Span::styled(
-                "  ⚠  PipeWire/PA mic not blocked — set audio off",
-                Style::default().fg(C_YELLOW),
-            )),
-            Rect { x: inner.x, y: warn_y, width: inner.width, height: 1 },
-        );
+        let warn_y = inner.y + inner.height.saturating_sub(3);
+        if warn_y > inner.y {
+            f.render_widget(
+                Paragraph::new(Span::styled(
+                    "  ⚠  PipeWire/PA mic not blocked — set audio off",
+                    Style::default().fg(C_YELLOW),
+                )),
+                Rect { x: inner.x, y: warn_y, width: inner.width, height: 1 },
+            );
+        }
     }
 
     // Footer
     let footer_y = inner.y + inner.height.saturating_sub(1);
     f.render_widget(
         Paragraph::new(Span::styled(
-            " [↑↓] Navigate  [←/→] Cycle  [Enter] Choose…  [?] Help  [Esc/q] Discard",
+            " [↑↓] Navigate  [←/→] Cycle  [Enter] Edit  [?] Help  [Esc/q] Discard",
             Style::default().fg(C_DIM),
         )),
         Rect { x: inner.x, y: footer_y, width: inner.width, height: 1 },
+    );
+}
+
+// ── Text input overlay ────────────────────────────────────────────────────────
+
+fn draw_text_input(f: &mut Frame, area: Rect, title: &str, value: &str) {
+    let popup = centered_rect(54, 30, area);
+    f.render_widget(Clear, popup);
+
+    let block = Block::default().borders(Borders::ALL)
+        .title(format!(" {title} "))
+        .title_style(Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD))
+        .border_style(Style::default().fg(C_ACCENT));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Length(3), Constraint::Length(1)])
+        .split(inner);
+
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            "  Leave blank to disable. Press Enter to confirm.",
+            Style::default().fg(C_DIM),
+        )),
+        chunks[0],
+    );
+
+    f.render_widget(
+        Paragraph::new(format!(" {}█", value))
+            .block(Block::default().borders(Borders::ALL)
+                .border_style(Style::default().fg(C_ACCENT)))
+            .style(Style::default().fg(Color::White)),
+        chunks[1],
+    );
+
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            " [Enter] Confirm  [Esc] Cancel  [Backspace] Delete char",
+            Style::default().fg(C_DIM),
+        )),
+        chunks[2],
     );
 }
 

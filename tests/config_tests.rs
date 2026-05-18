@@ -173,13 +173,17 @@ fn round_trip_default_config() {
 #[test]
 fn round_trip_all_non_default_values() {
     let original = AppConfig {
-        temp_mode:   TempMode::Ramdisk,
-        temp_delete: LocalDelete::OnClose,
-        network:     false,
-        camera:      false,
-        microphone:  false,
-        audio:       false,
-        shared_dirs: vec!["/tmp/foo".to_string(), "/opt/bar".to_string()],
+        temp_mode:        TempMode::Ramdisk,
+        temp_delete:      LocalDelete::OnClose,
+        network:          false,
+        camera:           false,
+        microphone:       false,
+        audio:            false,
+        shared_dirs:      vec!["/tmp/foo".to_string(), "/opt/bar".to_string()],
+        spoof_hostname:   None,
+        spoof_username:   None,
+        spoof_machine_id: None,
+        spoof_cpuinfo:    None,
     };
     let parsed = parse_ini(&format_ini(&original)).unwrap();
     assert_eq!(parsed.temp_mode,   TempMode::Ramdisk);

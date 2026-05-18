@@ -39,6 +39,14 @@ pub struct AppConfig {
     pub audio: bool,
     /// Host directories bind-mounted read-write inside the sandbox (default: none)
     pub shared_dirs: Vec<String>,
+    /// Override /etc/hostname and $HOSTNAME inside the sandbox
+    pub spoof_hostname: Option<String>,
+    /// Override $USER and $LOGNAME inside the sandbox
+    pub spoof_username: Option<String>,
+    /// Override /etc/machine-id — "random" generates a fresh UUID each launch
+    pub spoof_machine_id: Option<String>,
+    /// Path to a file to bind over /proc/cpuinfo inside the sandbox
+    pub spoof_cpuinfo: Option<String>,
 }
 
 impl Default for AppConfig {
@@ -51,6 +59,10 @@ impl Default for AppConfig {
             microphone: true,
             audio: true,
             shared_dirs: Vec::new(),
+            spoof_hostname: None,
+            spoof_username: None,
+            spoof_machine_id: None,
+            spoof_cpuinfo: None,
         }
     }
 }
@@ -120,6 +132,24 @@ pub fn parse_ini(content: &str) -> Result<AppConfig> {
             ("share_dir", v) if !v.is_empty() => {
                 config.shared_dirs.push(shellexpand::tilde(v).into_owned());
             }
+            ("spoof_hostname", v) => {
+                config.spoof_hostname = if v.is_empty() || v == "off" || v == "system" { None } else { Some(v.to_owned()) };
+            }
+            ("spoof_username", v) => {
+                config.spoof_username = if v.is_empty() || v == "off" || v == "system" { None } else { Some(v.to_owned()) };
+            }
+            ("spoof_machine_id", v) => {
+                config.spoof_machine_id = if v.is_empty() || v == "off" || v == "system" { None } else { Some(v.to_owned()) };
+            }
+            ("spoof_cpuinfo", v) => {
+                config.spoof_cpuinfo = if v.is_empty() || v == "off" || v == "system" {
+                    None
+                } else if v == "sample" {
+                    Some("sample".to_owned())
+                } else {
+                    Some(shellexpand::tilde(v).into_owned())
+                };
+            }
             _ => {}
         }
     }
@@ -182,6 +212,26 @@ pub fn format_ini(config: &AppConfig) -> String {
         s.push_str("; Host directories bind-mounted read-write inside the sandbox\n");
         for dir in &config.shared_dirs {
             s.push_str(&format!("share_dir = {dir}\n"));
+        }
+    }
+    let has_spoof = config.spoof_hostname.is_some()
+        || config.spoof_username.is_some()
+        || config.spoof_machine_id.is_some()
+        || config.spoof_cpuinfo.is_some();
+    if has_spoof {
+        s.push_str("\n[spoof]\n");
+        s.push_str("; spoof_machine_id = random  — fresh UUID on every launch\n");
+        if let Some(ref v) = config.spoof_hostname {
+            s.push_str(&format!("spoof_hostname = {v}\n"));
+        }
+        if let Some(ref v) = config.spoof_username {
+            s.push_str(&format!("spoof_username = {v}\n"));
+        }
+        if let Some(ref v) = config.spoof_machine_id {
+            s.push_str(&format!("spoof_machine_id = {v}\n"));
+        }
+        if let Some(ref v) = config.spoof_cpuinfo {
+            s.push_str(&format!("spoof_cpuinfo = {v}\n"));
         }
     }
     s

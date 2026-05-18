@@ -103,19 +103,23 @@ complete -c wryayer -n '__fish_seen_subcommand_from completions' -a 'bash fish z
 # Level 3c-f (toggles):  network | camera | microphone | audio seen
 # Level 3g (share):      share seen
 
-set -l settings tempmode tempdelete network camera microphone audio share
+set -l settings tempmode tempdelete network camera microphone audio share spoofhostname spoofusername spoofmachineid spoofcpuinfo
 
 # Level 1 — app name
 complete -c wryayer -n "__fish_seen_subcommand_from config; and not __wryayer_config_has_app; and not __fish_seen_subcommand_from $settings" -a '(__wryayer_apps)' -d 'installed app'
 
 # Level 2 — setting name
-complete -c wryayer -n "__fish_seen_subcommand_from config; and __wryayer_config_has_app; and not __fish_seen_subcommand_from $settings" -a tempmode   -d 'Set temp directory mode'
-complete -c wryayer -n "__fish_seen_subcommand_from config; and __wryayer_config_has_app; and not __fish_seen_subcommand_from $settings" -a tempdelete -d 'Set temp cleanup policy (for local mode)'
-complete -c wryayer -n "__fish_seen_subcommand_from config; and __wryayer_config_has_app; and not __fish_seen_subcommand_from $settings" -a network    -d 'Enable or disable network access'
-complete -c wryayer -n "__fish_seen_subcommand_from config; and __wryayer_config_has_app; and not __fish_seen_subcommand_from $settings" -a camera     -d 'Enable or disable camera access'
-complete -c wryayer -n "__fish_seen_subcommand_from config; and __wryayer_config_has_app; and not __fish_seen_subcommand_from $settings" -a microphone -d 'Enable or disable microphone input'
-complete -c wryayer -n "__fish_seen_subcommand_from config; and __wryayer_config_has_app; and not __fish_seen_subcommand_from $settings" -a audio      -d 'Enable or disable audio output'
-complete -c wryayer -n "__fish_seen_subcommand_from config; and __wryayer_config_has_app; and not __fish_seen_subcommand_from $settings" -a share      -d 'Manage shared directories'
+complete -c wryayer -n "__fish_seen_subcommand_from config; and __wryayer_config_has_app; and not __fish_seen_subcommand_from $settings" -a tempmode      -d 'Set temp directory mode'
+complete -c wryayer -n "__fish_seen_subcommand_from config; and __wryayer_config_has_app; and not __fish_seen_subcommand_from $settings" -a tempdelete    -d 'Set temp cleanup policy (for local mode)'
+complete -c wryayer -n "__fish_seen_subcommand_from config; and __wryayer_config_has_app; and not __fish_seen_subcommand_from $settings" -a network       -d 'Enable or disable network access'
+complete -c wryayer -n "__fish_seen_subcommand_from config; and __wryayer_config_has_app; and not __fish_seen_subcommand_from $settings" -a camera        -d 'Enable or disable camera access'
+complete -c wryayer -n "__fish_seen_subcommand_from config; and __wryayer_config_has_app; and not __fish_seen_subcommand_from $settings" -a microphone    -d 'Enable or disable microphone input'
+complete -c wryayer -n "__fish_seen_subcommand_from config; and __wryayer_config_has_app; and not __fish_seen_subcommand_from $settings" -a audio         -d 'Enable or disable audio output'
+complete -c wryayer -n "__fish_seen_subcommand_from config; and __wryayer_config_has_app; and not __fish_seen_subcommand_from $settings" -a share         -d 'Manage shared directories'
+complete -c wryayer -n "__fish_seen_subcommand_from config; and __wryayer_config_has_app; and not __fish_seen_subcommand_from $settings" -a spoofhostname -d 'Override hostname inside sandbox'
+complete -c wryayer -n "__fish_seen_subcommand_from config; and __wryayer_config_has_app; and not __fish_seen_subcommand_from $settings" -a spoofusername -d 'Override username ($USER) inside sandbox'
+complete -c wryayer -n "__fish_seen_subcommand_from config; and __wryayer_config_has_app; and not __fish_seen_subcommand_from $settings" -a spoofmachineid -d 'Override /etc/machine-id inside sandbox'
+complete -c wryayer -n "__fish_seen_subcommand_from config; and __wryayer_config_has_app; and not __fish_seen_subcommand_from $settings" -a spoofcpuinfo  -d 'Override /proc/cpuinfo inside sandbox (path to file)'
 
 # Level 3a — tempmode values
 complete -c wryayer -n "__fish_seen_subcommand_from tempmode; and not __fish_seen_subcommand_from tempdelete $settings[3..]" -a system   -d 'Share host /tmp with all other apps (default)'
@@ -138,3 +142,21 @@ end
 complete -c wryayer -n "__fish_seen_subcommand_from share; and not __fish_seen_subcommand_from add remove list" -a add    -d 'Add a directory to the shared list'
 complete -c wryayer -n "__fish_seen_subcommand_from share; and not __fish_seen_subcommand_from add remove list" -a remove -d 'Remove a directory from the shared list'
 complete -c wryayer -n "__fish_seen_subcommand_from share; and not __fish_seen_subcommand_from add remove list" -a list   -d 'List currently shared directories'
+
+# Level 3h — spoof setting values
+complete -c wryayer -n "__fish_seen_subcommand_from spoofhostname" -a system -d 'Use real hostname (no spoofing)'
+complete -c wryayer -n "__fish_seen_subcommand_from spoofhostname" -a sample -d 'Generic hostname: workstation'
+complete -c wryayer -n "__fish_seen_subcommand_from spoofhostname" -a off    -d 'Alias for system — remove spoofing'
+
+complete -c wryayer -n "__fish_seen_subcommand_from spoofusername" -a system -d 'Use real username (no spoofing)'
+complete -c wryayer -n "__fish_seen_subcommand_from spoofusername" -a sample -d 'Generic username: user'
+complete -c wryayer -n "__fish_seen_subcommand_from spoofusername" -a off    -d 'Alias for system — remove spoofing'
+
+complete -c wryayer -n "__fish_seen_subcommand_from spoofmachineid" -a system -d 'Use real machine-id (no spoofing)'
+complete -c wryayer -n "__fish_seen_subcommand_from spoofmachineid" -a random -d 'Generate a fresh UUID on every launch'
+complete -c wryayer -n "__fish_seen_subcommand_from spoofmachineid" -a sample -d 'Fixed placeholder: cafebabe0011223344556677deadbeef'
+complete -c wryayer -n "__fish_seen_subcommand_from spoofmachineid" -a off    -d 'Alias for system — remove spoofing'
+
+complete -c wryayer -n "__fish_seen_subcommand_from spoofcpuinfo" -a system -d 'Use real /proc/cpuinfo (no spoofing)'
+complete -c wryayer -n "__fish_seen_subcommand_from spoofcpuinfo" -a sample -d 'Built-in generic Intel Core i7-8550U cpuinfo'
+complete -c wryayer -n "__fish_seen_subcommand_from spoofcpuinfo" -a off    -d 'Alias for system — remove spoofing'

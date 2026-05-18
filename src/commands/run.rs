@@ -5,6 +5,30 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+const CPUINFO_SAMPLE: &str = "\
+processor\t: 0\n\
+vendor_id\t: GenuineIntel\n\
+cpu family\t: 6\n\
+model\t\t: 142\n\
+model name\t: Intel(R) Core(TM) i7-8550U CPU @ 1.80GHz\n\
+stepping\t: 10\n\
+cpu MHz\t\t: 1992.000\n\
+cache size\t: 8192 KB\n\
+physical id\t: 0\n\
+siblings\t: 4\n\
+core id\t\t: 0\n\
+cpu cores\t: 4\n\
+fpu\t\t: yes\n\
+fpu_exception\t: yes\n\
+cpuid level\t: 22\n\
+wp\t\t: yes\n\
+flags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx lm constant_tsc nopl xtopology nonstop_tsc pni pclmulqdq ssse3 fma cx16 sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand lahf_lm avx2 bmi1 bmi2 erms xsaveopt\n\
+bogomips\t: 3984.00\n\
+clflush size\t: 64\n\
+cache_alignment\t: 64\n\
+address sizes\t: 39 bits physical, 48 bits virtual\n\
+power management:\n";
+
 pub fn run(app_name: &str, bin: Option<&str>, args: &[String]) -> Result<()> {
     // Strip a leading "--" separator (e.g. `wryayer run firefox -- file.pdf`)
     let args = match args {
@@ -195,6 +219,49 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
     } else if !config.microphone {
         // Only mask ALSA capture devices (names end in 'c', e.g. pcmC0D0c)
         mask_snd_devices(&mut cmd, Some('c'));
+    }
+
+    // ── Identity spoofing ─────────────────────────────────────────────────────────
+    let spoof_dir = std::path::Path::new(app_root).join(".spoof");
+    let _ = std::fs::create_dir_all(&spoof_dir);
+
+    if let Some(ref hostname) = config.spoof_hostname {
+        let hf = spoof_dir.join("hostname");
+        let _ = std::fs::write(&hf, format!("{hostname}\n"));
+        if let Some(s) = hf.to_str() {
+            cmd.args(["--ro-bind-try", s, "/etc/hostname"]);
+        }
+        cmd.env("HOSTNAME", hostname);
+    }
+
+    if let Some(ref username) = config.spoof_username {
+        cmd.env("USER", username);
+        cmd.env("LOGNAME", username);
+    }
+
+    if let Some(ref machine_id) = config.spoof_machine_id {
+        let id = if machine_id == "random" {
+            kernel_uuid().replace('-', "")
+        } else {
+            machine_id.clone()
+        };
+        let mf = spoof_dir.join("machine-id");
+        let _ = std::fs::write(&mf, format!("{id}\n"));
+        if let Some(s) = mf.to_str() {
+            cmd.args(["--ro-bind-try", s, "/etc/machine-id"]);
+        }
+    }
+
+    if let Some(ref cpuinfo_path) = config.spoof_cpuinfo {
+        if cpuinfo_path == "sample" {
+            let cf = spoof_dir.join("cpuinfo");
+            let _ = std::fs::write(&cf, CPUINFO_SAMPLE);
+            if let Some(s) = cf.to_str() {
+                cmd.args(["--ro-bind-try", s, "/proc/cpuinfo"]);
+            }
+        } else {
+            cmd.args(["--ro-bind-try", cpuinfo_path.as_str(), "/proc/cpuinfo"]);
+        }
     }
 
     cmd.args(["--", binary]);

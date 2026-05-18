@@ -109,6 +109,14 @@ pub enum Screen {
         setting_idx: usize,
         picker_selected: usize,
     },
+    /// Free-text input overlay for spoof string settings.
+    TextInput {
+        app_name: String,
+        config: AppConfig,
+        back_selected: usize,
+        field_idx: usize,
+        value: String,
+    },
 }
 
 pub enum PendingAction {
@@ -378,6 +386,7 @@ fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
         Screen::OptionPicker { .. } => 8,
         Screen::SettingHelp { .. } => 9,
         Screen::OptionHelp { .. } => 10,
+        Screen::TextInput { .. } => 11,
     };
 
     match tag {
@@ -392,6 +401,7 @@ fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
         8 => on_option_picker(app, code),
         9 => on_setting_help(app, code),
         10 => on_option_help(app, code),
+        11 => on_text_input(app, code),
         _ => {}
     }
     Ok(())
@@ -931,10 +941,22 @@ fn on_op_done(app: &mut App, code: KeyCode) -> Result<()> {
 
 // ── Config screen ─────────────────────────────────────────────────────────────
 
-// Rows: 0=network 1=camera 2=microphone 3=audio 4=temp_mode 5=temp_delete 6=shared_dirs 7=Save
-pub const CFG_LEN: usize = 8;
+// Rows: 0=network 1=camera 2=microphone 3=audio 4=temp_mode 5=temp_delete 6=shared_dirs
+//       7=spoof_hostname 8=spoof_username 9=spoof_machine_id 10=spoof_cpuinfo 11=Save
+pub const CFG_LEN: usize = 12;
 pub const CFG_SHARES: usize = 6;
-pub const CFG_SAVE: usize = 7;
+pub const CFG_SPOOF_HOSTNAME: usize = 7;
+pub const CFG_SPOOF_USERNAME: usize = 8;
+pub const CFG_SPOOF_MACHINE_ID: usize = 9;
+pub const CFG_SPOOF_CPUINFO: usize = 10;
+pub const CFG_SAVE: usize = 11;
+
+/// A fixed 32-char hex machine-id that apps can use as a plausible-looking ID.
+pub const MACHINE_ID_SAMPLE: &str = "cafebabe0011223344556677deadbeef";
+/// Generic hostname used by the "sample" option.
+pub const HOSTNAME_SAMPLE: &str = "workstation";
+/// Generic username used by the "sample" option.
+pub const USERNAME_SAMPLE: &str = "user";
 
 fn on_config(app: &mut App, code: KeyCode) {
     let Screen::Config { app_name, config, selected } = &mut app.screen else { return };
@@ -1021,11 +1043,14 @@ fn on_config(app: &mut App, code: KeyCode) {
 
 /// The list of valid choices for the config row at `idx`.
 /// Rows 0..=3 are booleans; 4 = temp_mode; 5 = temp_delete.
+/// Rows 7..=10 use pickers (system / sample / input, or system / random / sample / input for machine_id).
 pub fn setting_options(idx: usize) -> Vec<&'static str> {
     match idx {
         0..=3 => vec!["on", "off"],
         4 => vec!["system", "ramdisk", "local", "uuid"],
         5 => vec!["never", "on_start", "on_close"],
+        CFG_SPOOF_HOSTNAME | CFG_SPOOF_USERNAME | CFG_SPOOF_CPUINFO => vec!["system", "sample", "input"],
+        CFG_SPOOF_MACHINE_ID => vec!["system", "random", "sample", "input"],
         _ => vec![],
     }
 }
@@ -1039,6 +1064,11 @@ pub fn setting_title(idx: usize) -> &'static str {
         3 => "Audio",
         4 => "Temp mode",
         5 => "Temp delete",
+        6 => "Shared dirs",
+        7 => "Spoof hostname",
+        8 => "Spoof username",
+        9 => "Spoof machine ID",
+        10 => "Spoof CPU info",
         _ => "Option",
     }
 }
@@ -1053,6 +1083,10 @@ pub fn setting_description(idx: usize) -> &'static str {
         4 => "Where the app's /tmp lives: 'system' shares the host /tmp; 'ramdisk' uses an in-memory tmpfs (fast, private); 'local' uses ~/.wryayer/<app>/.tmp/; 'uuid' creates a fresh private dir on each launch.",
         5 => "When to clean up the local temp dir (local/uuid modes): 'never' keeps it between launches; 'on_start' deletes it before each launch; 'on_close' deletes it after the app exits.",
         6 => "Host directories bind-mounted read-write into the sandbox. Useful for sharing downloads, projects, or config files between the app and your system.",
+        7 => "Override /etc/hostname and $HOSTNAME inside the sandbox. 'system' uses the real hostname; 'sample' sets it to 'workstation'; 'input' lets you type any custom name.",
+        8 => "Override $USER and $LOGNAME inside the sandbox. 'system' uses your real username; 'sample' sets it to 'user'; 'input' lets you type any custom name.",
+        9 => "Override /etc/machine-id inside the sandbox. 'system' uses the real ID; 'random' generates a fresh UUID each launch; 'sample' uses a fixed placeholder; 'input' lets you type a 32-char hex value.",
+        10 => "Bind a custom file over /proc/cpuinfo inside the sandbox. 'system' exposes the real CPU; 'sample' shows a generic Intel i7; 'input' lets you provide an absolute path to a custom cpuinfo file.",
         _ => "No description available.",
     }
 }
@@ -1081,6 +1115,23 @@ pub fn option_description(setting_idx: usize, choice_idx: usize) -> &'static str
         (5, 0) => "never — Keep the temp dir between launches. Useful for apps that cache heavy data in /tmp.",
         (5, 1) => "on_start — Delete and recreate the temp dir before each launch; always starts fresh.",
         (5, 2) => "on_close — Delete the temp dir after the app exits; cleans up automatically.",
+        // Hostname
+        (7, 0) => "system — Use the real hostname from the host. No spoofing.",
+        (7, 1) => "sample — Set hostname to 'workstation'. Generic name that won't expose your machine.",
+        (7, 2) => "input — Type a custom hostname. Saved to /etc/hostname and $HOSTNAME inside the sandbox.",
+        // Username
+        (8, 0) => "system — Use your real login name. No spoofing.",
+        (8, 1) => "sample — Set username to 'user'. Generic name that won't expose your real login.",
+        (8, 2) => "input — Type a custom username. Applied to $USER and $LOGNAME inside the sandbox.",
+        // Machine ID
+        (9, 0) => "system — Use the real /etc/machine-id from the host (no spoofing).",
+        (9, 1) => "random — Generate a fresh 32-char hex UUID on every launch. Prevents cross-session fingerprinting.",
+        (9, 2) => "sample — Use a fixed placeholder ID: cafebabe0011223344556677deadbeef. Same every run, but not your real ID.",
+        (9, 3) => "input — Type your own 32-char hex machine-id. Useful for reproducing a specific identity.",
+        // CPU info
+        (10, 0) => "system — Expose the real /proc/cpuinfo to the app. No spoofing.",
+        (10, 1) => "sample — Bind a built-in generic Intel Core i7-8550U cpuinfo. The app won't see your real CPU model.",
+        (10, 2) => "input — Provide an absolute path to a custom cpuinfo file to bind over /proc/cpuinfo.",
         _ => "No description available.",
     }
 }
@@ -1103,6 +1154,27 @@ pub fn setting_current(config: &AppConfig, idx: usize) -> usize {
             LocalDelete::Never   => 0,
             LocalDelete::OnStart => 1,
             LocalDelete::OnClose => 2,
+        },
+        CFG_SPOOF_HOSTNAME => match config.spoof_hostname.as_deref() {
+            None => 0,
+            Some(v) if v == HOSTNAME_SAMPLE => 1,
+            _ => 2,
+        },
+        CFG_SPOOF_USERNAME => match config.spoof_username.as_deref() {
+            None => 0,
+            Some(v) if v == USERNAME_SAMPLE => 1,
+            _ => 2,
+        },
+        CFG_SPOOF_MACHINE_ID => match config.spoof_machine_id.as_deref() {
+            None             => 0,
+            Some("random")   => 1,
+            Some(v) if v == MACHINE_ID_SAMPLE => 2,
+            _                => 3,
+        },
+        CFG_SPOOF_CPUINFO => match config.spoof_cpuinfo.as_deref() {
+            None           => 0,
+            Some("sample") => 1,
+            _              => 2,
         },
         _ => 0,
     }
@@ -1127,6 +1199,19 @@ pub fn apply_setting(config: &mut AppConfig, idx: usize, choice: usize) {
         (5, 0) => config.temp_delete = LocalDelete::Never,
         (5, 1) => config.temp_delete = LocalDelete::OnStart,
         (5, 2) => config.temp_delete = LocalDelete::OnClose,
+        (7, 0) => config.spoof_hostname = None,
+        (7, 1) => config.spoof_hostname = Some(HOSTNAME_SAMPLE.to_string()),
+        // (7, 2) = "input" — handled by on_option_picker which opens TextInput
+        (8, 0) => config.spoof_username = None,
+        (8, 1) => config.spoof_username = Some(USERNAME_SAMPLE.to_string()),
+        // (8, 2) = "input" — handled by on_option_picker which opens TextInput
+        (9, 0) => config.spoof_machine_id = None,
+        (9, 1) => config.spoof_machine_id = Some("random".to_string()),
+        (9, 2) => config.spoof_machine_id = Some(MACHINE_ID_SAMPLE.to_string()),
+        // (9, 3) = "input" — handled by on_option_picker which opens TextInput
+        (10, 0) => config.spoof_cpuinfo = None,
+        (10, 1) => config.spoof_cpuinfo = Some("sample".to_string()),
+        // (10, 2) = "input" — handled by on_option_picker which opens TextInput
         _ => {}
     }
 }
@@ -1180,6 +1265,39 @@ fn on_option_picker(app: &mut App, code: KeyCode) {
             let mut cfg = config.clone();
             let idx = *setting_idx;
             let choice = *selected;
+            // "input" option opens the free-text overlay instead of applying a setting.
+            let is_input_choice = match idx {
+                CFG_SPOOF_HOSTNAME | CFG_SPOOF_USERNAME | CFG_SPOOF_CPUINFO => choice == 2,
+                CFG_SPOOF_MACHINE_ID => choice == 3,
+                _ => false,
+            };
+            if is_input_choice {
+                let current = match idx {
+                    CFG_SPOOF_HOSTNAME   => cfg.spoof_hostname.clone().unwrap_or_default(),
+                    CFG_SPOOF_USERNAME   => cfg.spoof_username.clone().unwrap_or_default(),
+                    CFG_SPOOF_MACHINE_ID => cfg.spoof_machine_id.clone().unwrap_or_default(),
+                    CFG_SPOOF_CPUINFO    => cfg.spoof_cpuinfo.clone().unwrap_or_default(),
+                    _ => String::new(),
+                };
+                // Clear pre-fill when current value is one of the fixed presets.
+                let is_preset = match idx {
+                    CFG_SPOOF_HOSTNAME   => current == HOSTNAME_SAMPLE,
+                    CFG_SPOOF_USERNAME   => current == USERNAME_SAMPLE,
+                    CFG_SPOOF_MACHINE_ID => current == "random" || current == MACHINE_ID_SAMPLE,
+                    CFG_SPOOF_CPUINFO    => current == "sample",
+                    _ => false,
+                };
+                let value = if is_preset || current.is_empty() { String::new() } else { current };
+                app.screen = Screen::TextInput {
+                    app_name: name,
+                    config: cfg,
+                    back_selected: idx,
+                    field_idx: idx,
+                    value,
+                };
+                app.needs_clear = true;
+                return;
+            }
             apply_setting(&mut cfg, idx, choice);
             app.screen = Screen::Config { app_name: name, config: cfg, selected: idx };
             app.needs_clear = true;
@@ -1227,6 +1345,52 @@ fn on_setting_help(app: &mut App, _code: KeyCode) {
     let sel = *back_selected;
     app.screen = Screen::Config { app_name: name, config: cfg, selected: sel };
     app.needs_clear = true;
+}
+
+// ── Text input overlay (spoof settings) ──────────────────────────────────────
+
+fn set_spoof_field(config: &mut AppConfig, idx: usize, value: String) {
+    let v = if value.is_empty() { None } else { Some(value) };
+    match idx {
+        CFG_SPOOF_HOSTNAME   => config.spoof_hostname   = v,
+        CFG_SPOOF_USERNAME   => config.spoof_username   = v,
+        CFG_SPOOF_MACHINE_ID => config.spoof_machine_id = v,
+        CFG_SPOOF_CPUINFO    => config.spoof_cpuinfo    = v,
+        _ => {}
+    }
+}
+
+fn on_text_input(app: &mut App, code: KeyCode) {
+    let Screen::TextInput { app_name, config, back_selected, field_idx, value } = &mut app.screen
+    else {
+        return;
+    };
+    match code {
+        KeyCode::Esc => {
+            let name = app_name.clone();
+            let cfg = config.clone();
+            let sel = *back_selected;
+            app.screen = Screen::Config { app_name: name, config: cfg, selected: sel };
+            app.needs_clear = true;
+        }
+        KeyCode::Enter => {
+            let name = app_name.clone();
+            let mut cfg = config.clone();
+            let sel = *back_selected;
+            let idx = *field_idx;
+            let v = value.trim().to_string();
+            set_spoof_field(&mut cfg, idx, v);
+            app.screen = Screen::Config { app_name: name, config: cfg, selected: sel };
+            app.needs_clear = true;
+        }
+        KeyCode::Backspace => {
+            value.pop();
+        }
+        KeyCode::Char(c) => {
+            value.push(c);
+        }
+        _ => {}
+    }
 }
 
 // ── Space tab ─────────────────────────────────────────────────────────────────

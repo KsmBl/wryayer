@@ -11,14 +11,21 @@ pub fn run(
     camera: Option<&str>,
     microphone: Option<&str>,
     audio: Option<&str>,
+    spoof_hostname: Option<&str>,
+    spoof_username: Option<&str>,
+    spoof_machine_id: Option<&str>,
+    spoof_cpuinfo: Option<&str>,
 ) -> Result<()> {
     read_manifest(app_name)
         .with_context(|| format!("'{app_name}' is not installed"))?;
 
     let mut config = read_config(app_name)?;
-    let changed = [temp_mode, temp_delete, network, camera, microphone, audio]
-        .iter()
-        .any(Option::is_some);
+    let changed = [
+        temp_mode, temp_delete, network, camera, microphone, audio,
+        spoof_hostname, spoof_username, spoof_machine_id, spoof_cpuinfo,
+    ]
+    .iter()
+    .any(Option::is_some);
 
     if let Some(mode) = temp_mode {
         config.temp_mode = match mode {
@@ -53,6 +60,15 @@ pub fn run(
             };
         }
     }
+
+    let set_spoof = |val: Option<&str>| -> Option<Option<String>> {
+        val.map(|v| if v == "off" || v == "system" || v.is_empty() { None } else { Some(v.to_owned()) })
+    };
+
+    if let Some(v) = set_spoof(spoof_hostname)   { config.spoof_hostname   = v; }
+    if let Some(v) = set_spoof(spoof_username)   { config.spoof_username   = v; }
+    if let Some(v) = set_spoof(spoof_machine_id) { config.spoof_machine_id = v; }
+    if let Some(v) = set_spoof(spoof_cpuinfo)    { config.spoof_cpuinfo    = v; }
 
     if changed {
         write_config(app_name, &config)?;
@@ -142,5 +158,17 @@ fn print_config(app_name: &str, config: &AppConfig) {
         for d in &config.shared_dirs {
             eprintln!("    {d}");
         }
+    }
+    fn spoof_str(v: &Option<String>) -> &str { v.as_deref().unwrap_or("off") }
+    if config.spoof_hostname.is_some()
+        || config.spoof_username.is_some()
+        || config.spoof_machine_id.is_some()
+        || config.spoof_cpuinfo.is_some()
+    {
+        eprintln!("  spoof:");
+        eprintln!("    hostname   = {}", spoof_str(&config.spoof_hostname));
+        eprintln!("    username   = {}", spoof_str(&config.spoof_username));
+        eprintln!("    machine-id = {}", spoof_str(&config.spoof_machine_id));
+        eprintln!("    cpuinfo    = {}", spoof_str(&config.spoof_cpuinfo));
     }
 }

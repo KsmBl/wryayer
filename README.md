@@ -434,6 +434,61 @@ wryayer config firefox share list
 | `audio` | `on` `off` | `on` | Mask ALSA + PipeWire/PulseAudio sockets |
 | `share add <path>` | Any existing directory | — | Bind-mount `<path>` read-write inside the sandbox |
 
+### Identity spoofing
+
+Override what the sandbox reports about the host machine. Useful for preventing apps from embedding your real hostname, username, or machine fingerprint in logs, telemetry, or profiles.
+
+```fish
+# Spoof /etc/hostname and $HOSTNAME
+wryayer config firefox spoof-hostname myworkstation
+wryayer config firefox spoof-hostname sample   # → "workstation"
+wryayer config firefox spoof-hostname system   # disable
+
+# Spoof $USER and $LOGNAME
+wryayer config firefox spoof-username sample   # → "user"
+wryayer config firefox spoof-username myname
+
+# Spoof /etc/machine-id
+wryayer config firefox spoof-machine-id system    # use real ID (default)
+wryayer config firefox spoof-machine-id random    # fresh UUID every launch
+wryayer config firefox spoof-machine-id sample    # → cafebabe0011223344556677deadbeef
+wryayer config firefox spoof-machine-id a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4
+
+# Spoof /proc/cpuinfo
+wryayer config firefox spoof-cpuinfo sample        # built-in generic Intel i7
+wryayer config firefox spoof-cpuinfo ~/fakecpu.txt # custom file
+
+# Disable any spoofing
+wryayer config firefox spoof-hostname system
+```
+
+All four are editable in the TUI config screen (`s` on an installed app). Each row uses a picker with `system` / `sample` / `input` (machine-id also has `random`). Press `?` on any option to see exactly what value will be used.
+
+| CLI subcommand | Values | Effect |
+|---|---|---|
+| `spoof-hostname <value\|sample\|system\|off>` | Any string | Writes `/etc/hostname`, sets `$HOSTNAME` |
+| `spoof-username <value\|sample\|system\|off>` | Any string | Sets `$USER` and `$LOGNAME` |
+| `spoof-machine-id <system\|random\|sample\|hex\|off>` | See below | Writes `/etc/machine-id` |
+| `spoof-cpuinfo <sample\|path\|system\|off>` | Path or `sample` | Binds the file over `/proc/cpuinfo` |
+
+**Sample values:**
+
+| Setting | Sample value |
+|---|---|
+| hostname | `workstation` |
+| username | `user` |
+| machine-id | `cafebabe0011223344556677deadbeef` |
+| cpuinfo | Built-in generic Intel Core i7-8550U on x86_64 |
+
+**machine-id modes:**
+
+| Value | Behaviour |
+|---|---|
+| `system` / `off` | No spoofing — real `/etc/machine-id` is used |
+| `random` | Generates a fresh 32-char hex UUID on every launch |
+| `sample` | Fixed placeholder `cafebabe0011223344556677deadbeef` |
+| 32-char hex | Your own fixed machine-id |
+
 The config is stored as a human-readable INI file at `~/.wryayer/<app>/config.ini`.
 
 ---
@@ -480,6 +535,7 @@ The config is stored as a human-readable INI file at `~/.wryayer/<app>/config.in
 - [ ] **Delta updates** — only re-download changed packages instead of the full dep tree
 - [ ] **Export/import via SSH or SFTP** — `wryayer export --remote user@host:/path`
 - [ ] **TUI package search from AUR** — the Install tab currently searches pacman only
+- [x] **Identity spoofing** — spoof hostname, username, machine-id, and cpuinfo per app
 - [ ] **Per-app env var overrides** — let users set `LANG`, `QT_SCALE_FACTOR`, etc. in `config.ini`
 - [ ] **Dependency graph viewer** — TUI screen showing the full package tree for an installed app
 - [ ] **Auto-snapshot on update** — capture a snapshot automatically before each update so failures can be undone with one keystroke

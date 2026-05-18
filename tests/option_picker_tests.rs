@@ -25,9 +25,9 @@ fn options_for_temp_delete_has_three_choices() {
 
 #[test]
 fn options_for_non_picker_rows_are_empty() {
-    // CFG_SHARES (6) and CFG_SAVE (7) are handled by their own screens.
+    // CFG_SHARES (6) and CFG_SAVE (11) are handled by their own screens.
     assert!(setting_options(6).is_empty());
-    assert!(setting_options(7).is_empty());
+    assert!(setting_options(11).is_empty());
     assert!(setting_options(999).is_empty());
 }
 

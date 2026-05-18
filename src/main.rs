@@ -172,6 +172,26 @@ enum ConfigSetting {
         #[command(subcommand)]
         action: ShareAction,
     },
+    /// Set hostname shown inside the sandbox, or "off" to disable
+    SpoofHostname {
+        /// Hostname string, or "off" to disable
+        value: String,
+    },
+    /// Set $USER/$LOGNAME inside the sandbox, or "off" to disable
+    SpoofUsername {
+        /// Username string, or "off" to disable
+        value: String,
+    },
+    /// Set /etc/machine-id inside the sandbox ("random" = fresh UUID each launch, "off" = disable)
+    SpoofMachineId {
+        /// ID value, "random", or "off"
+        value: String,
+    },
+    /// Bind a custom file over /proc/cpuinfo inside the sandbox, or "off" to disable
+    SpoofCpuinfo {
+        /// Path to a cpuinfo file, or "off" to disable
+        path: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -218,30 +238,42 @@ fn main() {
         }
         Commands::Repair { app_name } => commands::repair::run(&app_name),
         Commands::Config { app_name, setting } => match setting {
-            None => commands::config::run(&app_name, None, None, None, None, None, None),
+            None => commands::config::run(&app_name, None, None, None, None, None, None, None, None, None, None),
             Some(ConfigSetting::Tempmode { mode }) => {
-                commands::config::run(&app_name, Some(&mode), None, None, None, None, None)
+                commands::config::run(&app_name, Some(&mode), None, None, None, None, None, None, None, None, None)
             }
             Some(ConfigSetting::Tempdelete { policy }) => {
-                commands::config::run(&app_name, None, Some(&policy), None, None, None, None)
+                commands::config::run(&app_name, None, Some(&policy), None, None, None, None, None, None, None, None)
             }
             Some(ConfigSetting::Network { enabled }) => {
-                commands::config::run(&app_name, None, None, Some(&enabled), None, None, None)
+                commands::config::run(&app_name, None, None, Some(&enabled), None, None, None, None, None, None, None)
             }
             Some(ConfigSetting::Camera { enabled }) => {
-                commands::config::run(&app_name, None, None, None, Some(&enabled), None, None)
+                commands::config::run(&app_name, None, None, None, Some(&enabled), None, None, None, None, None, None)
             }
             Some(ConfigSetting::Microphone { enabled }) => {
-                commands::config::run(&app_name, None, None, None, None, Some(&enabled), None)
+                commands::config::run(&app_name, None, None, None, None, Some(&enabled), None, None, None, None, None)
             }
             Some(ConfigSetting::Audio { enabled }) => {
-                commands::config::run(&app_name, None, None, None, None, None, Some(&enabled))
+                commands::config::run(&app_name, None, None, None, None, None, Some(&enabled), None, None, None, None)
             }
             Some(ConfigSetting::Share { action }) => match action {
                 ShareAction::Add { path } => commands::config::share_add(&app_name, &path),
                 ShareAction::Remove { path } => commands::config::share_remove(&app_name, &path),
                 ShareAction::List => commands::config::share_list(&app_name),
             },
+            Some(ConfigSetting::SpoofHostname { value }) => {
+                commands::config::run(&app_name, None, None, None, None, None, None, Some(&value), None, None, None)
+            }
+            Some(ConfigSetting::SpoofUsername { value }) => {
+                commands::config::run(&app_name, None, None, None, None, None, None, None, Some(&value), None, None)
+            }
+            Some(ConfigSetting::SpoofMachineId { value }) => {
+                commands::config::run(&app_name, None, None, None, None, None, None, None, None, Some(&value), None)
+            }
+            Some(ConfigSetting::SpoofCpuinfo { path }) => {
+                commands::config::run(&app_name, None, None, None, None, None, None, None, None, None, Some(&path))
+            }
         },
         Commands::Export { app_name, output } => {
             commands::export::run(&app_name, output.as_ref())
