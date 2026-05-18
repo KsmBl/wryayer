@@ -118,6 +118,25 @@ bwrap sandbox at runtime:
 
 ---
 
+## Supported distributions
+
+| Distribution | Support | Notes |
+|---|---|---|
+| **Arch Linux** | ✅ Fully supported | pacman + AUR backend; actively tested |
+| **CachyOS** | ✅ Fully supported | Arch-based; primary test environment |
+| **Manjaro** | ✅ Fully supported | Arch-based; detected via `ID_LIKE=manjaro` |
+| **EndeavourOS / Garuda / other Arch derivatives** | ✅ Fully supported | Detected via `ID_LIKE=arch` or presence of `/usr/bin/pacman` |
+| **Debian 11 / 12** | ✅ Fully supported | apt + dpkg backend; actively tested |
+| **Ubuntu 22.04 / 24.04** | ✅ Expected to work | Detected via `ID_LIKE=ubuntu`; same apt/dpkg toolchain as Debian — not separately tested |
+| **Linux Mint** | ✅ Expected to work | Ubuntu-based; detected via `ID_LIKE=ubuntu`; not separately tested |
+| **Void Linux** | ❌ Not supported | Uses xbps — no supported backend |
+| **Fedora** | ❌ Not supported | Uses dnf/rpm — no supported backend |
+| **openSUSE** | ❌ Not supported | Uses zypper — no supported backend |
+
+Distro detection reads `/etc/os-release`. Distributions not listed above may work if they are closely derived from Arch or Debian and carry a matching `ID_LIKE` value, but are untested.
+
+---
+
 ## Prerequisites
 
 wryayer auto-detects your distro from `/etc/os-release` and uses the appropriate package backend. Install the tools for your distro before building.
