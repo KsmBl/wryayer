@@ -175,6 +175,10 @@ pub struct App {
     /// with inherited stdio so the user actually interacts with the app,
     /// then resume. Set by pressing `r`/Enter on an installed app.
     pub run_request: Option<String>,
+    /// If Some, the event loop will suspend the TUI, open an editor on the
+    /// given path, save config to "custom" after, then resume.
+    /// Tuple: (app_name, path_to_edit)
+    pub editor_request: Option<(String, PathBuf)>,
     // ── Easter egg ────────────────────────────────────────────────────────────
     pub konami_mode: bool,
     pub konami_state: usize,
@@ -212,6 +216,7 @@ impl App {
             log_scroll: 0,
             needs_clear: false,
             run_request: None,
+            editor_request: None,
             konami_mode: false,
             konami_state: 0,
         })
@@ -321,6 +326,9 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(
             if let Some(name) = app.run_request.take() {
                 run_app_inline(terminal, &name, &mut app)?;
             }
+            if let Some((app_name, cpuinfo_path)) = app.editor_request.take() {
+                open_editor_inline(terminal, &app_name, cpuinfo_path, &mut app)?;
+            }
             if app.needs_clear {
                 app.needs_clear = false;
                 terminal.clear()?;
@@ -363,6 +371,115 @@ fn run_app_inline(
         _ => app.status.clear(),
     }
     Ok(())
+}
+
+/// Suspend the TUI, let the user pick an editor and edit the cpuinfo file,
+/// save "custom" into the app config, then resume the TUI.
+fn open_editor_inline(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app_name: &str,
+    cpuinfo_path: PathBuf,
+    app: &mut App,
+) -> Result<()> {
+    use std::io::Write;
+
+    // Tear down the TUI's terminal state so we get a normal shell.
+    disable_raw_mode()?;
+    terminal.backend_mut().execute(LeaveAlternateScreen)?;
+    terminal.show_cursor()?;
+
+    let editors = find_editors();
+    let chosen = if editors.is_empty() {
+        eprintln!("No editor found. Install one of: nvim, vim, vi, nano.");
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        None
+    } else if editors.len() == 1 {
+        Some(editors[0])
+    } else {
+        println!("Select editor:");
+        for (i, ed) in editors.iter().enumerate() {
+            println!("  {}) {ed}", i + 1);
+        }
+        print!("Choice [1]: ");
+        std::io::stdout().flush().ok();
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line).ok();
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            Some(editors[0])
+        } else {
+            trimmed.parse::<usize>().ok()
+                .and_then(|n| if n >= 1 && n <= editors.len() { Some(editors[n - 1]) } else { None })
+                .or(Some(editors[0]))
+        }
+    };
+
+    let edited = if let Some(editor) = chosen {
+        // Ensure the .spoof/ dir exists.
+        if let Some(parent) = cpuinfo_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        // Pre-populate on first use with the real /proc/cpuinfo so the user
+        // has a starting point instead of a blank file.
+        if !cpuinfo_path.exists() {
+            let seed = std::fs::read_to_string("/proc/cpuinfo").unwrap_or_default();
+            let _ = std::fs::write(&cpuinfo_path, seed);
+        }
+        Command::new(editor)
+            .arg(&cpuinfo_path)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    } else {
+        false
+    };
+
+    // Restore the TUI.
+    enable_raw_mode()?;
+    terminal.backend_mut().execute(EnterAlternateScreen)?;
+    terminal.hide_cursor()?;
+    terminal.clear()?;
+    app.needs_clear = false;
+
+    // If the editor ran and the file exists, update config and go to Config screen.
+    if edited && cpuinfo_path.exists() {
+        if let Ok(mut cfg) = crate::config::read_config(app_name) {
+            cfg.spoof_cpuinfo = Some("custom".to_string());
+            let _ = crate::config::write_config(app_name, &cfg);
+            app.screen = Screen::Config {
+                app_name: app_name.to_string(),
+                config: cfg,
+                selected: CFG_SPOOF_CPUINFO,
+            };
+            app.status = "CPU info saved.".to_string();
+        }
+    } else {
+        if let Ok(cfg) = crate::config::read_config(app_name) {
+            app.screen = Screen::Config {
+                app_name: app_name.to_string(),
+                config: cfg,
+                selected: CFG_SPOOF_CPUINFO,
+            };
+        }
+        if chosen.is_none() {
+            app.status = "No editor available — install nvim, vim, vi, or nano.".to_string();
+        }
+    }
+
+    Ok(())
+}
+
+/// Return the editors from {nvim, vim, vi, nano} that are on PATH, in that order.
+fn find_editors() -> Vec<&'static str> {
+    ["nvim", "vim", "vi", "nano"]
+        .iter()
+        .copied()
+        .filter(|ed| {
+            std::env::var_os("PATH")
+                .map(|p| std::env::split_paths(&p).any(|dir| dir.join(ed).exists()))
+                .unwrap_or(false)
+        })
+        .collect()
 }
 
 // ── Key dispatch ──────────────────────────────────────────────────────────────
@@ -1049,7 +1166,8 @@ pub fn setting_options(idx: usize) -> Vec<&'static str> {
         0..=3 => vec!["on", "off"],
         4 => vec!["system", "ramdisk", "local", "uuid"],
         5 => vec!["never", "on_start", "on_close"],
-        CFG_SPOOF_HOSTNAME | CFG_SPOOF_USERNAME | CFG_SPOOF_CPUINFO => vec!["system", "sample", "input"],
+        CFG_SPOOF_HOSTNAME | CFG_SPOOF_USERNAME => vec!["system", "sample", "input"],
+        CFG_SPOOF_CPUINFO => vec!["system", "sample", "edit"],
         CFG_SPOOF_MACHINE_ID => vec!["system", "random", "sample", "input"],
         _ => vec![],
     }
@@ -1086,7 +1204,7 @@ pub fn setting_description(idx: usize) -> &'static str {
         7 => "Override /etc/hostname and $HOSTNAME inside the sandbox. 'system' uses the real hostname; 'sample' sets it to 'workstation'; 'input' lets you type any custom name.",
         8 => "Override $USER and $LOGNAME inside the sandbox. 'system' uses your real username; 'sample' sets it to 'user'; 'input' lets you type any custom name.",
         9 => "Override /etc/machine-id inside the sandbox. 'system' uses the real ID; 'random' generates a fresh UUID each launch; 'sample' uses a fixed placeholder; 'input' lets you type a 32-char hex value.",
-        10 => "Bind a custom file over /proc/cpuinfo inside the sandbox. 'system' exposes the real CPU; 'sample' shows a generic Intel i7; 'input' lets you provide an absolute path to a custom cpuinfo file.",
+        10 => "Override /proc/cpuinfo inside the sandbox. 'system' exposes the real CPU; 'sample' shows a generic Intel i7; 'edit' opens a text editor so you can write a fully custom cpuinfo — pre-filled with your real CPU data.",
         _ => "No description available.",
     }
 }
@@ -1131,7 +1249,7 @@ pub fn option_description(setting_idx: usize, choice_idx: usize) -> &'static str
         // CPU info
         (10, 0) => "system — Expose the real /proc/cpuinfo to the app. No spoofing.",
         (10, 1) => "sample — Bind a built-in generic Intel Core i7-8550U cpuinfo. The app won't see your real CPU model.",
-        (10, 2) => "input — Provide an absolute path to a custom cpuinfo file to bind over /proc/cpuinfo.",
+        (10, 2) => "edit — Open a text editor (nvim/vim/vi/nano) to write a custom /proc/cpuinfo. Pre-filled with your real CPU info on first use. Content is saved per-app.",
         _ => "No description available.",
     }
 }
@@ -1174,7 +1292,7 @@ pub fn setting_current(config: &AppConfig, idx: usize) -> usize {
         CFG_SPOOF_CPUINFO => match config.spoof_cpuinfo.as_deref() {
             None           => 0,
             Some("sample") => 1,
-            _              => 2,
+            _              => 2,  // "custom" or legacy path both show as "edit"
         },
         _ => 0,
     }
@@ -1265,9 +1383,23 @@ fn on_option_picker(app: &mut App, code: KeyCode) {
             let mut cfg = config.clone();
             let idx = *setting_idx;
             let choice = *selected;
-            // "input" option opens the free-text overlay instead of applying a setting.
+            // cpuinfo "edit" → tear down TUI, open editor, save content.
+            if idx == CFG_SPOOF_CPUINFO && choice == 2 {
+                let name2 = name.clone();
+                let cpuinfo_file = crate::manifest::app_dir(&name)
+                    .map(|d| d.join(".spoof").join("cpuinfo"));
+                app.screen = Screen::Main;
+                app.needs_clear = true;
+                match cpuinfo_file {
+                    Ok(path) => { app.editor_request = Some((name2, path)); }
+                    Err(_) => { app.status = "error: cannot find app directory".to_string(); }
+                }
+                return;
+            }
+
+            // "input" option opens the free-text overlay for hostname/username/machine-id.
             let is_input_choice = match idx {
-                CFG_SPOOF_HOSTNAME | CFG_SPOOF_USERNAME | CFG_SPOOF_CPUINFO => choice == 2,
+                CFG_SPOOF_HOSTNAME | CFG_SPOOF_USERNAME => choice == 2,
                 CFG_SPOOF_MACHINE_ID => choice == 3,
                 _ => false,
             };
@@ -1276,7 +1408,6 @@ fn on_option_picker(app: &mut App, code: KeyCode) {
                     CFG_SPOOF_HOSTNAME   => cfg.spoof_hostname.clone().unwrap_or_default(),
                     CFG_SPOOF_USERNAME   => cfg.spoof_username.clone().unwrap_or_default(),
                     CFG_SPOOF_MACHINE_ID => cfg.spoof_machine_id.clone().unwrap_or_default(),
-                    CFG_SPOOF_CPUINFO    => cfg.spoof_cpuinfo.clone().unwrap_or_default(),
                     _ => String::new(),
                 };
                 // Clear pre-fill when current value is one of the fixed presets.
@@ -1284,7 +1415,6 @@ fn on_option_picker(app: &mut App, code: KeyCode) {
                     CFG_SPOOF_HOSTNAME   => current == HOSTNAME_SAMPLE,
                     CFG_SPOOF_USERNAME   => current == USERNAME_SAMPLE,
                     CFG_SPOOF_MACHINE_ID => current == "random" || current == MACHINE_ID_SAMPLE,
-                    CFG_SPOOF_CPUINFO    => current == "sample",
                     _ => false,
                 };
                 let value = if is_preset || current.is_empty() { String::new() } else { current };

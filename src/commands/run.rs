@@ -376,6 +376,14 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
             if let Some(s) = cf.to_str() {
                 cmd.args(["--ro-bind-try", s, "/proc/cpuinfo"]);
             }
+        } else if cpuinfo_path == "custom" {
+            // User-edited file written by the TUI's editor session.
+            let cf = spoof_dir.join("cpuinfo");
+            if cf.exists() {
+                if let Some(s) = cf.to_str() {
+                    cmd.args(["--ro-bind", s, "/proc/cpuinfo"]);
+                }
+            }
         } else {
             cmd.args(["--ro-bind-try", cpuinfo_path.as_str(), "/proc/cpuinfo"]);
         }

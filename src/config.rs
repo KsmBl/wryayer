@@ -146,6 +146,8 @@ pub fn parse_ini(content: &str) -> Result<AppConfig> {
                     None
                 } else if v == "sample" {
                     Some("sample".to_owned())
+                } else if v == "custom" {
+                    Some("custom".to_owned())
                 } else {
                     Some(shellexpand::tilde(v).into_owned())
                 };
