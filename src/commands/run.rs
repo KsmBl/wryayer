@@ -286,6 +286,74 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
     if let Some(ref username) = config.spoof_username {
         cmd.env("USER", username);
         cmd.env("LOGNAME", username);
+
+        // whoami(1) and getpwuid(3) read /etc/passwd directly — env vars alone
+        // are not enough.  Patch /etc/passwd and /etc/group so that the current
+        // UID/GID entries carry the spoofed name.
+        let uid = unsafe { libc::getuid() };
+        let gid = unsafe { libc::getgid() };
+        let uid_s = uid.to_string();
+        let gid_s = gid.to_string();
+
+        // Determine real username from passwd so we can also fix the group file.
+        let real_name: String = std::fs::read_to_string("/etc/passwd")
+            .unwrap_or_default()
+            .lines()
+            .find_map(|l| {
+                let f: Vec<&str> = l.splitn(7, ':').collect();
+                if f.len() >= 3 && f[2] == uid_s { Some(f[0].to_string()) } else { None }
+            })
+            .unwrap_or_default();
+
+        if let Ok(passwd) = std::fs::read_to_string("/etc/passwd") {
+            let patched: String = passwd
+                .lines()
+                .map(|l| {
+                    let mut f: Vec<&str> = l.splitn(7, ':').collect();
+                    // Replace the username field for our UID; keep home dir as-is
+                    // so $HOME still resolves correctly inside the sandbox.
+                    if f.len() >= 3 && f[2] == uid_s {
+                        f[0] = username.as_str();
+                    }
+                    f.join(":")
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n";
+            let pf = spoof_dir.join("passwd");
+            if std::fs::write(&pf, patched).is_ok() {
+                if let Some(s) = pf.to_str() {
+                    cmd.args(["--ro-bind", s, "/etc/passwd"]);
+                }
+            }
+        }
+
+        if let Ok(group) = std::fs::read_to_string("/etc/group") {
+            let patched: String = group
+                .lines()
+                .map(|l| {
+                    let mut f: Vec<&str> = l.splitn(4, ':').collect();
+                    if f.len() >= 3 {
+                        // Rename the primary group (same GID) and any group
+                        // whose name matches the real username (common on Linux).
+                        let is_primary = f[2] == gid_s;
+                        let is_user_group = !real_name.is_empty() && f[0] == real_name;
+                        if is_primary || is_user_group {
+                            f[0] = username.as_str();
+                        }
+                    }
+                    f.join(":")
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n";
+            let gf = spoof_dir.join("group");
+            if std::fs::write(&gf, patched).is_ok() {
+                if let Some(s) = gf.to_str() {
+                    cmd.args(["--ro-bind", s, "/etc/group"]);
+                }
+            }
+        }
     }
 
     if let Some(ref machine_id) = config.spoof_machine_id {
