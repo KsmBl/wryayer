@@ -104,16 +104,19 @@ Filesystem layout:
 
 bwrap sandbox at runtime:
 ──────────────────────────
-~/.wryayer/<app>/   ──► /           (app root, rw)
-/dev                ──► /dev        (devices, configurable)
+~/.wryayer/<app>/   ──► /                   (app root, rw)
+/dev                ──► /dev                (devices, configurable)
 /proc               ──► /proc
-/sys                ──► /sys        (read-only)
+/sys                ──► /sys                (read-only)
 /run                ──► /run
-/tmp                ──► /tmp        (system | tmpfs | local dir | uuid dir)
-/etc/resolv.conf    ──► /etc/...    (read-only host network/identity files)
+/tmp                ──► /tmp                (system | tmpfs | local dir | uuid dir)
+/etc/resolv.conf    ──► /etc/...            (read-only host network/identity files)
 /etc/hosts               ...
 /etc/ssl/certs           ...
-<shared_dirs>       ──► <same>      (user-configured, read-write)
+/usr/share/fonts    ──► /usr/share/fonts    (read-only; required by Chromium/Electron/NW.js)
+/etc/fonts          ──► /etc/fonts          (fontconfig configuration)
+/usr/share/fontconfig ──► /usr/share/fontconfig
+<shared_dirs>       ──► <same>              (user-configured, read-write)
 ```
 
 ---
@@ -538,7 +541,7 @@ The config is stored as a human-readable INI file at `~/.wryayer/<app>/config.in
 - [ ] **Package signing verification** — validate `.pkg.tar.zst` signatures before extraction
 - [ ] **Delta updates** — only re-download changed packages instead of the full dep tree
 - [ ] **Export/import via SSH or SFTP** — `wryayer export --remote user@host:/path`
-- [ ] **TUI package search from AUR** — the Install tab currently searches pacman only
+- [x] **TUI package search from AUR** — Install tab searches both official repos and the AUR
 - [x] **Identity spoofing** — spoof hostname, username, machine-id, and cpuinfo per app
 - [ ] **Per-app env var overrides** — let users set `LANG`, `QT_SCALE_FACTOR`, etc. in `config.ini`
 - [ ] **Dependency graph viewer** — TUI screen showing the full package tree for an installed app

@@ -294,6 +294,13 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
         cmd.args(["--ro-bind-try", p, p]);
     }
 
+    // Font directories — required by Chromium/NW.js/Electron/Qt renderers.
+    // Without these, fontconfig finds no fonts and the renderer crashes with
+    // FATAL:font_cache.cc Check failed: false + SEGV_MAPERR.
+    for p in &["/usr/share/fonts", "/etc/fonts", "/usr/share/fontconfig"] {
+        cmd.args(["--ro-bind-try", p, p]);
+    }
+
     if !config.network {
         cmd.arg("--unshare-net");
     }
