@@ -133,6 +133,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             let value = value.clone();
             draw_duplicate_install(f, area, &pkg, &value);
         }
+        Screen::AlreadyInstalled { pkg, selected } => {
+            let pkg = pkg.clone();
+            let selected = *selected;
+            draw_already_installed(f, area, &pkg, selected);
+        }
     }
 }
 
@@ -1503,6 +1508,64 @@ fn draw_rename_app(f: &mut Frame, area: Rect, app_name: &str, value: &str) {
     f.render_widget(
         Paragraph::new(Span::styled(
             " [Enter] Confirm  [Esc] Cancel  [Backspace] Delete char",
+            Style::default().fg(C_DIM),
+        )),
+        chunks[2],
+    );
+}
+
+// ── Already installed choice overlay ─────────────────────────────────────────
+
+fn draw_already_installed(f: &mut Frame, area: Rect, pkg: &str, selected: usize) {
+    let popup = centered_rect(56, 40, area);
+    f.render_widget(Clear, popup);
+
+    let block = Block::default().borders(Borders::ALL)
+        .title(format!(" '{pkg}' is already installed "))
+        .title_style(Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD))
+        .border_style(Style::default().fg(C_ACCENT));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(2), Constraint::Min(0), Constraint::Length(1)])
+        .split(inner);
+
+    f.render_widget(
+        Paragraph::new(Span::styled("  What would you like to do?", Style::default().fg(C_DIM))),
+        chunks[0],
+    );
+
+    let choices: &[(&str, &str, Color)] = &[
+        ("✚", "Install a second copy   →  give it a unique name", C_GREEN),
+        ("✕", "Uninstall               →  delete the existing install", C_RED),
+    ];
+
+    let items: Vec<ListItem> = choices.iter().enumerate().map(|(i, (icon, label, color))| {
+        let is_sel = i == selected;
+        let style = if is_sel {
+            Style::default().fg(*color).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(C_DIM)
+        };
+        ListItem::new(Line::from(vec![
+            Span::styled(if is_sel { " ▶ " } else { "   " }, Style::default().fg(C_ACCENT)),
+            Span::styled(*icon, Style::default().fg(*color)),
+            Span::raw(" "),
+            Span::styled(*label, style),
+        ]))
+    }).collect();
+
+    let mut list_state = ListState::default();
+    list_state.select(Some(selected));
+    let list = List::new(items)
+        .highlight_style(Style::default().bg(C_SELECT));
+    f.render_stateful_widget(list, chunks[1], &mut list_state);
+
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            " [↑↓/jk] Navigate  [Enter] Select  [Esc/q] Cancel",
             Style::default().fg(C_DIM),
         )),
         chunks[2],

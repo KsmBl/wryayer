@@ -30,6 +30,11 @@ pub fn run(
     // --into fastfetch and fastfetch is itself an alias of cpufetch, the real
     // filesystem tree is cpufetch's. Extracting into the alias dir would leave
     // the binary in a near-empty directory without the shared library tree.
+    // alias_name: always the folder the manifest lives in (= user's chosen app name, or pkg name)
+    let alias_name = app_name.unwrap_or(pkg_name).to_string();
+    // target_name: where the package files actually live on disk.
+    //   fresh mode → same as alias_name (must match per the comment above)
+    //   merge mode → follow the --into chain to find the real filesystem root
     let target_name = if let Some(into_name) = into {
         let resolved = read_manifest(into_name)
             .ok()
@@ -37,9 +42,8 @@ pub fn run(
             .unwrap_or_else(|| into_name.to_string());
         resolved
     } else {
-        pkg_name.to_string()
+        alias_name.clone()
     };
-    let alias_name = app_name.unwrap_or(pkg_name).to_string();
     let target_dir = app_dir(&target_name)?;
     let alias_dir = app_dir(&alias_name)?;
 

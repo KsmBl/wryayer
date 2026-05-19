@@ -129,6 +129,11 @@ pub enum Screen {
         pkg: String,
         value: String,
     },
+    /// Choice between uninstalling an existing app or installing a second copy.
+    AlreadyInstalled {
+        pkg: String,
+        selected: usize, // 0 = install second copy, 1 = uninstall
+    },
 }
 
 pub enum PendingAction {
@@ -519,6 +524,7 @@ fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
         Screen::KeyHelp => 12,
         Screen::RenameApp { .. } => 13,
         Screen::DuplicateInstall { .. } => 14,
+        Screen::AlreadyInstalled { .. } => 15,
     };
 
     match tag {
@@ -537,6 +543,7 @@ fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
         12 => on_key_help(app),
         13 => on_rename_app(app, code),
         14 => on_duplicate_install(app, code),
+        15 => on_already_installed(app, code),
         _ => {}
     }
     Ok(())
@@ -828,6 +835,67 @@ fn on_duplicate_install(app: &mut App, code: KeyCode) {
     }
 }
 
+// ── Already installed choice ──────────────────────────────────────────────────
+
+fn on_already_installed(app: &mut App, code: KeyCode) {
+    let Screen::AlreadyInstalled { pkg, selected } = &mut app.screen else { return };
+    match code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            app.screen = Screen::Main;
+            app.needs_clear = true;
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            if *selected > 0 { *selected -= 1; }
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if *selected < 1 { *selected += 1; }
+        }
+        KeyCode::Enter | KeyCode::Char(' ') => {
+            let pkg = pkg.clone();
+            match *selected {
+                0 => {
+                    // Install a second copy — ask for a new app name.
+                    app.screen = Screen::DuplicateInstall { pkg, value: String::new() };
+                    app.needs_clear = true;
+                }
+                _ => {
+                    // Uninstall the existing app.
+                    let dependents: Vec<String> = app.installed
+                        .iter()
+                        .filter(|other| other.app.alias_of.as_deref() == Some(&pkg))
+                        .map(|other| other.app.name.clone())
+                        .collect();
+                    if !dependents.is_empty() {
+                        let n = dependents.len();
+                        app.screen = Screen::Confirm {
+                            title: format!("Remove '{pkg}' and {n} alias(es)?"),
+                            body: vec![
+                                format!("Also removes: {}", dependents.join(", ")),
+                                String::new(),
+                                "Press y to delete all, n or Esc to cancel.".into(),
+                            ],
+                            action: PendingAction::RemoveCascade(pkg, dependents),
+                            danger: true,
+                        };
+                    } else {
+                        app.screen = Screen::Confirm {
+                            title: format!("Remove '{pkg}'?"),
+                            body: vec![
+                                format!("Delete ~/.wryayer/{pkg}/ and all launchers?"),
+                                String::new(),
+                                "Press y to continue, n or Esc to cancel.".into(),
+                            ],
+                            action: PendingAction::Remove(pkg),
+                            danger: true,
+                        };
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 // ── Install tab ───────────────────────────────────────────────────────────────
 
 fn on_install(app: &mut App, code: KeyCode) {
@@ -871,8 +939,8 @@ fn on_install(app: &mut App, code: KeyCode) {
                 if let Some(pkg) = app.selected_available() {
                     let pkg = pkg.to_string();
                     if app.installed.iter().any(|m| m.app.name == pkg) {
-                        // Already installed — offer to install a second copy under a new name.
-                        app.screen = Screen::DuplicateInstall { pkg, value: String::new() };
+                        // Already installed — let the user choose: install again or uninstall.
+                        app.screen = Screen::AlreadyInstalled { pkg, selected: 0 };
                         app.needs_clear = true;
                     } else {
                         // If there's at least one installed app, offer the
