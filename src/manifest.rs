@@ -100,6 +100,38 @@ pub fn list_all_apps() -> Result<Vec<Manifest>> {
     Ok(manifests)
 }
 
+/// Re-order a flat app list into tree order: each root app is immediately
+/// followed by its aliases (sorted by name), so callers can iterate once
+/// and detect tree structure via `alias_of`.  Orphan aliases (whose target
+/// is absent) are appended at the end.
+pub fn tree_order(apps: Vec<Manifest>) -> Vec<Manifest> {
+    let mut by_target: std::collections::HashMap<String, Vec<Manifest>> =
+        std::collections::HashMap::new();
+    let mut roots: Vec<Manifest> = Vec::new();
+
+    for app in apps {
+        if let Some(ref target) = app.app.alias_of {
+            by_target.entry(target.clone()).or_default().push(app);
+        } else {
+            roots.push(app);
+        }
+    }
+    for children in by_target.values_mut() {
+        children.sort_by(|a, b| a.app.name.cmp(&b.app.name));
+    }
+
+    let mut result = Vec::new();
+    for root in roots {
+        let children = by_target.remove(&root.app.name).unwrap_or_default();
+        result.push(root);
+        result.extend(children);
+    }
+    for (_, orphans) in by_target {
+        result.extend(orphans);
+    }
+    result
+}
+
 pub fn now_rfc3339() -> String {
     Utc::now().to_rfc3339()
 }

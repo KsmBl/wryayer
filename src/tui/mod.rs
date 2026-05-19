@@ -21,7 +21,7 @@ use ratatui::Terminal;
 
 use crate::commands::dedup::all_du;
 use crate::config::{read_config, write_config, AppConfig, LocalDelete, TempMode};
-use crate::manifest::{list_all_apps, Manifest};
+use crate::manifest::{list_all_apps, tree_order, Manifest};
 
 // ── Op messages ───────────────────────────────────────────────────────────────
 
@@ -186,7 +186,7 @@ pub struct App {
 
 impl App {
     fn new() -> Result<Self> {
-        let installed = list_all_apps()?;
+        let installed = tree_order(list_all_apps()?);
         let mut inst_state = ListState::default();
         if !installed.is_empty() {
             inst_state.select(Some(0));
@@ -224,7 +224,7 @@ impl App {
 
     fn reload_installed(&mut self) {
         if let Ok(list) = list_all_apps() {
-            self.installed = list;
+            self.installed = tree_order(list);
             let sel = self.inst_state.selected().unwrap_or(0);
             if self.installed.is_empty() {
                 self.inst_state.select(None);

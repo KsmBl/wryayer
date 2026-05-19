@@ -150,13 +150,29 @@ fn draw_installed(f: &mut Frame, app: &mut App, area: Rect) {
         .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
         .split(area);
 
-    let items: Vec<ListItem> = app.installed.iter().map(|m| {
+    let items: Vec<ListItem> = app.installed.iter().enumerate().map(|(i, m)| {
         let dot = if app.update_available.contains_key(&m.app.name) {
-            Span::styled(" ●", Style::default().fg(C_YELLOW))
+            Span::styled("●", Style::default().fg(C_YELLOW))
         } else {
-            Span::raw("  ")
+            Span::raw(" ")
         };
-        ListItem::new(Line::from(vec![dot, Span::styled(&m.app.name, Style::default().fg(Color::White))]))
+        if let Some(ref target) = m.app.alias_of {
+            // Is this the last alias of its parent?
+            let is_last = app.installed.get(i + 1)
+                .map(|next| next.app.alias_of.as_deref() != Some(target.as_str()))
+                .unwrap_or(true);
+            let connector = if is_last { "  └── " } else { "  ├── " };
+            ListItem::new(Line::from(vec![
+                dot,
+                Span::styled(connector, Style::default().fg(C_DIM)),
+                Span::styled(&m.app.name, Style::default().fg(Color::Gray)),
+            ]))
+        } else {
+            ListItem::new(Line::from(vec![
+                dot,
+                Span::styled(format!(" {}", m.app.name), Style::default().fg(Color::White)),
+            ]))
+        }
     }).collect();
 
     let list = List::new(items)
