@@ -45,6 +45,7 @@ pub fn run(
 
     // Multi-launcher: if user passed --bin-names, use that list verbatim;
     // otherwise create a single launcher named after the package.
+    let bin_names_explicit = !bin_names.is_empty();
     let bin_names: Vec<String> = if bin_names.is_empty() {
         vec![pkg_name.to_string()]
     } else {
@@ -140,6 +141,7 @@ pub fn run(
     let target_name_owned = target_name.clone();
     let alias_name_owned = alias_name.clone();
     let bin_names_for_closure = bin_names.clone();
+    let bin_names_explicit_for_closure = bin_names_explicit;
     let target_manifest_for_closure = target_manifest.clone();
 
     let result: Result<()> = (|| {
@@ -187,36 +189,56 @@ pub fn run(
         // Inside the bwrap sandbox the absolute path resolves correctly because
         // the app dir is mounted as /.
         let bin_dirs = ["usr/bin", "usr/sbin", "bin", "sbin"];
+        let exists_in_bins = |name: &str| {
+            bin_dirs.iter().any(|sub| target_dir.join(sub).join(name).symlink_metadata().is_ok())
+        };
+
+        let mut resolved_bin_names: Vec<String> = Vec::with_capacity(bin_names_for_closure.len());
         for bin in &bin_names_for_closure {
-            let found = bin_dirs
-                .iter()
-                .any(|sub| target_dir.join(sub).join(bin).symlink_metadata().is_ok());
-            if !found {
-                // Collect what IS in the binary dirs to help the user pick the
-                // right name for --bin-names (e.g. vivaldi-stable vs vivaldi).
-                let mut available: Vec<String> = bin_dirs
-                    .iter()
-                    .flat_map(|sub| {
-                        std::fs::read_dir(target_dir.join(sub))
-                            .ok()
-                            .into_iter()
-                            .flatten()
-                            .flatten()
-                            .filter_map(|e| e.file_name().into_string().ok())
-                    })
-                    .collect();
-                available.sort();
-                available.dedup();
-                let hint = if available.is_empty() {
-                    String::new()
-                } else {
-                    format!("\n  available binaries: {}", available.join(", "))
-                };
-                bail!(
-                    "binary '{bin}' not found in usr/bin, usr/sbin, bin, or sbin — \
-                     re-run with --bin-names <name>{hint}"
-                );
+            if exists_in_bins(bin) {
+                resolved_bin_names.push(bin.clone());
+                continue;
             }
+
+            // When --bin-names was not given, try to auto-detect the real binary
+            // from the package's .desktop file before giving up. Many AUR packages
+            // (e.g. visual-studio-code-bin → code, google-chrome-stable → google-chrome)
+            // install under a name that differs from the AUR package name.
+            if !bin_names_explicit_for_closure {
+                if let Some(detected) = auto_detect_binary(&target_dir) {
+                    eprintln!(
+                        "  auto-detected binary '{detected}' \
+                         (package does not install a binary named '{bin}')"
+                    );
+                    resolved_bin_names.push(detected);
+                    continue;
+                }
+            }
+
+            // Collect what IS in the binary dirs to help the user pick the
+            // right name for --bin-names.
+            let mut available: Vec<String> = bin_dirs
+                .iter()
+                .flat_map(|sub| {
+                    std::fs::read_dir(target_dir.join(sub))
+                        .ok()
+                        .into_iter()
+                        .flatten()
+                        .flatten()
+                        .filter_map(|e| e.file_name().into_string().ok())
+                })
+                .collect();
+            available.sort();
+            available.dedup();
+            let hint = if available.is_empty() {
+                String::new()
+            } else {
+                format!("\n  available binaries: {}", available.join(", "))
+            };
+            bail!(
+                "binary '{bin}' not found in usr/bin, usr/sbin, bin, or sbin — \
+                 re-run with --bin-names <name>{hint}"
+            );
         }
 
         // In merge mode the launcher must use alias_name so it calls
@@ -225,7 +247,7 @@ pub fn run(
         // Using target_name here would call `wryayer run cpufetch` for every
         // merged binary regardless of which binary was actually requested.
         let launcher_app = if merge_mode { &alias_name_owned } else { &target_name_owned };
-        for bin in &bin_names_for_closure {
+        for bin in &resolved_bin_names {
             if created_launchers.contains(bin) {
                 continue;
             }
@@ -258,9 +280,9 @@ pub fn run(
             let alias_manifest = Manifest {
                 app: AppMeta {
                     name: alias_name_owned.clone(),
-                    main_binary: bin_names_for_closure[0].clone(),
+                    main_binary: resolved_bin_names[0].clone(),
                     installed_at: now_rfc3339(),
-                    launchers: bin_names_for_closure.clone(),
+                    launchers: resolved_bin_names.clone(),
                     alias_of: Some(target_name_owned.clone()),
                 },
                 packages: new_packages,
@@ -271,7 +293,7 @@ pub fn run(
             let manifest = Manifest {
                 app: AppMeta {
                     name: alias_name_owned.clone(),
-                    main_binary: bin_names_for_closure[0].clone(),
+                    main_binary: resolved_bin_names[0].clone(),
                     installed_at: now_rfc3339(),
                     launchers: created_launchers.clone(),
                     alias_of: None,
@@ -305,7 +327,7 @@ pub fn run(
     }
     eprintln!(
         "Run with: {} or  wryayer run {alias_name}",
-        bin_names
+        created_launchers
             .iter()
             .map(|b| format!("~/bin/{b}"))
             .collect::<Vec<_>>()
@@ -427,4 +449,45 @@ pub fn run_ldconfig(app_dir: &Path) {
         Err(_) => eprintln!("  warning: ldconfig not found, skipping cache build"),
         _ => {}
     }
+}
+
+/// Scan the app's .desktop files for an Exec= entry whose basename exists in
+/// the binary dirs. Used when the package name doesn't match the installed
+/// binary name (e.g. visual-studio-code-bin installs as `code`).
+fn auto_detect_binary(target_dir: &Path) -> Option<String> {
+    let bin_dirs = ["usr/bin", "usr/sbin", "bin", "sbin"];
+    let exists_in_bins = |name: &str| {
+        bin_dirs.iter().any(|sub| target_dir.join(sub).join(name).symlink_metadata().is_ok())
+    };
+
+    let apps_dir = target_dir.join("usr/share/applications");
+    let Ok(entries) = std::fs::read_dir(&apps_dir) else { return None };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("desktop") {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(&path) else { continue };
+        for line in content.lines() {
+            let line = line.trim();
+            if !line.starts_with("Exec=") {
+                continue;
+            }
+            // Exec=/usr/share/code/code --unity-launch %F  →  basename = "code"
+            let exec_val = line.trim_start_matches("Exec=");
+            let cmd = exec_val.split_whitespace().next().unwrap_or("");
+            let bin_name = std::path::Path::new(cmd)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
+            if bin_name.is_empty() || bin_name.starts_with('%') {
+                continue;
+            }
+            if exists_in_bins(bin_name) {
+                return Some(bin_name.to_string());
+            }
+        }
+    }
+    None
 }
