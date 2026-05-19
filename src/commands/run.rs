@@ -449,6 +449,58 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
         }
     }
 
+    // ── Isolated XDG_RUNTIME_DIR ───────────────────────────────────────────────
+    //
+    // Electron/Qt apps (VS Code, Discord, …) store per-instance IPC sockets in
+    // $XDG_RUNTIME_DIR.  If the sandbox shares the host's /run/user/<uid>, a
+    // sandboxed app finds the host app's socket, hands off to the running host
+    // process ("OK Pleased to meet you"), and exits without opening a window.
+    //
+    // Fix: give every sandbox a private subdirectory inside the host's runtime
+    // dir.  The directory persists across runs so the app can reconnect to its
+    // own previous server, but it is invisible to host or other sandbox sockets.
+    //
+    // Audio and Wayland are re-pointed explicitly so they keep working after the
+    // runtime-dir change.
+    {
+        let host_rt = std::env::var("XDG_RUNTIME_DIR")
+            .unwrap_or_else(|_| format!("/run/user/{}", unsafe { libc::getuid() }));
+
+        let app_name = std::path::Path::new(app_root)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("app");
+        let isolated_rt = format!("{host_rt}/.wryayer-{app_name}");
+        let _ = std::fs::create_dir_all(&isolated_rt);
+        let _ = std::fs::set_permissions(
+            &isolated_rt,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+        );
+
+        // Convert relative WAYLAND_DISPLAY to absolute so Wayland keeps working
+        // after XDG_RUNTIME_DIR changes.
+        let wayland = std::env::var("WAYLAND_DISPLAY").unwrap_or_default();
+        if !wayland.is_empty() && !wayland.starts_with('/') {
+            cmd.env("WAYLAND_DISPLAY", format!("{host_rt}/{wayland}"));
+        }
+
+        // Re-point audio sockets explicitly (only when audio is enabled; when
+        // audio=off, mask_audio_sockets already handles blocking them and not
+        // setting these keeps the masking effective).
+        if config.audio {
+            let pulse = format!("{host_rt}/pulse/native");
+            if std::path::Path::new(&pulse).exists() {
+                cmd.env("PULSE_SERVER", format!("unix:{pulse}"));
+            }
+            let pw = format!("{host_rt}/pipewire-0");
+            if std::path::Path::new(&pw).exists() {
+                cmd.env("PIPEWIRE_REMOTE", pw);
+            }
+        }
+
+        cmd.env("XDG_RUNTIME_DIR", isolated_rt);
+    }
+
     cmd.args(["--", binary]);
     cmd.args(args);
     cmd
