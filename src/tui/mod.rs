@@ -119,6 +119,16 @@ pub enum Screen {
     },
     /// Full key-bindings reference popup. Dismisses on any key.
     KeyHelp,
+    /// Inline text input for renaming an app's display name.
+    RenameApp {
+        app_name: String,
+        value: String,
+    },
+    /// Inline text input for picking an app name when installing a duplicate package.
+    DuplicateInstall {
+        pkg: String,
+        value: String,
+    },
 }
 
 pub enum PendingAction {
@@ -128,7 +138,7 @@ pub enum PendingAction {
     RemoveCascade(String, Vec<String>),
     ConfirmedRemoveCascade(String),
     Update(String),
-    Install { pkg: String, into: Option<String> },
+    Install { pkg: String, app_name: Option<String>, into: Option<String> },
     Export(String),
     Snapshot(String),
     Rollback(String, String),
@@ -507,6 +517,8 @@ fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
         Screen::OptionHelp { .. } => 10,
         Screen::TextInput { .. } => 11,
         Screen::KeyHelp => 12,
+        Screen::RenameApp { .. } => 13,
+        Screen::DuplicateInstall { .. } => 14,
     };
 
     match tag {
@@ -523,6 +535,8 @@ fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
         10 => on_option_help(app, code),
         11 => on_text_input(app, code),
         12 => on_key_help(app),
+        13 => on_rename_app(app, code),
+        14 => on_duplicate_install(app, code),
         _ => {}
     }
     Ok(())
@@ -726,6 +740,14 @@ fn on_installed(app: &mut App, code: KeyCode) {
                 app.screen = Screen::Config { app_name: name, config, selected: 0 };
             }
         }
+        KeyCode::Char('n') => {
+            if let Some(m) = app.selected_installed() {
+                let name = m.app.name.clone();
+                let value = m.app.display_name.clone().unwrap_or_default();
+                app.screen = Screen::RenameApp { app_name: name, value };
+                app.needs_clear = true;
+            }
+        }
         KeyCode::Char('?') => {
             app.screen = Screen::KeyHelp;
             app.needs_clear = true;
@@ -737,6 +759,73 @@ fn on_installed(app: &mut App, code: KeyCode) {
 fn on_key_help(app: &mut App) {
     app.screen = Screen::Main;
     app.needs_clear = true;
+}
+
+// ── App rename overlay ────────────────────────────────────────────────────────
+
+fn on_rename_app(app: &mut App, code: KeyCode) {
+    let Screen::RenameApp { app_name, value } = &mut app.screen else { return };
+    match code {
+        KeyCode::Esc => {
+            app.screen = Screen::Main;
+            app.needs_clear = true;
+        }
+        KeyCode::Enter => {
+            let name = app_name.clone();
+            let v = value.trim().to_string();
+            if let Ok(mut m) = crate::manifest::read_manifest(&name) {
+                m.app.display_name = if v.is_empty() { None } else { Some(v.clone()) };
+                let _ = crate::manifest::write_manifest(&name, &m);
+                app.reload_installed();
+                app.status = if v.is_empty() {
+                    format!("Display name cleared for '{name}'")
+                } else {
+                    format!("'{name}' renamed to '{v}'")
+                };
+            }
+            app.screen = Screen::Main;
+            app.needs_clear = true;
+        }
+        KeyCode::Backspace => { value.pop(); }
+        KeyCode::Char(c) => { value.push(c); }
+        _ => {}
+    }
+}
+
+// ── Duplicate install overlay ─────────────────────────────────────────────────
+
+fn on_duplicate_install(app: &mut App, code: KeyCode) {
+    let Screen::DuplicateInstall { pkg, value } = &mut app.screen else { return };
+    match code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            app.screen = Screen::Main;
+            app.needs_clear = true;
+        }
+        KeyCode::Enter => {
+            let new_name = value.trim().to_string();
+            if new_name.is_empty() {
+                return;
+            }
+            if app.installed.iter().any(|m| m.app.name == new_name) {
+                app.status = format!("'{new_name}' is already taken — pick a different name");
+                return;
+            }
+            let pkg = pkg.clone();
+            app.screen = Screen::Confirm {
+                title: format!("Install '{pkg}' as '{new_name}'?"),
+                body: vec![
+                    format!("Creates ~/.wryayer/{new_name}/ alongside the existing '{pkg}'."),
+                    String::new(),
+                    "Press y to confirm, n or Esc to cancel.".into(),
+                ],
+                action: PendingAction::Install { pkg, app_name: Some(new_name), into: None },
+                danger: false,
+            };
+        }
+        KeyCode::Backspace => { value.pop(); }
+        KeyCode::Char(c) => { value.push(c); }
+        _ => {}
+    }
 }
 
 // ── Install tab ───────────────────────────────────────────────────────────────
@@ -782,16 +871,9 @@ fn on_install(app: &mut App, code: KeyCode) {
                 if let Some(pkg) = app.selected_available() {
                     let pkg = pkg.to_string();
                     if app.installed.iter().any(|m| m.app.name == pkg) {
-                        app.screen = Screen::Confirm {
-                            title: format!("'{pkg}' is already installed"),
-                            body: vec![
-                                format!("Remove '{pkg}' and its isolated directory?"),
-                                String::new(),
-                                "Press y to uninstall, n or Esc to cancel.".into(),
-                            ],
-                            action: PendingAction::Remove(pkg),
-                            danger: true,
-                        };
+                        // Already installed — offer to install a second copy under a new name.
+                        app.screen = Screen::DuplicateInstall { pkg, value: String::new() };
+                        app.needs_clear = true;
                     } else {
                         // If there's at least one installed app, offer the
                         // user a choice between a fresh install and merging
@@ -809,7 +891,7 @@ fn on_install(app: &mut App, code: KeyCode) {
                                     String::new(),
                                     "Press y to confirm, n or Esc to cancel.".into(),
                                 ],
-                                action: PendingAction::Install { pkg, into: None },
+                                action: PendingAction::Install { pkg, app_name: None, into: None },
                                 danger: false,
                             };
                         } else {
@@ -893,7 +975,7 @@ fn on_install_target(app: &mut App, code: KeyCode) {
             app.screen = Screen::Confirm {
                 title,
                 body,
-                action: PendingAction::Install { pkg, into },
+                action: PendingAction::Install { pkg, app_name: None, into },
                 danger: false,
             };
         }
@@ -991,15 +1073,16 @@ fn execute_action(app: &mut App, action: PendingAction) {
             launch_op(app, format!("Remove — {name}"), vec!["remove".into(), "--cascade".into(), name], None, true),
         PendingAction::Update(name) =>
             launch_op(app, format!("Update — {name}"), vec!["update".into(), name], None, true),
-        PendingAction::Install { pkg, into: None } =>
+        PendingAction::Install { pkg, app_name: None, into: None } =>
             launch_op(app, format!("Install — {pkg}"), vec!["install".into(), pkg], None, true),
-        PendingAction::Install { pkg, into: Some(target) } => launch_op(
-            app,
-            format!("Install — {pkg} → {target}"),
-            vec!["install".into(), pkg, "--into".into(), target],
-            None,
-            true,
-        ),
+        PendingAction::Install { pkg, app_name: Some(an), into: None } =>
+            launch_op(app, format!("Install — {pkg} as {an}"),
+                vec!["install".into(), pkg, "--app-name".into(), an], None, true),
+        PendingAction::Install { pkg, app_name, into: Some(target) } => {
+            let mut args = vec!["install".into(), pkg.clone(), "--into".into(), target.clone()];
+            if let Some(an) = app_name { args.extend(["--app-name".into(), an]); }
+            launch_op(app, format!("Install — {pkg} → {target}"), args, None, true);
+        }
         PendingAction::Export(name) => {
             let total = dir_bytes(&format!(
                 "{}/.wryayer/{name}",

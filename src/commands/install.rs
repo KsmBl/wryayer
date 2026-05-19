@@ -295,6 +295,7 @@ pub fn run(
                     installed_at: now_rfc3339(),
                     launchers: resolved_bin_names.clone(),
                     alias_of: Some(target_name_owned.clone()),
+                    display_name: None,
                 },
                 packages: new_packages,
             };
@@ -308,6 +309,7 @@ pub fn run(
                     installed_at: now_rfc3339(),
                     launchers: created_launchers.clone(),
                     alias_of: None,
+                    display_name: None,
                 },
                 packages: new_packages,
             };

@@ -123,6 +123,16 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Screen::KeyHelp => {
             draw_key_help(f, area);
         }
+        Screen::RenameApp { app_name, value } => {
+            let app_name = app_name.clone();
+            let value = value.clone();
+            draw_rename_app(f, area, &app_name, &value);
+        }
+        Screen::DuplicateInstall { pkg, value } => {
+            let pkg = pkg.clone();
+            let value = value.clone();
+            draw_duplicate_install(f, area, &pkg, &value);
+        }
     }
 }
 
@@ -170,6 +180,12 @@ fn draw_installed(f: &mut Frame, app: &mut App, area: Rect) {
                 Span::styled(connector, Style::default().fg(C_DIM)),
                 Span::styled(&m.app.name, Style::default().fg(Color::Gray)),
             ]))
+        } else if let Some(ref dn) = m.app.display_name {
+            ListItem::new(Line::from(vec![
+                dot,
+                Span::styled(format!(" {}", dn), Style::default().fg(Color::White)),
+                Span::styled(format!(" [{}]", m.app.name), Style::default().fg(C_DIM)),
+            ]))
         } else {
             ListItem::new(Line::from(vec![
                 dot,
@@ -211,11 +227,20 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
         .map(|&b| format_bytes(b))
         .unwrap_or_else(|| "—".to_string());
 
-    let mut lines = vec![
+    let name_line = if let Some(ref dn) = m.app.display_name {
         Line::from(vec![
             Span::styled("  Name:       ", dim),
-            Span::styled(&m.app.name, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-        ]),
+            Span::styled(dn.as_str(), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("  [{}]", m.app.name), Style::default().fg(C_DIM)),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("  Name:       ", dim),
+            Span::styled(m.app.name.as_str(), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+        ])
+    };
+    let mut lines = vec![
+        name_line,
         Line::from(vec![Span::styled("  Version:    ", dim), Span::styled(ver, Style::default().fg(C_GREEN))]),
         Line::from(vec![Span::styled("  Installed:  ", dim), Span::raw(installed)]),
         Line::from(vec![Span::styled("  Launchers:  ", dim), Span::raw(launchers)]),
@@ -384,7 +409,7 @@ fn draw_import(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_statusbar(f: &mut Frame, app: &App, area: Rect) {
     let hint = match app.tab {
-        Tab::Installed => "[Tab] Switch  [r] Run  [d] Delete  [e] Export  [p] Snapshot  [o] Rollback  [c] Check  [u] Update  [s] Config  [?] Help  [q] Quit",
+        Tab::Installed => "[Tab] Switch  [r] Run  [d] Delete  [e] Export  [p] Snapshot  [o] Rollback  [c] Check  [u] Update  [s] Config  [n] Rename  [?] Help  [q] Quit",
         Tab::Install   => "[Tab] Switch  Type to search  [↓] Select  [Enter] Install/Uninstall  [q] Quit",
         Tab::Import    => "[Tab] Switch  Type zip path  [Enter] Import  [Esc] Clear  [Shift+Q] Quit",
         Tab::Space     => "[Tab] Switch  [r] Run dedup  [q] Quit",
@@ -1111,6 +1136,7 @@ fn draw_key_help(f: &mut Frame, area: Rect) {
         ("c",          "Check for updates (no install)"),
         ("u",          "Update the selected app"),
         ("s",          "Open per-app settings"),
+        ("n",          "Rename app (set display name)"),
         ("Tab",        "Switch between tabs"),
         ("↑ / k",      "Move selection up"),
         ("↓ / j",      "Move selection down"),
@@ -1437,6 +1463,91 @@ fn draw_konami_overlay(
     f.render_widget(
         Paragraph::new(Span::styled(footer, Style::default().fg(Color::White).bg(Color::DarkGray))),
         Rect { x: area.x, y: fy, width: area.width, height: 1 },
+    );
+}
+
+// ── Rename app overlay ────────────────────────────────────────────────────────
+
+fn draw_rename_app(f: &mut Frame, area: Rect, app_name: &str, value: &str) {
+    let popup = centered_rect(54, 30, area);
+    f.render_widget(Clear, popup);
+
+    let block = Block::default().borders(Borders::ALL)
+        .title(format!(" Rename '{app_name}' "))
+        .title_style(Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD))
+        .border_style(Style::default().fg(C_ACCENT));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Length(3), Constraint::Length(1)])
+        .split(inner);
+
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            "  Display name shown in the list. Leave blank to clear.",
+            Style::default().fg(C_DIM),
+        )),
+        chunks[0],
+    );
+
+    f.render_widget(
+        Paragraph::new(format!(" {}█", value))
+            .block(Block::default().borders(Borders::ALL)
+                .border_style(Style::default().fg(C_ACCENT)))
+            .style(Style::default().fg(Color::White)),
+        chunks[1],
+    );
+
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            " [Enter] Confirm  [Esc] Cancel  [Backspace] Delete char",
+            Style::default().fg(C_DIM),
+        )),
+        chunks[2],
+    );
+}
+
+// ── Duplicate install overlay ─────────────────────────────────────────────────
+
+fn draw_duplicate_install(f: &mut Frame, area: Rect, pkg: &str, value: &str) {
+    let popup = centered_rect(54, 30, area);
+    f.render_widget(Clear, popup);
+
+    let block = Block::default().borders(Borders::ALL)
+        .title(format!(" Install '{pkg}' again "))
+        .title_style(Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD))
+        .border_style(Style::default().fg(C_ACCENT));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(2), Constraint::Length(3), Constraint::Length(1)])
+        .split(inner);
+
+    f.render_widget(
+        Paragraph::new(format!("  '{pkg}' is already installed. Give this copy a unique name:"))
+            .style(Style::default().fg(C_DIM))
+            .wrap(ratatui::widgets::Wrap { trim: false }),
+        chunks[0],
+    );
+
+    f.render_widget(
+        Paragraph::new(format!(" {}█", value))
+            .block(Block::default().borders(Borders::ALL)
+                .border_style(Style::default().fg(C_ACCENT)))
+            .style(Style::default().fg(Color::White)),
+        chunks[1],
+    );
+
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            " [Enter] Install  [Esc] Cancel  [Backspace] Delete char",
+            Style::default().fg(C_DIM),
+        )),
+        chunks[2],
     );
 }
 
