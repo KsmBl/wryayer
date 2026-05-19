@@ -188,6 +188,10 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
     let launchers = m.app.launchers.join(", ");
     let dim = Style::default().fg(C_DIM);
 
+    let size_str = app.app_sizes.get(&m.app.name)
+        .map(|&b| format_bytes(b))
+        .unwrap_or_else(|| "—".to_string());
+
     let mut lines = vec![
         Line::from(vec![
             Span::styled("  Name:       ", dim),
@@ -196,10 +200,7 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
         Line::from(vec![Span::styled("  Version:    ", dim), Span::styled(ver, Style::default().fg(C_GREEN))]),
         Line::from(vec![Span::styled("  Installed:  ", dim), Span::raw(installed)]),
         Line::from(vec![Span::styled("  Launchers:  ", dim), Span::raw(launchers)]),
-        Line::from(vec![
-            Span::styled("  Packages:   ", dim),
-            Span::styled(m.packages.len().to_string(), Style::default().fg(C_ACCENT)),
-        ]),
+        Line::from(vec![Span::styled("  Size:       ", dim), Span::styled(size_str, Style::default().fg(C_ACCENT))]),
     ];
 
     if let Some(new_ver) = app.update_available.get(&m.app.name) {
@@ -207,6 +208,24 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
         lines.push(Line::from(vec![
             Span::styled("  Update:     ", dim),
             Span::styled(format!("{ver} → {new_ver}"), Style::default().fg(C_YELLOW).add_modifier(Modifier::BOLD)),
+        ]));
+    }
+
+    // Package list
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!("  Packages ({}):", m.packages.len()),
+            Style::default().fg(C_DIM),
+        ),
+    ]));
+    // Compute max name width for alignment (cap at 24 chars)
+    let max_name = m.packages.iter().map(|p| p.name.len()).max().unwrap_or(0).min(24);
+    for pkg in &m.packages {
+        let name: String = pkg.name.chars().take(24).collect();
+        lines.push(Line::from(vec![
+            Span::styled(format!("    {name:<max_name$}  "), dim),
+            Span::styled(&pkg.version, Style::default().fg(Color::White)),
         ]));
     }
 
@@ -819,6 +838,11 @@ fn draw_config(f: &mut Frame, area: Rect, app_name: &str, config: &AppConfig, se
             None           => " system ".to_string(),
             Some("sample") => " sample ".to_string(),
             Some(s)        => { let t: String = s.chars().take(12).collect(); format!(" {t} ") }
+        }),
+        ("RAM limit  ", match config.ram_limit {
+            None      => " none    ".to_string(),
+            Some(mib) if mib % 1024 == 0 => format!(" {} GiB  ", mib / 1024),
+            Some(mib) => format!(" {} MiB  ", mib),
         }),
     ];
 
