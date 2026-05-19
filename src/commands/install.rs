@@ -138,6 +138,7 @@ pub fn run(
     }
 
     let mut created_launchers: Vec<String> = vec![];
+    let mut keep_without_launcher = false;
     let target_name_owned = target_name.clone();
     let alias_name_owned = alias_name.clone();
     let bin_names_for_closure = bin_names.clone();
@@ -230,6 +231,14 @@ pub fn run(
                 .collect();
             available.sort();
             available.dedup();
+
+            if !bin_names_explicit_for_closure
+                && prompt_keep_without_launcher(&alias_name_owned, &available)
+            {
+                keep_without_launcher = true;
+                break;
+            }
+
             let hint = if available.is_empty() {
                 String::new()
             } else {
@@ -246,15 +255,17 @@ pub fn run(
         // alias_of to find the right filesystem tree and main_binary.
         // Using target_name here would call `wryayer run cpufetch` for every
         // merged binary regardless of which binary was actually requested.
-        let launcher_app = if merge_mode { &alias_name_owned } else { &target_name_owned };
-        for bin in &resolved_bin_names {
-            if created_launchers.contains(bin) {
-                continue;
+        if !keep_without_launcher {
+            let launcher_app = if merge_mode { &alias_name_owned } else { &target_name_owned };
+            for bin in &resolved_bin_names {
+                if created_launchers.contains(bin) {
+                    continue;
+                }
+                let launcher_path = create_launcher(launcher_app, bin)
+                    .with_context(|| format!("failed to create launcher for {bin}"))?;
+                created_launchers.push(bin.to_string());
+                eprintln!("Created launcher: {}", launcher_path.display());
             }
-            let launcher_path = create_launcher(launcher_app, bin)
-                .with_context(|| format!("failed to create launcher for {bin}"))?;
-            created_launchers.push(bin.to_string());
-            eprintln!("Created launcher: {}", launcher_path.display());
         }
 
         let new_packages: Vec<PackageEntry> = resolved
@@ -280,7 +291,7 @@ pub fn run(
             let alias_manifest = Manifest {
                 app: AppMeta {
                     name: alias_name_owned.clone(),
-                    main_binary: resolved_bin_names[0].clone(),
+                    main_binary: resolved_bin_names.first().cloned().unwrap_or_default(),
                     installed_at: now_rfc3339(),
                     launchers: resolved_bin_names.clone(),
                     alias_of: Some(target_name_owned.clone()),
@@ -293,7 +304,7 @@ pub fn run(
             let manifest = Manifest {
                 app: AppMeta {
                     name: alias_name_owned.clone(),
-                    main_binary: resolved_bin_names[0].clone(),
+                    main_binary: resolved_bin_names.first().cloned().unwrap_or_default(),
                     installed_at: now_rfc3339(),
                     launchers: created_launchers.clone(),
                     alias_of: None,
@@ -325,14 +336,19 @@ pub fn run(
     } else {
         eprintln!("\nInstalled '{alias_name}' to ~/.wryayer/{alias_name}/");
     }
-    eprintln!(
-        "Run with: {} or  wryayer run {alias_name}",
-        created_launchers
-            .iter()
-            .map(|b| format!("~/bin/{b}"))
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
+    if created_launchers.is_empty() {
+        eprintln!("No launcher created — files are at ~/.wryayer/{alias_name}/");
+        eprintln!("To add a launcher later, re-install with --bin-names <name>.");
+    } else {
+        eprintln!(
+            "Run with: {}  or  wryayer run {alias_name}",
+            created_launchers
+                .iter()
+                .map(|b| format!("~/bin/{b}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
 
     if let Err(e) = super::dedup::run(false) {
         eprintln!("warning: dedup failed: {e:#}");
@@ -449,6 +465,38 @@ pub fn run_ldconfig(app_dir: &Path) {
         Err(_) => eprintln!("  warning: ldconfig not found, skipping cache build"),
         _ => {}
     }
+}
+
+/// When no binary could be found or auto-detected, prompt the user (if stdin is
+/// a terminal) to choose between keeping the installed files without a launcher
+/// or cleaning everything up. Returns true if the user wants to keep.
+fn prompt_keep_without_launcher(pkg_name: &str, available: &[String]) -> bool {
+    use std::io::{BufRead as _, IsTerminal as _, Write as _};
+
+    if !std::io::stdin().is_terminal() {
+        return false;
+    }
+
+    eprintln!();
+    eprintln!("No launcher binary found for '{pkg_name}'.");
+    if available.is_empty() {
+        eprintln!("  No executables found in usr/bin, usr/sbin, bin, or sbin.");
+        eprintln!("  This package may install data/library files only (e.g. coreutils).");
+    } else {
+        eprintln!("  Available binaries: {}", available.join(", "));
+        eprintln!("  Re-install with --bin-names <name> to create a launcher for one of them.");
+    }
+    eprintln!();
+    eprintln!("  k  Keep installed files without a launcher");
+    eprintln!("  c  Clean up (remove everything)");
+    eprint!("Choice [k/c]: ");
+    let _ = std::io::stderr().flush();
+
+    let mut line = String::new();
+    if std::io::stdin().lock().read_line(&mut line).is_err() {
+        return false;
+    }
+    matches!(line.trim().to_ascii_lowercase().as_str(), "k" | "keep")
 }
 
 /// Scan the app's .desktop files for an Exec= entry whose basename exists in
