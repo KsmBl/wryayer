@@ -300,6 +300,7 @@ pub fn run(
                     launchers: resolved_bin_names.clone(),
                     alias_of: Some(target_name_owned.clone()),
                     display_name: None,
+                    pkg_name: if alias_name_owned != pkg_name { Some(pkg_name.to_string()) } else { None },
                 },
                 packages: new_packages,
             };
@@ -314,6 +315,7 @@ pub fn run(
                     launchers: created_launchers.clone(),
                     alias_of: None,
                     display_name: None,
+                    pkg_name: if alias_name_owned != pkg_name { Some(pkg_name.to_string()) } else { None },
                 },
                 packages: new_packages,
             };

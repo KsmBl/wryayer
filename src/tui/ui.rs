@@ -191,6 +191,12 @@ fn draw_installed(f: &mut Frame, app: &mut App, area: Rect) {
                 Span::styled(format!(" {}", dn), Style::default().fg(Color::White)),
                 Span::styled(format!(" [{}]", m.app.name), Style::default().fg(C_DIM)),
             ]))
+        } else if let Some(ref pn) = m.app.pkg_name {
+            ListItem::new(Line::from(vec![
+                dot,
+                Span::styled(format!(" {}", m.app.name), Style::default().fg(Color::White)),
+                Span::styled(format!(" [{}]", pn), Style::default().fg(C_DIM)),
+            ]))
         } else {
             ListItem::new(Line::from(vec![
                 dot,
@@ -222,7 +228,8 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
         return;
     };
 
-    let ver = m.packages.iter().find(|p| p.name == m.app.name)
+    let real_pkg = m.app.pkg_name.as_deref().unwrap_or(&m.app.name);
+    let ver = m.packages.iter().find(|p| p.name == real_pkg)
         .map(|p| p.version.as_str()).unwrap_or("?");
     let installed = m.app.installed_at.get(..10).unwrap_or(&m.app.installed_at);
     let launchers = m.app.launchers.join(", ");
@@ -237,6 +244,12 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
             Span::styled("  Name:       ", dim),
             Span::styled(dn.as_str(), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
             Span::styled(format!("  [{}]", m.app.name), Style::default().fg(C_DIM)),
+        ])
+    } else if let Some(ref pn) = m.app.pkg_name {
+        Line::from(vec![
+            Span::styled("  Name:       ", dim),
+            Span::styled(m.app.name.as_str(), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("  [{}]", pn), Style::default().fg(C_DIM)),
         ])
     } else {
         Line::from(vec![

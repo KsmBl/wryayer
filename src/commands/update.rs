@@ -140,6 +140,7 @@ fn reinstall(manifest: &crate::manifest::Manifest) -> Result<()> {
             launchers: manifest.app.launchers.clone(),
             alias_of: manifest.app.alias_of.clone(),
             display_name: manifest.app.display_name.clone(),
+            pkg_name: manifest.app.pkg_name.clone(),
         },
         packages,
     };

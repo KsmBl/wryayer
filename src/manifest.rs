@@ -25,6 +25,11 @@ pub struct AppMeta {
     /// Shown as "displayname [appname]" in the installed list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    /// The original package name when it differs from the app folder name
+    /// (i.e. when installed with --app-name). Used for version lookup and
+    /// bracket display ("appname [pkgname]").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pkg_name: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
