@@ -1,15 +1,15 @@
 # wryayer
 
 > Isolated per-app package management — no root, no containers, no daemon.
-> Supports **Arch Linux** (pacman + AUR) and **Debian / Ubuntu** (apt).
+> Supports **Arch Linux** (pacman + AUR), **Debian / Ubuntu** (apt), and **Fedora / RHEL** (dnf/rpm).
 
 [![License: LGPL-3.0-or-later](https://img.shields.io/badge/License-LGPL%203.0-blue.svg)](LICENSE)
-[![Platform: Arch / Debian](https://img.shields.io/badge/platform-Arch%20%7C%20Debian%20%7C%20Ubuntu-blue)](https://github.com/KsmBl/wryayer)
+[![Platform: Arch / Debian / Fedora](https://img.shields.io/badge/platform-Arch%20%7C%20Debian%20%7C%20Fedora-blue)](https://github.com/KsmBl/wryayer)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange?logo=rust)](https://rustup.rs)
 
 wryayer installs packages into fully-isolated per-app directory trees under `~/.wryayer/<app>/`. Each app and all its transitive dependencies live in their own private filesystem root and are launched inside a **bubblewrap** (`bwrap`) sandbox. No root access, no systemd units, no Flatpak runtimes — just ordinary files, hard links, and Linux namespaces.
 
-On **Arch Linux** it resolves and downloads packages via `pacman` and the AUR. On **Debian / Ubuntu** it uses `apt-get download` and `dpkg-deb`. The distro is detected automatically from `/etc/os-release`.
+On **Arch Linux** it resolves and downloads packages via `pacman` and the AUR. On **Debian / Ubuntu** it uses `apt-get download` and `dpkg-deb`. On **Fedora / RHEL** and derivatives it uses `dnf download` and `rpm2cpio`. The distro is detected automatically from `/etc/os-release`.
 
 ---
 
@@ -129,8 +129,9 @@ bwrap sandbox at runtime:
 | **Debian 12 / 13** | ✅ Fully supported | apt + dpkg backend; actively tested |
 | **Ubuntu 22.04 / 24.04** | ✅ Expected to work | Detected via `ID_LIKE=ubuntu`; same apt/dpkg toolchain as Debian — not separately tested |
 | **Linux Mint** | ✅ Expected to work | Ubuntu-based; detected via `ID_LIKE=ubuntu`; not separately tested |
+| **Fedora 38+** | ✅ Fully supported | dnf + rpm2cpio backend; actively tested |
+| **RHEL / AlmaLinux / Rocky** | ✅ Expected to work | Same dnf/rpm backend as Fedora; detected via `ID_LIKE=rhel` |
 | **Void Linux** | ❌ Not supported | Uses xbps — no supported backend |
-| **Fedora** | ❌ Not supported | Uses dnf/rpm — no supported backend |
 | **openSUSE** | ❌ Not supported | Uses zypper — no supported backend |
 
 Distro detection reads `/etc/os-release`. Distributions not listed above may work if they are closely derived from Arch or Debian and carry a matching `ID_LIKE` value, but are untested.
@@ -414,6 +415,8 @@ wryayer config firefox
 wryayer config firefox network off        # block internet access
 wryayer config firefox audio off          # mute audio output + mic
 wryayer config firefox tempmode ramdisk   # private in-memory /tmp
+wryayer config firefox ramlimit 2048      # limit to 2 GiB RAM
+wryayer config firefox ramlimit none      # remove RAM limit
 
 # Shared directories (bind-mounted read-write into the sandbox)
 wryayer config firefox share add ~/Documents
@@ -433,6 +436,7 @@ wryayer config firefox share list
 | `microphone` | `on` `off` | `on` | Mask ALSA capture devices (see caveat below) |
 | `audio` | `on` `off` | `on` | Mask ALSA + PipeWire/PulseAudio sockets |
 | `share add <path>` | Any existing directory | — | Bind-mount `<path>` read-write inside the sandbox |
+| `ramlimit <MiB\|none>` | Integer (MiB) or `none` | `none` | Hard cap on RAM **and** swap combined, enforced via `systemd-run --wait -p MemoryMax=NM -p MemorySwapMax=0` (requires systemd). Both limits are necessary — without `MemorySwapMax=0` the kernel silently offloads pages to swap (including zram), letting the app exceed the cap. |
 
 ### Identity spoofing
 
@@ -462,7 +466,7 @@ wryayer config firefox spoof-cpuinfo ~/fakecpu.txt # custom file
 wryayer config firefox spoof-hostname system
 ```
 
-All four are editable in the TUI config screen (`s` on an installed app). Each row uses a picker with `system` / `sample` / `input` (machine-id also has `random`). Press `?` on any option to see exactly what value will be used.
+All five settings are editable in the TUI config screen (`s` on an installed app). Each row uses a picker; press `?` on any option to see exactly what value will be used.
 
 | CLI subcommand | Values | Effect |
 |---|---|---|
@@ -570,12 +574,12 @@ The test suite targets **≥ 90 % branch coverage** on all pure and filesystem-d
 
 | Module | What is covered |
 |---|---|
-| `config.rs` | `parse_ini` (all keys, all enum variants, error paths), `format_ini`, `parse_bool` (3 EC), round-trip |
+| `config.rs` | `parse_ini` (all keys, all enum variants, error paths, `ram_limit` disable aliases / integers / absent), `format_ini` (`[resources]` section presence/absence), `parse_bool` (3 EC), round-trip (including `ram_limit` Some and None) |
 | `manifest.rs` | `write_manifest`/`read_manifest` round-trip, `list_all_apps` (empty, sorted, skips bad dirs), atomicity |
 | `launcher.rs` | `create_launcher` (content, permissions), `remove_launcher` (missing, non-wryayer, valid) |
 | `commands/dedup.rs` | `format_bytes` (4 EC + 7 boundaries), `du_walk` (SKIP_DIRS, hard-link accounting) |
 | `package/deps.rs` | `strip_version_constraint` (7 operators), `is_soname_dep` (5 EC), `parse_pacman_field`, `parse_pacman_depends` (5 EC) |
-| `commands/run.rs` | Arg stripping (5 cases), `no_other_instance` (missing file, bad content, live PID, dead PID) |
+| `commands/run.rs` | Arg stripping (5 cases), `no_other_instance` (missing file, bad content, live PID, dead PID), `has_systemd_run` (filesystem consistency), `wrap_with_ram_limit` (outer program, `--user`/`--wait`/`--quiet`, `MemoryMax`, `MemorySwapMax=0`, `--` separator, inner args preserved, env transfer) |
 | `commands/install.rs` | `ensure_base_layout` (creates all symlinks, idempotent, preserves real dirs) |
 | `commands/snapshot.rs` | `create` / `labels` / `latest` round-trip, inode sharing, `.snapshots` recursion guard, `rollback` (restores modifications, errors on missing label, preserves snapshots dir) |
 | `commands/remove.rs` + alias model | `alias_of` serde round-trip, `skip_serializing_if` for `None`, legacy manifests without the field still parse, `list_all_apps` surfaces aliases as own entries, removing an alias leaves the target tree + manifest untouched, removing a target with dependent aliases is blocked with all blockers named, standalone removal unaffected |

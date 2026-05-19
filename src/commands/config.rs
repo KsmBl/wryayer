@@ -15,6 +15,7 @@ pub fn run(
     spoof_username: Option<&str>,
     spoof_machine_id: Option<&str>,
     spoof_cpuinfo: Option<&str>,
+    ram_limit: Option<&str>,
 ) -> Result<()> {
     read_manifest(app_name)
         .with_context(|| format!("'{app_name}' is not installed"))?;
@@ -22,7 +23,7 @@ pub fn run(
     let mut config = read_config(app_name)?;
     let changed = [
         temp_mode, temp_delete, network, camera, microphone, audio,
-        spoof_hostname, spoof_username, spoof_machine_id, spoof_cpuinfo,
+        spoof_hostname, spoof_username, spoof_machine_id, spoof_cpuinfo, ram_limit,
     ]
     .iter()
     .any(Option::is_some);
@@ -69,6 +70,16 @@ pub fn run(
     if let Some(v) = set_spoof(spoof_username)   { config.spoof_username   = v; }
     if let Some(v) = set_spoof(spoof_machine_id) { config.spoof_machine_id = v; }
     if let Some(v) = set_spoof(spoof_cpuinfo)    { config.spoof_cpuinfo    = v; }
+
+    if let Some(v) = ram_limit {
+        config.ram_limit = match v {
+            "none" | "off" | "0" | "" => None,
+            other => match other.parse::<u64>() {
+                Ok(n) if n > 0 => Some(n),
+                _ => bail!("invalid ram_limit '{other}' — expected MiB integer or 'none'"),
+            },
+        };
+    }
 
     if changed {
         write_config(app_name, &config)?;
@@ -170,5 +181,9 @@ fn print_config(app_name: &str, config: &AppConfig) {
         eprintln!("    username   = {}", spoof_str(&config.spoof_username));
         eprintln!("    machine-id = {}", spoof_str(&config.spoof_machine_id));
         eprintln!("    cpuinfo    = {}", spoof_str(&config.spoof_cpuinfo));
+    }
+    match config.ram_limit {
+        None      => eprintln!("  ram_limit   = none"),
+        Some(mib) => eprintln!("  ram_limit   = {mib} MiB"),
     }
 }

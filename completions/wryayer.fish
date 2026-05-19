@@ -103,7 +103,7 @@ complete -c wryayer -n '__fish_seen_subcommand_from completions' -a 'bash fish z
 # Level 3c-f (toggles):  network | camera | microphone | audio seen
 # Level 3g (share):      share seen
 
-set -l settings tempmode tempdelete network camera microphone audio share spoofhostname spoofusername spoofmachineid spoofcpuinfo
+set -l settings tempmode tempdelete network camera microphone audio share spoofhostname spoofusername spoofmachineid spoofcpuinfo ramlimit
 
 # Level 1 — app name
 complete -c wryayer -n "__fish_seen_subcommand_from config; and not __wryayer_config_has_app; and not __fish_seen_subcommand_from $settings" -a '(__wryayer_apps)' -d 'installed app'
@@ -120,6 +120,7 @@ complete -c wryayer -n "__fish_seen_subcommand_from config; and __wryayer_config
 complete -c wryayer -n "__fish_seen_subcommand_from config; and __wryayer_config_has_app; and not __fish_seen_subcommand_from $settings" -a spoofusername -d 'Override username ($USER) inside sandbox'
 complete -c wryayer -n "__fish_seen_subcommand_from config; and __wryayer_config_has_app; and not __fish_seen_subcommand_from $settings" -a spoofmachineid -d 'Override /etc/machine-id inside sandbox'
 complete -c wryayer -n "__fish_seen_subcommand_from config; and __wryayer_config_has_app; and not __fish_seen_subcommand_from $settings" -a spoofcpuinfo  -d 'Override /proc/cpuinfo inside sandbox (path to file)'
+complete -c wryayer -n "__fish_seen_subcommand_from config; and __wryayer_config_has_app; and not __fish_seen_subcommand_from $settings" -a ramlimit      -d 'Limit maximum RAM usage in MiB (requires systemd)'
 
 # Level 3a — tempmode values
 complete -c wryayer -n "__fish_seen_subcommand_from tempmode; and not __fish_seen_subcommand_from tempdelete $settings[3..]" -a system   -d 'Share host /tmp with all other apps (default)'
@@ -160,3 +161,11 @@ complete -c wryayer -n "__fish_seen_subcommand_from spoofmachineid" -a off    -d
 complete -c wryayer -n "__fish_seen_subcommand_from spoofcpuinfo" -a system -d 'Use real /proc/cpuinfo (no spoofing)'
 complete -c wryayer -n "__fish_seen_subcommand_from spoofcpuinfo" -a sample -d 'Built-in generic Intel Core i7-8550U cpuinfo'
 complete -c wryayer -n "__fish_seen_subcommand_from spoofcpuinfo" -a off    -d 'Alias for system — remove spoofing'
+
+# Level 3i — ramlimit values
+complete -c wryayer -n "__fish_seen_subcommand_from ramlimit" -a none -d 'No RAM limit (default)'
+complete -c wryayer -n "__fish_seen_subcommand_from ramlimit" -a 512  -d '512 MiB'
+complete -c wryayer -n "__fish_seen_subcommand_from ramlimit" -a 1024 -d '1 GiB'
+complete -c wryayer -n "__fish_seen_subcommand_from ramlimit" -a 2048 -d '2 GiB'
+complete -c wryayer -n "__fish_seen_subcommand_from ramlimit" -a 4096 -d '4 GiB'
+complete -c wryayer -n "__fish_seen_subcommand_from ramlimit" -a 8192 -d '8 GiB'

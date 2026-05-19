@@ -184,6 +184,7 @@ fn round_trip_all_non_default_values() {
         spoof_username:   None,
         spoof_machine_id: None,
         spoof_cpuinfo:    None,
+        ram_limit:        None,
     };
     let parsed = parse_ini(&format_ini(&original)).unwrap();
     assert_eq!(parsed.temp_mode,   TempMode::Ramdisk);
@@ -193,4 +194,81 @@ fn round_trip_all_non_default_values() {
     assert!(!parsed.microphone);
     assert!(!parsed.audio);
     assert_eq!(parsed.shared_dirs, vec!["/tmp/foo", "/opt/bar"]);
+}
+
+// ── parse_ini — ram_limit — aliases that disable ──────────────────────────────
+
+#[test]
+fn parse_ini_ram_limit_absent_defaults_to_none() {
+    let cfg = parse_ini("").unwrap();
+    assert_eq!(cfg.ram_limit, None);
+}
+
+#[test]
+fn parse_ini_ram_limit_disable_aliases_yield_none() {
+    // "none", "off", and "0" are all documented aliases for "disabled"
+    for v in ["ram_limit = none", "ram_limit = off", "ram_limit = 0"] {
+        let cfg = parse_ini(v).unwrap();
+        assert_eq!(cfg.ram_limit, None, "expected None for '{v}'");
+    }
+}
+
+#[test]
+fn parse_ini_ram_limit_empty_value_yields_none() {
+    let cfg = parse_ini("ram_limit = \n").unwrap();
+    assert_eq!(cfg.ram_limit, None);
+}
+
+// ── parse_ini — ram_limit — valid integer values ──────────────────────────────
+
+#[test]
+fn parse_ini_ram_limit_valid_integers() {
+    for (s, expected) in [
+        ("ram_limit = 512",  512u64),
+        ("ram_limit = 1024", 1024),
+        ("ram_limit = 2048", 2048),
+        ("ram_limit = 4096", 4096),
+        ("ram_limit = 8192", 8192),
+        ("ram_limit = 1",    1),
+    ] {
+        let cfg = parse_ini(s).unwrap();
+        assert_eq!(cfg.ram_limit, Some(expected), "input '{s}'");
+    }
+}
+
+// ── format_ini — ram_limit ────────────────────────────────────────────────────
+
+#[test]
+fn format_ini_omits_resources_section_when_no_limit() {
+    let ini = format_ini(&AppConfig::default());
+    assert!(!ini.contains("[resources]"), "should not emit [resources] section when ram_limit is None");
+    assert!(!ini.contains("ram_limit"),   "should not emit ram_limit key when None");
+}
+
+#[test]
+fn format_ini_includes_resources_section_when_limit_set() {
+    let cfg = AppConfig { ram_limit: Some(2048), ..AppConfig::default() };
+    let ini = format_ini(&cfg);
+    assert!(ini.contains("[resources]"),    "must emit [resources] section");
+    assert!(ini.contains("ram_limit = 2048"), "must emit the MiB value");
+}
+
+// ── round-trip — ram_limit ────────────────────────────────────────────────────
+
+#[test]
+fn round_trip_ram_limit_some_value() {
+    for mib in [512u64, 1024, 2048, 4096, 8192] {
+        let cfg = AppConfig { ram_limit: Some(mib), ..AppConfig::default() };
+        let parsed = parse_ini(&format_ini(&cfg)).unwrap();
+        assert_eq!(parsed.ram_limit, Some(mib), "round-trip failed for {mib} MiB");
+    }
+}
+
+#[test]
+fn round_trip_ram_limit_none_stays_none() {
+    // When ram_limit is None the [resources] section is omitted entirely,
+    // so parsing the formatted output must yield None again (not Some(0)).
+    let cfg = AppConfig { ram_limit: None, ..AppConfig::default() };
+    let parsed = parse_ini(&format_ini(&cfg)).unwrap();
+    assert_eq!(parsed.ram_limit, None);
 }

@@ -47,6 +47,8 @@ pub struct AppConfig {
     pub spoof_machine_id: Option<String>,
     /// Path to a file to bind over /proc/cpuinfo inside the sandbox
     pub spoof_cpuinfo: Option<String>,
+    /// Maximum RAM the app may use in MiB — enforced via systemd-run (None = no limit)
+    pub ram_limit: Option<u64>,
 }
 
 impl Default for AppConfig {
@@ -63,6 +65,7 @@ impl Default for AppConfig {
             spoof_username: None,
             spoof_machine_id: None,
             spoof_cpuinfo: None,
+            ram_limit: None,
         }
     }
 }
@@ -152,6 +155,13 @@ pub fn parse_ini(content: &str) -> Result<AppConfig> {
                     Some(shellexpand::tilde(v).into_owned())
                 };
             }
+            ("ram_limit", v) => {
+                config.ram_limit = if v.is_empty() || v == "0" || v == "off" || v == "none" {
+                    None
+                } else {
+                    v.parse::<u64>().ok().filter(|&n| n > 0)
+                };
+            }
             _ => {}
         }
     }
@@ -235,6 +245,11 @@ pub fn format_ini(config: &AppConfig) -> String {
         if let Some(ref v) = config.spoof_cpuinfo {
             s.push_str(&format!("spoof_cpuinfo = {v}\n"));
         }
+    }
+    if let Some(mib) = config.ram_limit {
+        s.push_str("\n[resources]\n");
+        s.push_str("; Maximum RAM in MiB (RAM + swap). Enforced via systemd-run MemoryMax+MemorySwapMax.\n");
+        s.push_str(&format!("ram_limit = {mib}\n"));
     }
     s
 }

@@ -111,6 +111,11 @@ pub fn run(app_name: &str, bin: Option<&str>, args: &[String]) -> Result<()> {
         // process tree).
         let mut cmd = bwrap_cmd(&app_root_str, &binary, args, &temp, &config);
         set_bwrap_env(&mut cmd);
+        if let Some(mib) = config.ram_limit {
+            if has_systemd_run() {
+                cmd = wrap_with_ram_limit(cmd, mib);
+            }
+        }
         let err = cmd.exec();
         bail!("failed to exec bwrap: {err}");
     } else {
@@ -127,6 +132,13 @@ fn launch_bwrap(
 ) -> Result<ExitStatus> {
     let mut cmd = bwrap_cmd(app_root_str, binary, args, temp, config);
     set_bwrap_env(&mut cmd);
+    if let Some(mib) = config.ram_limit {
+        if has_systemd_run() {
+            cmd = wrap_with_ram_limit(cmd, mib);
+        } else {
+            eprintln!("warning: systemd-run not found — running without RAM limit");
+        }
+    }
     cmd.status().context("failed to run bwrap")
 }
 
@@ -212,6 +224,39 @@ fn kernel_uuid() -> String {
         .unwrap_or_default()
         .trim()
         .to_string()
+}
+
+// ── RAM limit helpers ─────────────────────────────────────────────────────────
+
+pub fn has_systemd_run() -> bool {
+    std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).any(|d| d.join("systemd-run").exists()))
+        .unwrap_or(false)
+}
+
+/// Wrap `inner` (a fully-constructed bwrap command) inside a transient
+/// systemd user service with a MemoryMax cgroup limit.  All program args
+/// and env overrides are transferred; --wait makes systemd-run block until
+/// the service exits and propagate its exit code.
+pub fn wrap_with_ram_limit(inner: Command, mib: u64) -> Command {
+    let mut outer = Command::new("systemd-run");
+    outer.arg("--user")
+         .arg("--wait")
+         .arg("--quiet")
+         .arg("-p").arg(format!("MemoryMax={mib}M"))
+         .arg("-p").arg("MemorySwapMax=0")
+         .arg("--");
+    outer.arg(inner.get_program());
+    for arg in inner.get_args() {
+        outer.arg(arg);
+    }
+    for (k, v) in inner.get_envs() {
+        match v {
+            Some(val) => { outer.env(k, val); }
+            None      => { outer.env_remove(k); }
+        }
+    }
+    outer
 }
 
 // ── bwrap command builder ─────────────────────────────────────────────────────

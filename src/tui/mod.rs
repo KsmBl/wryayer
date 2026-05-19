@@ -1059,14 +1059,16 @@ fn on_op_done(app: &mut App, code: KeyCode) -> Result<()> {
 // ── Config screen ─────────────────────────────────────────────────────────────
 
 // Rows: 0=network 1=camera 2=microphone 3=audio 4=temp_mode 5=temp_delete 6=shared_dirs
-//       7=spoof_hostname 8=spoof_username 9=spoof_machine_id 10=spoof_cpuinfo 11=Save
-pub const CFG_LEN: usize = 12;
+//       7=spoof_hostname 8=spoof_username 9=spoof_machine_id 10=spoof_cpuinfo
+//       11=ram_limit 12=Save
+pub const CFG_LEN: usize = 13;
 pub const CFG_SHARES: usize = 6;
 pub const CFG_SPOOF_HOSTNAME: usize = 7;
 pub const CFG_SPOOF_USERNAME: usize = 8;
 pub const CFG_SPOOF_MACHINE_ID: usize = 9;
 pub const CFG_SPOOF_CPUINFO: usize = 10;
-pub const CFG_SAVE: usize = 11;
+pub const CFG_RAM_LIMIT: usize = 11;
+pub const CFG_SAVE: usize = 12;
 
 /// A fixed 32-char hex machine-id that apps can use as a plausible-looking ID.
 pub const MACHINE_ID_SAMPLE: &str = "cafebabe0011223344556677deadbeef";
@@ -1169,6 +1171,7 @@ pub fn setting_options(idx: usize) -> Vec<&'static str> {
         CFG_SPOOF_HOSTNAME | CFG_SPOOF_USERNAME => vec!["system", "sample", "input"],
         CFG_SPOOF_CPUINFO => vec!["system", "sample", "edit"],
         CFG_SPOOF_MACHINE_ID => vec!["system", "random", "sample", "input"],
+        CFG_RAM_LIMIT => vec!["none", "512 MiB", "1 GiB", "2 GiB", "4 GiB", "8 GiB"],
         _ => vec![],
     }
 }
@@ -1187,6 +1190,7 @@ pub fn setting_title(idx: usize) -> &'static str {
         8 => "Spoof username",
         9 => "Spoof machine ID",
         10 => "Spoof CPU info",
+        11 => "RAM limit",
         _ => "Option",
     }
 }
@@ -1205,6 +1209,7 @@ pub fn setting_description(idx: usize) -> &'static str {
         8 => "Override $USER and $LOGNAME inside the sandbox. 'system' uses your real username; 'sample' sets it to 'user'; 'input' lets you type any custom name.",
         9 => "Override /etc/machine-id inside the sandbox. 'system' uses the real ID; 'random' generates a fresh UUID each launch; 'sample' uses a fixed placeholder; 'input' lets you type a 32-char hex value.",
         10 => "Override /proc/cpuinfo inside the sandbox. 'system' exposes the real CPU; 'sample' shows a generic Intel i7; 'edit' opens a text editor so you can write a fully custom cpuinfo — pre-filled with your real CPU data.",
+        11 => "Maximum RAM the app may use (RAM + swap both capped). Enforced via systemd-run MemoryMax + MemorySwapMax=0. 'none' disables the limit. Requires systemd.",
         _ => "No description available.",
     }
 }
@@ -1250,6 +1255,13 @@ pub fn option_description(setting_idx: usize, choice_idx: usize) -> &'static str
         (10, 0) => "system — Expose the real /proc/cpuinfo to the app. No spoofing.",
         (10, 1) => "sample — Bind a built-in generic Intel Core i7-8550U cpuinfo. The app won't see your real CPU model.",
         (10, 2) => "edit — Open a text editor (nvim/vim/vi/nano) to write a custom /proc/cpuinfo. Pre-filled with your real CPU info on first use. Content is saved per-app.",
+        // RAM limit
+        (11, 0) => "none — No RAM limit. The app may use as much memory as the system allows.",
+        (11, 1) => "512 MiB — Hard cap at 512 MiB (RAM + swap). Processes are OOM-killed if they exceed this.",
+        (11, 2) => "1 GiB — Cap the app at 1 GiB (1024 MiB) of RAM.",
+        (11, 3) => "2 GiB — Cap the app at 2 GiB (2048 MiB) of RAM. Good default for everyday apps.",
+        (11, 4) => "4 GiB — Cap the app at 4 GiB (4096 MiB) of RAM.",
+        (11, 5) => "8 GiB — Cap the app at 8 GiB (8192 MiB) of RAM.",
         _ => "No description available.",
     }
 }
@@ -1294,6 +1306,19 @@ pub fn setting_current(config: &AppConfig, idx: usize) -> usize {
             Some("sample") => 1,
             _              => 2,  // "custom" or legacy path both show as "edit"
         },
+        CFG_RAM_LIMIT => match config.ram_limit {
+            None        => 0,
+            Some(512)   => 1,
+            Some(1024)  => 2,
+            Some(2048)  => 3,
+            Some(4096)  => 4,
+            Some(8192)  => 5,
+            Some(n) if n <= 512  => 1,
+            Some(n) if n <= 1024 => 2,
+            Some(n) if n <= 2048 => 3,
+            Some(n) if n <= 4096 => 4,
+            _           => 5,
+        },
         _ => 0,
     }
 }
@@ -1329,7 +1354,13 @@ pub fn apply_setting(config: &mut AppConfig, idx: usize, choice: usize) {
         // (9, 3) = "input" — handled by on_option_picker which opens TextInput
         (10, 0) => config.spoof_cpuinfo = None,
         (10, 1) => config.spoof_cpuinfo = Some("sample".to_string()),
-        // (10, 2) = "input" — handled by on_option_picker which opens TextInput
+        // (10, 2) = "edit" — handled by on_option_picker which opens editor
+        (11, 0) => config.ram_limit = None,
+        (11, 1) => config.ram_limit = Some(512),
+        (11, 2) => config.ram_limit = Some(1024),
+        (11, 3) => config.ram_limit = Some(2048),
+        (11, 4) => config.ram_limit = Some(4096),
+        (11, 5) => config.ram_limit = Some(8192),
         _ => {}
     }
 }
