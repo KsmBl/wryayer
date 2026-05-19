@@ -19,12 +19,18 @@ detect_distro() {
         # shellcheck source=/dev/null
         . /etc/os-release
         case "${ID_LIKE:-} ${ID:-}" in
-            *debian*|*ubuntu*) echo "debian"; return ;;
-            *arch*|*manjaro*)  echo "arch";   return ;;
+            *debian*|*ubuntu*)               echo "debian"; return ;;
+            *arch*|*manjaro*)                echo "arch";   return ;;
+            *fedora*|*rhel*|*centos*|*suse*) echo "fedora"; return ;;
+        esac
+        case "${ID:-}" in
+            fedora|rhel|centos|almalinux|rocky|opensuse*) echo "fedora"; return ;;
         esac
     fi
     command -v pacman  &>/dev/null && echo "arch"   && return
     command -v apt-get &>/dev/null && echo "debian" && return
+    command -v dnf     &>/dev/null && echo "fedora" && return
+    command -v dnf5    &>/dev/null && echo "fedora" && return
     echo "unknown"
 }
 
@@ -37,7 +43,7 @@ if [ ! -f "Cargo.toml" ] || ! grep -q 'name = "wryayer"' Cargo.toml; then
 fi
 
 if [ "$DISTRO" = "unknown" ]; then
-    error "Unsupported distro — only Arch Linux and Debian/Ubuntu are supported."
+    error "Unsupported distro — supported: Arch/CachyOS/Manjaro, Debian/Ubuntu, Fedora/RHEL/AlmaLinux/Rocky."
 fi
 
 info "Detected distro: $DISTRO"
@@ -64,13 +70,11 @@ if [ "$DISTRO" = "arch" ]; then
 
 elif [ "$DISTRO" = "debian" ]; then
     PKGS=()
-    command -v bwrap      &>/dev/null || PKGS+=(bubblewrap)
-    command -v curl       &>/dev/null || PKGS+=(curl)
-    command -v git        &>/dev/null || PKGS+=(git)
-    command -v readelf    &>/dev/null || PKGS+=(binutils)
-    command -v ldconfig   &>/dev/null || PKGS+=(libc-bin)
-    command -v pkg-config &>/dev/null || PKGS+=(pkg-config)
-    dpkg -s libssl-dev &>/dev/null    || PKGS+=(libssl-dev)
+    command -v bwrap    &>/dev/null || PKGS+=(bubblewrap)
+    command -v curl     &>/dev/null || PKGS+=(curl)
+    command -v git      &>/dev/null || PKGS+=(git)
+    command -v readelf  &>/dev/null || PKGS+=(binutils)
+    command -v ldconfig &>/dev/null || PKGS+=(libc-bin)
     # dpkg and apt are always present on Debian/Ubuntu
 
     if [ ${#PKGS[@]} -gt 0 ]; then
@@ -79,6 +83,31 @@ elif [ "$DISTRO" = "debian" ]; then
         sudo apt-get install -y "${PKGS[@]}"
     else
         info "All Debian/Ubuntu dependencies already installed"
+    fi
+
+    # apt-file is optional but enables soname-to-package lookup for uninstalled packages.
+    if ! command -v apt-file &>/dev/null; then
+        warn "apt-file not found — soname lookup for packages not installed on the host will be limited."
+        warn "Install it with: sudo apt-get install apt-file && sudo apt-file update"
+    fi
+
+elif [ "$DISTRO" = "fedora" ]; then
+    PKGS=()
+    command -v bwrap    &>/dev/null || PKGS+=(bubblewrap)
+    command -v curl     &>/dev/null || PKGS+=(curl)
+    command -v git      &>/dev/null || PKGS+=(git)
+    command -v readelf  &>/dev/null || PKGS+=(binutils)
+    command -v ldconfig &>/dev/null || PKGS+=(glibc)
+    command -v rpm2cpio &>/dev/null || PKGS+=(rpm2cpio)
+    command -v cpio     &>/dev/null || PKGS+=(cpio)
+    # dnf download is built-in on dnf5; on dnf4 it needs dnf-plugins-core
+    dnf help download &>/dev/null 2>&1 || PKGS+=(dnf-plugins-core)
+
+    if [ ${#PKGS[@]} -gt 0 ]; then
+        echo "  Installing: ${PKGS[*]}"
+        sudo dnf install -y "${PKGS[@]}"
+    else
+        info "All Fedora/RHEL dependencies already installed"
     fi
 fi
 
@@ -147,9 +176,11 @@ info "Build complete."
 heading "Installing binary..."
 BIN_DIR="${HOME}/bin"
 mkdir -p "$BIN_DIR"
-cp target/release/wryayer "$BIN_DIR/wryayer"
-chmod +x "$BIN_DIR/wryayer"
-info "Installed binary to $BIN_DIR/wryayer"
+# Atomic install: avoids "Text file busy" if the binary is currently running.
+cp target/release/wryayer "${BIN_DIR}/wryayer.new"
+mv "${BIN_DIR}/wryayer.new" "${BIN_DIR}/wryayer"
+chmod +x "${BIN_DIR}/wryayer"
+info "Installed binary to ${BIN_DIR}/wryayer"
 
 # Add ~/bin to PATH for bash/zsh if not already there
 for RC in "${HOME}/.bashrc" "${HOME}/.zshrc"; do

@@ -134,7 +134,25 @@ fn elf_needed(path: &Path) -> Result<Vec<String>> {
 }
 
 pub(crate) fn soname_in_app(app_dir: &Path, soname: &str) -> bool {
-    ["usr/lib", "usr/lib64", "lib", "lib64"]
-        .iter()
-        .any(|sub| app_dir.join(sub).join(soname).exists())
+    for root in &["usr/lib", "usr/lib64", "lib", "lib64"] {
+        let dir = app_dir.join(root);
+        if !dir.is_dir() {
+            continue;
+        }
+        // Direct — Arch and Fedora /usr/lib64/
+        if dir.join(soname).exists() {
+            return true;
+        }
+        // One subdir deep — Debian multiarch (usr/lib/x86_64-linux-gnu/)
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                if entry.file_type().map(|t| t.is_dir()).unwrap_or(false)
+                    && entry.path().join(soname).exists()
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }

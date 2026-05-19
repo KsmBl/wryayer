@@ -14,10 +14,15 @@ use std::sync::OnceLock;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Distro {
-    /// Arch Linux and derivatives (pacman, AUR, makepkg, vercmp, .pkg.tar.zst)
+    /// Arch Linux and all derivatives: CachyOS, EndeavourOS, Garuda, Manjaro, …
+    /// Package manager: pacman / yay; archive format: .pkg.tar.zst
     Arch,
-    /// Debian and Ubuntu derivatives (apt-get, dpkg-deb, dpkg, .deb)
+    /// Debian, Ubuntu, and all derivatives: Mint, Pop!_OS, Kali, …
+    /// Package manager: apt / dpkg; archive format: .deb
     Debian,
+    /// Fedora, RHEL, CentOS, AlmaLinux, Rocky Linux, openSUSE, …
+    /// Package manager: dnf / rpm; archive format: .rpm
+    Fedora,
 }
 
 static CURRENT: OnceLock<Distro> = OnceLock::new();
@@ -28,25 +33,39 @@ pub fn current() -> Distro {
 
 fn detect() -> Distro {
     if let Ok(content) = std::fs::read_to_string("/etc/os-release") {
+        let mut id = String::new();
+        let mut id_like = String::new();
         for line in content.lines() {
-            let val = line
-                .strip_prefix("ID_LIKE=")
-                .or_else(|| line.strip_prefix("ID="))
-                .unwrap_or("")
-                .trim_matches('"');
-            if val.contains("debian") || val.contains("ubuntu") {
-                return Distro::Debian;
-            }
-            if val == "arch" || val.contains("arch") || val.contains("manjaro") {
-                return Distro::Arch;
+            if let Some(v) = line.strip_prefix("ID=") {
+                id = v.trim_matches('"').to_lowercase();
+            } else if let Some(v) = line.strip_prefix("ID_LIKE=") {
+                id_like = v.trim_matches('"').to_lowercase();
             }
         }
+        // ID_LIKE wins over ID for derivatives (e.g. CachyOS: ID=cachyos ID_LIKE=arch)
+        let combined = format!("{id_like} {id}");
+        if combined.contains("debian") || combined.contains("ubuntu") {
+            return Distro::Debian;
+        }
+        if combined.contains("arch") || combined.contains("manjaro") {
+            return Distro::Arch;
+        }
+        if combined.contains("fedora") || combined.contains("rhel")
+            || combined.contains("centos") || combined.contains("suse")
+            || matches!(id.as_str(), "almalinux" | "rocky" | "fedora" | "rhel" | "centos")
+        {
+            return Distro::Fedora;
+        }
     }
+    // Fallback: check for package manager binaries
     if Path::new("/usr/bin/pacman").exists() {
         return Distro::Arch;
     }
     if Path::new("/usr/bin/apt-get").exists() {
         return Distro::Debian;
+    }
+    if Path::new("/usr/bin/dnf").exists() || Path::new("/usr/bin/dnf5").exists() {
+        return Distro::Fedora;
     }
     Distro::Arch
 }
@@ -59,6 +78,7 @@ pub fn query_pkg_info(pkg: &str) -> Result<Option<(String, Vec<String>)>> {
     match current() {
         Distro::Arch   => arch::query_info(pkg),
         Distro::Debian => debian::query_info(pkg),
+        Distro::Fedora => fedora::query_info(pkg),
     }
 }
 
@@ -68,6 +88,7 @@ pub fn resolve_virtual(dep: &str) -> Result<Option<String>> {
     match current() {
         Distro::Arch   => arch::resolve_virtual(dep),
         Distro::Debian => debian::resolve_virtual(dep),
+        Distro::Fedora => fedora::resolve_virtual(dep),
     }
 }
 
@@ -78,6 +99,7 @@ pub fn soname_owner(soname: &str) -> Result<Option<String>> {
     match current() {
         Distro::Arch   => arch::soname_owner(filename),
         Distro::Debian => debian::soname_owner(filename),
+        Distro::Fedora => fedora::soname_owner(filename),
     }
 }
 
@@ -88,6 +110,7 @@ pub fn download_pkg(pkg: &str, cache_dir: &Path) -> Result<PathBuf> {
     match current() {
         Distro::Arch   => arch::download(pkg, cache_dir),
         Distro::Debian => debian::download(pkg, cache_dir),
+        Distro::Fedora => fedora::download(pkg, cache_dir),
     }
 }
 
@@ -96,6 +119,7 @@ pub fn extract_pkg(pkg_path: &Path, dest_dir: &Path) -> Result<()> {
     match current() {
         Distro::Arch   => arch::extract(pkg_path, dest_dir),
         Distro::Debian => debian::extract(pkg_path, dest_dir),
+        Distro::Fedora => fedora::extract(pkg_path, dest_dir),
     }
 }
 
@@ -106,6 +130,7 @@ pub fn list_pkg_files(pkg_path: &Path) -> Vec<String> {
     let r = match current() {
         Distro::Arch   => arch::list_files(pkg_path),
         Distro::Debian => debian::list_files(pkg_path),
+        Distro::Fedora => fedora::list_files(pkg_path),
     };
     r.unwrap_or_default()
 }
@@ -115,6 +140,7 @@ pub fn pkg_latest_version(pkg: &str) -> Result<Option<String>> {
     match current() {
         Distro::Arch   => arch::latest_version(pkg),
         Distro::Debian => debian::latest_version(pkg),
+        Distro::Fedora => fedora::latest_version(pkg),
     }
 }
 
@@ -123,6 +149,7 @@ pub fn pkg_search(query: &str) -> Vec<String> {
     match current() {
         Distro::Arch   => arch::search(query),
         Distro::Debian => debian::search(query),
+        Distro::Fedora => fedora::search(query),
     }
 }
 
@@ -134,6 +161,7 @@ pub fn version_is_newer(candidate: &str, current_ver: &str) -> Result<bool> {
     match current() {
         Distro::Arch   => arch::version_newer(candidate, current_ver),
         Distro::Debian => debian::version_newer(candidate, current_ver),
+        Distro::Fedora => fedora::version_newer(candidate, current_ver),
     }
 }
 
@@ -584,6 +612,30 @@ mod debian {
                 }
             }
         }
+
+        // Fallback: apt-file searches all repos, including packages not installed on
+        // the host (same class of fix as pacman -F for Arch).  Requires apt-file to be
+        // installed and its database updated (`sudo apt-file update`).
+        if let Ok(out) = Command::new("apt-file")
+            .args(["search", "--regexp", &format!("/{filename}$")])
+            .env("LANG", "C")
+            .env("LC_ALL", "C")
+            .output()
+        {
+            if out.status.success() {
+                let text = String::from_utf8_lossy(&out.stdout);
+                for line in text.lines() {
+                    // "libfoo2: /usr/lib/x86_64-linux-gnu/libfoo.so.2"
+                    if let Some((pkg_part, _)) = line.split_once(':') {
+                        let pkg = pkg_part.trim().to_string();
+                        if !pkg.is_empty() {
+                            return Ok(Some(pkg));
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(None)
     }
 
@@ -759,5 +811,284 @@ mod debian {
             }
         }
         deps
+    }
+}
+
+// ── Fedora / dnf / rpm ────────────────────────────────────────────────────────
+//
+// Covers Fedora, RHEL, CentOS, AlmaLinux, Rocky Linux, openSUSE, and any
+// other RPM-based distro with dnf (dnf4 or dnf5) and rpm installed.
+//
+// Dependency resolution notes:
+//   RPM requires can be soname virtuals (libfoo.so.2()(64bit)), file deps
+//   (/usr/bin/sh), or capability deps (pkgconfig(glib-2.0)).  We filter these
+//   down to bare package-name-like entries so the dep resolver only queues
+//   things it can actually look up.  Soname gaps are caught at install time by
+//   satisfy_missing_sonames.
+
+mod fedora {
+    use super::*;
+    use std::process::Stdio;
+
+    pub fn query_info(pkg: &str) -> Result<Option<(String, Vec<String>)>> {
+        // dnf repoquery is available in dnf-plugins-core (dnf4) or built-in (dnf5).
+        let ver_out = Command::new("dnf")
+            .args(["repoquery", "--quiet", "--queryformat", "%{version}", pkg])
+            .env("LANG", "C")
+            .env("LC_ALL", "C")
+            .output()
+            .context("failed to spawn dnf repoquery")?;
+
+        if !ver_out.status.success() || ver_out.stdout.is_empty() {
+            return Ok(None);
+        }
+        let version = String::from_utf8_lossy(&ver_out.stdout)
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if version.is_empty() {
+            return Ok(None);
+        }
+
+        let dep_out = Command::new("dnf")
+            .args(["repoquery", "--quiet", "--requires", pkg])
+            .env("LANG", "C")
+            .env("LC_ALL", "C")
+            .output()
+            .context("failed to spawn dnf repoquery --requires")?;
+
+        let deps = if dep_out.status.success() {
+            String::from_utf8_lossy(&dep_out.stdout)
+                .lines()
+                .filter_map(|line| {
+                    let dep = line.trim();
+                    if dep.is_empty() {
+                        return None;
+                    }
+                    // Skip soname virtuals (.so), file deps (/), capability deps (()
+                    if dep.contains(".so") || dep.starts_with('/') || dep.contains('(') {
+                        return None;
+                    }
+                    // Strip version constraint: "foo >= 1.0" → "foo"
+                    let name = dep.split_whitespace().next().unwrap_or("").trim();
+                    if name.is_empty() { None } else { Some(name.to_string()) }
+                })
+                .collect()
+        } else {
+            vec![]
+        };
+
+        Ok(Some((version, deps)))
+    }
+
+    pub fn resolve_virtual(dep: &str) -> Result<Option<String>> {
+        let out = Command::new("dnf")
+            .args(["repoquery", "--quiet", "--queryformat", "%{name}", "--whatprovides", dep])
+            .env("LANG", "C")
+            .env("LC_ALL", "C")
+            .output()
+            .context("failed to spawn dnf repoquery --whatprovides")?;
+        if !out.status.success() {
+            return Ok(None);
+        }
+        let provider = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if provider.is_empty() || provider == dep {
+            return Ok(None);
+        }
+        Ok(Some(provider))
+    }
+
+    pub fn soname_owner(filename: &str) -> Result<Option<String>> {
+        // First: check installed packages via rpm -qf
+        for dir in ["/usr/lib64", "/usr/lib", "/lib64", "/lib"] {
+            let path = format!("{dir}/{filename}");
+            if !Path::new(&path).exists() {
+                continue;
+            }
+            let out = Command::new("rpm")
+                .args(["-qf", "--queryformat", "%{NAME}", &path])
+                .output()
+                .context("failed to spawn rpm -qf")?;
+            if out.status.success() {
+                let pkg = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !pkg.is_empty() && !pkg.starts_with("error:") {
+                    return Ok(Some(pkg));
+                }
+            }
+        }
+
+        // Fallback: search all repos via dnf repoquery --file
+        // Works even when the owning package is not installed on the host.
+        let pattern = format!("*/{filename}");
+        if let Ok(out) = Command::new("dnf")
+            .args(["repoquery", "--quiet", "--queryformat", "%{name}", "--file", &pattern])
+            .env("LANG", "C")
+            .env("LC_ALL", "C")
+            .output()
+        {
+            if out.status.success() {
+                let pkg = String::from_utf8_lossy(&out.stdout)
+                    .lines()
+                    .find(|l| !l.trim().is_empty())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                if !pkg.is_empty() {
+                    return Ok(Some(pkg));
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    pub fn download(pkg: &str, cache_dir: &Path) -> Result<PathBuf> {
+        if let Some(cached) = find_rpm(cache_dir, pkg)? {
+            return Ok(cached);
+        }
+        eprintln!("  Downloading {pkg}...");
+        let output = Command::new("dnf")
+            .args([
+                "download",
+                "--quiet",
+                "--destdir",
+                cache_dir.to_str().unwrap_or("."),
+                pkg,
+            ])
+            .output()
+            .context("failed to spawn dnf download")?;
+        if !output.status.success() {
+            bail!(
+                "dnf download failed for '{pkg}':\n{}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        find_rpm(cache_dir, pkg)?
+            .with_context(|| format!("no .rpm found in cache after downloading '{pkg}'"))
+    }
+
+    pub fn extract(pkg_path: &Path, dest_dir: &Path) -> Result<()> {
+        let rpm2cpio = Command::new("rpm2cpio")
+            .arg(pkg_path)
+            .stdout(Stdio::piped())
+            .spawn()
+            .context("failed to spawn rpm2cpio")?;
+
+        let output = Command::new("cpio")
+            .args(["--extract", "--make-directories", "--preserve-modification-time", "--quiet"])
+            .stdin(rpm2cpio.stdout.unwrap())
+            .current_dir(dest_dir)
+            .output()
+            .context("failed to spawn cpio")?;
+
+        if !output.status.success() {
+            bail!(
+                "cpio extraction failed for {}:\n{}",
+                pkg_path.display(),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        Ok(())
+    }
+
+    pub fn list_files(pkg_path: &Path) -> Result<Vec<String>> {
+        let rpm2cpio = Command::new("rpm2cpio")
+            .arg(pkg_path)
+            .stdout(Stdio::piped())
+            .spawn()
+            .context("failed to spawn rpm2cpio")?;
+
+        let output = Command::new("cpio")
+            .args(["--list", "--quiet"])
+            .stdin(rpm2cpio.stdout.unwrap())
+            .output()
+            .context("failed to spawn cpio --list")?;
+
+        if !output.status.success() {
+            return Ok(vec![]);
+        }
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|l| {
+                let path = l.trim().strip_prefix("./").unwrap_or(l.trim());
+                if path.is_empty() || path.ends_with('/') {
+                    None
+                } else {
+                    Some(path.to_string())
+                }
+            })
+            .collect())
+    }
+
+    pub fn latest_version(pkg: &str) -> Result<Option<String>> {
+        let out = Command::new("dnf")
+            .args(["repoquery", "--quiet", "--queryformat", "%{version}", pkg])
+            .env("LANG", "C")
+            .env("LC_ALL", "C")
+            .output()
+            .context("failed to spawn dnf repoquery")?;
+        if !out.status.success() {
+            return Ok(None);
+        }
+        let ver = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if ver.is_empty() { Ok(None) } else { Ok(Some(ver)) }
+    }
+
+    pub fn version_newer(candidate: &str, current: &str) -> Result<bool> {
+        // rpm.vercmp is accessible via the Lua interpreter built into rpm --eval.
+        let script = format!(
+            "%{{lua:print(rpm.vercmp(\"{}\", \"{}\") > 0 and \"1\" or \"0\")}}",
+            candidate.replace('"', ""),
+            current.replace('"', ""),
+        );
+        let out = Command::new("rpm")
+            .args(["--eval", &script])
+            .output()
+            .context("failed to run rpm --eval")?;
+        Ok(String::from_utf8_lossy(&out.stdout).trim() == "1")
+    }
+
+    pub fn search(query: &str) -> Vec<String> {
+        let pattern = format!("*{query}*");
+        let Ok(out) = Command::new("dnf")
+            .args(["repoquery", "--quiet", "--queryformat", "%{name}", &pattern])
+            .output()
+        else {
+            return vec![];
+        };
+        let mut names: Vec<String> = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| l.trim().to_string())
+            .collect();
+        names.sort_unstable();
+        names.dedup();
+        names
+    }
+
+    fn find_rpm(dir: &Path, pkg: &str) -> Result<Option<PathBuf>> {
+        for entry in std::fs::read_dir(dir)
+            .with_context(|| format!("failed to read cache dir {}", dir.display()))?
+            .flatten()
+        {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with(&format!("{pkg}-")) && name.ends_with(".rpm") {
+                return Ok(Some(path));
+            }
+        }
+        Ok(None)
     }
 }
