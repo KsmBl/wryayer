@@ -449,6 +449,26 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
         }
     }
 
+    if let Some(ref os_val) = config.spoof_os {
+        let os_name = if os_val == "sample" { "linux" } else { os_val.as_str() };
+        let pretty = if os_val == "sample" {
+            "Linux".to_string()
+        } else {
+            let mut s = os_val.to_string();
+            s.get_mut(..1).map(|c| c.make_ascii_uppercase());
+            s
+        };
+        let content = format!(
+            "NAME={pretty}\nID={os_name}\nPRETTY_NAME={pretty}\nVERSION_ID=1.0\n"
+        );
+        let of = spoof_dir.join("os-release");
+        let _ = std::fs::write(&of, content);
+        if let Some(s) = of.to_str() {
+            cmd.args(["--ro-bind-try", s, "/etc/os-release"]);
+            cmd.args(["--ro-bind-try", s, "/usr/lib/os-release"]);
+        }
+    }
+
     // ── Isolated XDG_RUNTIME_DIR ───────────────────────────────────────────────
     //
     // Electron/Qt apps (VS Code, Discord, …) store per-instance IPC sockets in

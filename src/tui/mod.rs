@@ -117,6 +117,8 @@ pub enum Screen {
         field_idx: usize,
         value: String,
     },
+    /// Full key-bindings reference popup. Dismisses on any key.
+    KeyHelp,
 }
 
 pub enum PendingAction {
@@ -504,6 +506,7 @@ fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
         Screen::SettingHelp { .. } => 9,
         Screen::OptionHelp { .. } => 10,
         Screen::TextInput { .. } => 11,
+        Screen::KeyHelp => 12,
     };
 
     match tag {
@@ -519,6 +522,7 @@ fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
         9 => on_setting_help(app, code),
         10 => on_option_help(app, code),
         11 => on_text_input(app, code),
+        12 => on_key_help(app),
         _ => {}
     }
     Ok(())
@@ -722,8 +726,17 @@ fn on_installed(app: &mut App, code: KeyCode) {
                 app.screen = Screen::Config { app_name: name, config, selected: 0 };
             }
         }
+        KeyCode::Char('?') => {
+            app.screen = Screen::KeyHelp;
+            app.needs_clear = true;
+        }
         _ => {}
     }
+}
+
+fn on_key_help(app: &mut App) {
+    app.screen = Screen::Main;
+    app.needs_clear = true;
 }
 
 // ── Install tab ───────────────────────────────────────────────────────────────
@@ -1059,16 +1072,17 @@ fn on_op_done(app: &mut App, code: KeyCode) -> Result<()> {
 // ── Config screen ─────────────────────────────────────────────────────────────
 
 // Rows: 0=network 1=camera 2=microphone 3=audio 4=temp_mode 5=temp_delete 6=shared_dirs
-//       7=spoof_hostname 8=spoof_username 9=spoof_machine_id 10=spoof_cpuinfo
-//       11=ram_limit 12=Save
-pub const CFG_LEN: usize = 13;
+//       7=spoof_hostname 8=spoof_username 9=spoof_machine_id 10=spoof_cpuinfo 11=spoof_os
+//       12=ram_limit 13=Save
+pub const CFG_LEN: usize = 14;
 pub const CFG_SHARES: usize = 6;
 pub const CFG_SPOOF_HOSTNAME: usize = 7;
 pub const CFG_SPOOF_USERNAME: usize = 8;
 pub const CFG_SPOOF_MACHINE_ID: usize = 9;
 pub const CFG_SPOOF_CPUINFO: usize = 10;
-pub const CFG_RAM_LIMIT: usize = 11;
-pub const CFG_SAVE: usize = 12;
+pub const CFG_SPOOF_OS: usize = 11;
+pub const CFG_RAM_LIMIT: usize = 12;
+pub const CFG_SAVE: usize = 13;
 
 /// A fixed 32-char hex machine-id that apps can use as a plausible-looking ID.
 pub const MACHINE_ID_SAMPLE: &str = "cafebabe0011223344556677deadbeef";
@@ -1076,6 +1090,8 @@ pub const MACHINE_ID_SAMPLE: &str = "cafebabe0011223344556677deadbeef";
 pub const HOSTNAME_SAMPLE: &str = "workstation";
 /// Generic username used by the "sample" option.
 pub const USERNAME_SAMPLE: &str = "user";
+/// Generic OS name used by the "sample" option.
+pub const OS_RELEASE_SAMPLE: &str = "linux";
 
 fn on_config(app: &mut App, code: KeyCode) {
     let Screen::Config { app_name, config, selected } = &mut app.screen else { return };
@@ -1168,7 +1184,7 @@ pub fn setting_options(idx: usize) -> Vec<&'static str> {
         0..=3 => vec!["on", "off"],
         4 => vec!["system", "ramdisk", "local", "uuid"],
         5 => vec!["never", "on_start", "on_close"],
-        CFG_SPOOF_HOSTNAME | CFG_SPOOF_USERNAME => vec!["system", "sample", "input"],
+        CFG_SPOOF_HOSTNAME | CFG_SPOOF_USERNAME | CFG_SPOOF_OS => vec!["system", "sample", "input"],
         CFG_SPOOF_CPUINFO => vec!["system", "sample", "edit"],
         CFG_SPOOF_MACHINE_ID => vec!["system", "random", "sample", "input"],
         CFG_RAM_LIMIT => vec!["none", "512 MiB", "1 GiB", "2 GiB", "4 GiB", "8 GiB"],
@@ -1190,7 +1206,8 @@ pub fn setting_title(idx: usize) -> &'static str {
         8 => "Spoof username",
         9 => "Spoof machine ID",
         10 => "Spoof CPU info",
-        11 => "RAM limit",
+        11 => "Spoof OS release",
+        12 => "RAM limit",
         _ => "Option",
     }
 }
@@ -1209,7 +1226,8 @@ pub fn setting_description(idx: usize) -> &'static str {
         8 => "Override $USER and $LOGNAME inside the sandbox. 'system' uses your real username; 'sample' sets it to 'user'; 'input' lets you type any custom name.",
         9 => "Override /etc/machine-id inside the sandbox. 'system' uses the real ID; 'random' generates a fresh UUID each launch; 'sample' uses a fixed placeholder; 'input' lets you type a 32-char hex value.",
         10 => "Override /proc/cpuinfo inside the sandbox. 'system' exposes the real CPU; 'sample' shows a generic Intel i7; 'edit' opens a text editor so you can write a fully custom cpuinfo — pre-filled with your real CPU data.",
-        11 => "Maximum RAM the app may use (RAM + swap both capped). Enforced via systemd-run MemoryMax + MemorySwapMax=0. 'none' disables the limit. Requires systemd.",
+        11 => "Override /etc/os-release inside the sandbox. 'system' exposes the real OS info; 'sample' reports a generic 'Linux' identity; 'input' lets you type any OS name (e.g. 'ubuntu') to present to the app.",
+        12 => "Maximum RAM the app may use (RAM + swap both capped). Enforced via systemd-run MemoryMax + MemorySwapMax=0. 'none' disables the limit. Requires systemd.",
         _ => "No description available.",
     }
 }
@@ -1255,13 +1273,17 @@ pub fn option_description(setting_idx: usize, choice_idx: usize) -> &'static str
         (10, 0) => "system — Expose the real /proc/cpuinfo to the app. No spoofing.",
         (10, 1) => "sample — Bind a built-in generic Intel Core i7-8550U cpuinfo. The app won't see your real CPU model.",
         (10, 2) => "edit — Open a text editor (nvim/vim/vi/nano) to write a custom /proc/cpuinfo. Pre-filled with your real CPU info on first use. Content is saved per-app.",
+        // OS release
+        (11, 0) => "system — Expose the real /etc/os-release to the app. No spoofing.",
+        (11, 1) => "sample — Report a generic 'Linux' OS identity. The app won't see your real distribution name.",
+        (11, 2) => "input — Type a custom OS name (e.g. 'ubuntu'). Written to /etc/os-release inside the sandbox.",
         // RAM limit
-        (11, 0) => "none — No RAM limit. The app may use as much memory as the system allows.",
-        (11, 1) => "512 MiB — Hard cap at 512 MiB (RAM + swap). Processes are OOM-killed if they exceed this.",
-        (11, 2) => "1 GiB — Cap the app at 1 GiB (1024 MiB) of RAM.",
-        (11, 3) => "2 GiB — Cap the app at 2 GiB (2048 MiB) of RAM. Good default for everyday apps.",
-        (11, 4) => "4 GiB — Cap the app at 4 GiB (4096 MiB) of RAM.",
-        (11, 5) => "8 GiB — Cap the app at 8 GiB (8192 MiB) of RAM.",
+        (12, 0) => "none — No RAM limit. The app may use as much memory as the system allows.",
+        (12, 1) => "512 MiB — Hard cap at 512 MiB (RAM + swap). Processes are OOM-killed if they exceed this.",
+        (12, 2) => "1 GiB — Cap the app at 1 GiB (1024 MiB) of RAM.",
+        (12, 3) => "2 GiB — Cap the app at 2 GiB (2048 MiB) of RAM. Good default for everyday apps.",
+        (12, 4) => "4 GiB — Cap the app at 4 GiB (4096 MiB) of RAM.",
+        (12, 5) => "8 GiB — Cap the app at 8 GiB (8192 MiB) of RAM.",
         _ => "No description available.",
     }
 }
@@ -1305,6 +1327,11 @@ pub fn setting_current(config: &AppConfig, idx: usize) -> usize {
             None           => 0,
             Some("sample") => 1,
             _              => 2,  // "custom" or legacy path both show as "edit"
+        },
+        CFG_SPOOF_OS => match config.spoof_os.as_deref() {
+            None => 0,
+            Some(v) if v == OS_RELEASE_SAMPLE => 1,
+            _ => 2,
         },
         CFG_RAM_LIMIT => match config.ram_limit {
             None        => 0,
@@ -1355,12 +1382,15 @@ pub fn apply_setting(config: &mut AppConfig, idx: usize, choice: usize) {
         (10, 0) => config.spoof_cpuinfo = None,
         (10, 1) => config.spoof_cpuinfo = Some("sample".to_string()),
         // (10, 2) = "edit" — handled by on_option_picker which opens editor
-        (11, 0) => config.ram_limit = None,
-        (11, 1) => config.ram_limit = Some(512),
-        (11, 2) => config.ram_limit = Some(1024),
-        (11, 3) => config.ram_limit = Some(2048),
-        (11, 4) => config.ram_limit = Some(4096),
-        (11, 5) => config.ram_limit = Some(8192),
+        (11, 0) => config.spoof_os = None,
+        (11, 1) => config.spoof_os = Some(OS_RELEASE_SAMPLE.to_string()),
+        // (11, 2) = "input" — handled by on_option_picker which opens TextInput
+        (12, 0) => config.ram_limit = None,
+        (12, 1) => config.ram_limit = Some(512),
+        (12, 2) => config.ram_limit = Some(1024),
+        (12, 3) => config.ram_limit = Some(2048),
+        (12, 4) => config.ram_limit = Some(4096),
+        (12, 5) => config.ram_limit = Some(8192),
         _ => {}
     }
 }
@@ -1428,9 +1458,9 @@ fn on_option_picker(app: &mut App, code: KeyCode) {
                 return;
             }
 
-            // "input" option opens the free-text overlay for hostname/username/machine-id.
+            // "input" option opens the free-text overlay for hostname/username/machine-id/os.
             let is_input_choice = match idx {
-                CFG_SPOOF_HOSTNAME | CFG_SPOOF_USERNAME => choice == 2,
+                CFG_SPOOF_HOSTNAME | CFG_SPOOF_USERNAME | CFG_SPOOF_OS => choice == 2,
                 CFG_SPOOF_MACHINE_ID => choice == 3,
                 _ => false,
             };
@@ -1439,6 +1469,7 @@ fn on_option_picker(app: &mut App, code: KeyCode) {
                     CFG_SPOOF_HOSTNAME   => cfg.spoof_hostname.clone().unwrap_or_default(),
                     CFG_SPOOF_USERNAME   => cfg.spoof_username.clone().unwrap_or_default(),
                     CFG_SPOOF_MACHINE_ID => cfg.spoof_machine_id.clone().unwrap_or_default(),
+                    CFG_SPOOF_OS         => cfg.spoof_os.clone().unwrap_or_default(),
                     _ => String::new(),
                 };
                 // Clear pre-fill when current value is one of the fixed presets.
@@ -1446,6 +1477,7 @@ fn on_option_picker(app: &mut App, code: KeyCode) {
                     CFG_SPOOF_HOSTNAME   => current == HOSTNAME_SAMPLE,
                     CFG_SPOOF_USERNAME   => current == USERNAME_SAMPLE,
                     CFG_SPOOF_MACHINE_ID => current == "random" || current == MACHINE_ID_SAMPLE,
+                    CFG_SPOOF_OS         => current == OS_RELEASE_SAMPLE,
                     _ => false,
                 };
                 let value = if is_preset || current.is_empty() { String::new() } else { current };
@@ -1517,6 +1549,7 @@ fn set_spoof_field(config: &mut AppConfig, idx: usize, value: String) {
         CFG_SPOOF_USERNAME   => config.spoof_username   = v,
         CFG_SPOOF_MACHINE_ID => config.spoof_machine_id = v,
         CFG_SPOOF_CPUINFO    => config.spoof_cpuinfo    = v,
+        CFG_SPOOF_OS         => config.spoof_os         = v,
         _ => {}
     }
 }

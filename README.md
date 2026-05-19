@@ -443,7 +443,7 @@ wryayer config firefox share list
 
 ### Identity spoofing
 
-Override what the sandbox reports about the host machine. Useful for preventing apps from embedding your real hostname, username, or machine fingerprint in logs, telemetry, or profiles.
+Override what the sandbox reports about the host machine. Useful for preventing apps from embedding your real hostname, username, OS identity, or machine fingerprint in logs, telemetry, or profiles.
 
 ```fish
 # Spoof /etc/hostname and $HOSTNAME
@@ -465,11 +465,18 @@ wryayer config firefox spoof-machine-id a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4
 wryayer config firefox spoof-cpuinfo sample        # built-in generic Intel i7
 wryayer config firefox spoof-cpuinfo ~/fakecpu.txt # custom file
 
+# Spoof /etc/os-release (hide real distro identity from the app)
+wryayer config firefox spoof-os sample   # → generic "Linux"
+wryayer config firefox spoof-os ubuntu   # present as Ubuntu
+wryayer config firefox spoof-os system   # disable
+
 # Disable any spoofing
 wryayer config firefox spoof-hostname system
 ```
 
-All five settings are editable in the TUI config screen (`s` on an installed app). Each row uses a picker; press `?` on any option to see exactly what value will be used.
+All settings are editable in the TUI config screen (`s` on an installed app). Each row uses a picker; press `?` on any row or option to see a description of what the setting does.
+
+Press `?` on the **installed** tab for a full key-bindings reference.
 
 | CLI subcommand | Values | Effect |
 |---|---|---|
@@ -477,6 +484,7 @@ All five settings are editable in the TUI config screen (`s` on an installed app
 | `spoof-username <value\|sample\|system\|off>` | Any string | Sets `$USER` and `$LOGNAME` |
 | `spoof-machine-id <system\|random\|sample\|hex\|off>` | See below | Writes `/etc/machine-id` |
 | `spoof-cpuinfo <sample\|path\|system\|off>` | Path or `sample` | Binds the file over `/proc/cpuinfo` |
+| `spoof-os <sample\|name\|system\|off>` | OS name or `sample` | Writes `/etc/os-release` and `/usr/lib/os-release` |
 
 **Sample values:**
 
@@ -486,6 +494,7 @@ All five settings are editable in the TUI config screen (`s` on an installed app
 | username | `user` |
 | machine-id | `cafebabe0011223344556677deadbeef` |
 | cpuinfo | Built-in generic Intel Core i7-8550U on x86_64 |
+| os-release | `NAME=Linux  ID=linux  PRETTY_NAME=Linux  VERSION_ID=1.0` |
 
 **machine-id modes:**
 

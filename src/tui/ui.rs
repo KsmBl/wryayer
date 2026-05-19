@@ -120,6 +120,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             let title = super::setting_title(field_idx);
             draw_text_input(f, area, title, &value);
         }
+        Screen::KeyHelp => {
+            draw_key_help(f, area);
+        }
     }
 }
 
@@ -381,7 +384,7 @@ fn draw_import(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_statusbar(f: &mut Frame, app: &App, area: Rect) {
     let hint = match app.tab {
-        Tab::Installed => "[Tab] Switch  [r] Run  [d] Delete  [e] Export  [p] Snapshot  [o] Rollback  [c] Check  [u] Update  [s] Config  [q] Quit",
+        Tab::Installed => "[Tab] Switch  [r] Run  [d] Delete  [e] Export  [p] Snapshot  [o] Rollback  [c] Check  [u] Update  [s] Config  [?] Help  [q] Quit",
         Tab::Install   => "[Tab] Switch  Type to search  [↓] Select  [Enter] Install/Uninstall  [q] Quit",
         Tab::Import    => "[Tab] Switch  Type zip path  [Enter] Import  [Esc] Clear  [Shift+Q] Quit",
         Tab::Space     => "[Tab] Switch  [r] Run dedup  [q] Quit",
@@ -1084,6 +1087,71 @@ fn draw_setting_help(f: &mut Frame, area: Rect, setting_idx: usize) {
             " Press any key to close",
             Style::default().fg(C_DIM),
         )),
+        chunks[1],
+    );
+}
+
+// ── Key bindings help popup ───────────────────────────────────────────────────
+
+fn draw_key_help(f: &mut Frame, area: Rect) {
+    const KEYS: &[(&str, &str)] = &[
+        ("r / Enter",  "Run the selected app"),
+        ("d / Del",    "Delete the selected app"),
+        ("e",          "Export app to a zip file"),
+        ("p",          "Create a snapshot"),
+        ("o",          "Roll back to a snapshot"),
+        ("c",          "Check for updates (no install)"),
+        ("u",          "Update the selected app"),
+        ("s",          "Open per-app settings"),
+        ("Tab",        "Switch between tabs"),
+        ("↑ / k",      "Move selection up"),
+        ("↓ / j",      "Move selection down"),
+        ("?",          "Show this help"),
+        ("q / Esc",    "Quit"),
+    ];
+
+    let max_key = KEYS.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
+    let lines: Vec<Line> = KEYS
+        .iter()
+        .map(|(k, v)| {
+            Line::from(vec![
+                Span::styled(
+                    format!("  {:>width$}  ", k, width = max_key),
+                    Style::default().fg(C_ACCENT),
+                ),
+                Span::styled(*v, Style::default().fg(Color::White)),
+            ])
+        })
+        .collect();
+
+    let needed_h = (lines.len() as u16) + 4;
+    let popup = {
+        let w = 52u16.min(area.width);
+        let h = needed_h.min(area.height);
+        Rect {
+            x: area.x + area.width.saturating_sub(w) / 2,
+            y: area.y + area.height.saturating_sub(h) / 2,
+            width: w,
+            height: h,
+        }
+    };
+    f.render_widget(Clear, popup);
+
+    let block = Block::default().borders(Borders::ALL)
+        .title(" ? Key bindings ")
+        .title_style(Style::default().fg(C_YELLOW).add_modifier(Modifier::BOLD))
+        .border_style(Style::default().fg(C_YELLOW));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .split(inner);
+
+    f.render_widget(Paragraph::new(lines), chunks[0]);
+    f.render_widget(
+        Paragraph::new(Span::styled(" Press any key to close", Style::default().fg(C_DIM))),
         chunks[1],
     );
 }
