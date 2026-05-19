@@ -523,13 +523,58 @@ mod arch {
     }
 
     pub fn search(query: &str) -> Vec<String> {
-        let Ok(out) = Command::new("pacman").args(["-Ssq", query]).output() else {
-            return vec![];
+        // Official repos — fast, local pacman sync DB
+        let official: Vec<String> = Command::new("pacman")
+            .args(["-Ssq", query])
+            .output()
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // AUR — RPC search, same endpoint used by dep resolution
+        let official_set: std::collections::HashSet<&str> =
+            official.iter().map(String::as_str).collect();
+        let aur = search_aur(query)
+            .into_iter()
+            .filter(|n| !official_set.contains(n.as_str()))
+            .collect::<Vec<_>>();
+
+        let mut results = official;
+        results.extend(aur);
+        results
+    }
+
+    fn search_aur(query: &str) -> Vec<String> {
+        let url = format!(
+            "https://aur.archlinux.org/rpc/v5/search/{}?by=name-desc",
+            query
+        );
+        let client = match reqwest::blocking::Client::builder()
+            .user_agent("curl/7.88.1")
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+        {
+            Ok(c) => c,
+            Err(_) => return vec![],
         };
-        String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .map(str::to_string)
-            .collect()
+        let Ok(resp) = client.get(&url).send() else { return vec![] };
+        let Ok(json) = resp.json::<serde_json::Value>() else { return vec![] };
+        json.get("results")
+            .and_then(serde_json::Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|p| {
+                        p.get("Name")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_string)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 }
 
