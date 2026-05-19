@@ -450,17 +450,17 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
     }
 
     if let Some(ref os_val) = config.spoof_os {
-        let os_name = if os_val == "sample" { "linux" } else { os_val.as_str() };
-        let pretty = if os_val == "sample" {
-            "Linux".to_string()
-        } else {
-            let mut s = os_val.to_string();
-            s.get_mut(..1).map(|c| c.make_ascii_uppercase());
-            s
+        let content = match os_val.as_str() {
+            "ubuntu" => "NAME=Ubuntu\nID=ubuntu\nPRETTY_NAME=\"Ubuntu 24.04 LTS\"\nVERSION_ID=24.04\nID_LIKE=debian\n".to_string(),
+            "arch"   => "NAME=\"Arch Linux\"\nID=arch\nPRETTY_NAME=\"Arch Linux\"\nBUILD_ID=rolling\n".to_string(),
+            "windows" => "NAME=\"Windows 11\"\nID=windows\nPRETTY_NAME=\"Windows 11\"\nVERSION_ID=11\n".to_string(),
+            "arduinoide" => "NAME=ArduinoIDE\nID=arduinoide\nPRETTY_NAME=ArduinoIDE\nVERSION_ID=2.3\n".to_string(),
+            custom => {
+                let mut pretty = custom.to_string();
+                pretty.get_mut(..1).map(|c| c.make_ascii_uppercase());
+                format!("NAME={pretty}\nID={custom}\nPRETTY_NAME={pretty}\nVERSION_ID=1.0\n")
+            }
         };
-        let content = format!(
-            "NAME={pretty}\nID={os_name}\nPRETTY_NAME={pretty}\nVERSION_ID=1.0\n"
-        );
         let of = spoof_dir.join("os-release");
         let _ = std::fs::write(&of, content);
         if let Some(s) = of.to_str() {

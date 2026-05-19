@@ -858,6 +858,14 @@ fn draw_config(f: &mut Frame, area: Rect, app_name: &str, config: &AppConfig, se
             Some("sample") => " sample ".to_string(),
             Some(s)        => { let t: String = s.chars().take(12).collect(); format!(" {t} ") }
         }),
+        ("OS release ", match config.spoof_os.as_deref() {
+            None               => " system    ".to_string(),
+            Some("ubuntu")     => " Ubuntu    ".to_string(),
+            Some("arch")       => " Arch      ".to_string(),
+            Some("windows")    => " Windows 11".to_string(),
+            Some("arduinoide") => " ArduinoIDE".to_string(),
+            Some(s)            => { let t: String = s.chars().take(12).collect(); format!(" {t} ") }
+        }),
         ("RAM limit  ", match config.ram_limit {
             None      => " none    ".to_string(),
             Some(mib) if mib % 1024 == 0 => format!(" {} GiB  ", mib / 1024),

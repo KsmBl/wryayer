@@ -1090,8 +1090,6 @@ pub const MACHINE_ID_SAMPLE: &str = "cafebabe0011223344556677deadbeef";
 pub const HOSTNAME_SAMPLE: &str = "workstation";
 /// Generic username used by the "sample" option.
 pub const USERNAME_SAMPLE: &str = "user";
-/// Generic OS name used by the "sample" option.
-pub const OS_RELEASE_SAMPLE: &str = "linux";
 
 fn on_config(app: &mut App, code: KeyCode) {
     let Screen::Config { app_name, config, selected } = &mut app.screen else { return };
@@ -1184,7 +1182,8 @@ pub fn setting_options(idx: usize) -> Vec<&'static str> {
         0..=3 => vec!["on", "off"],
         4 => vec!["system", "ramdisk", "local", "uuid"],
         5 => vec!["never", "on_start", "on_close"],
-        CFG_SPOOF_HOSTNAME | CFG_SPOOF_USERNAME | CFG_SPOOF_OS => vec!["system", "sample", "input"],
+        CFG_SPOOF_HOSTNAME | CFG_SPOOF_USERNAME => vec!["system", "sample", "input"],
+        CFG_SPOOF_OS => vec!["system", "Ubuntu", "Arch", "Windows 11", "ArduinoIDE", "input"],
         CFG_SPOOF_CPUINFO => vec!["system", "sample", "edit"],
         CFG_SPOOF_MACHINE_ID => vec!["system", "random", "sample", "input"],
         CFG_RAM_LIMIT => vec!["none", "512 MiB", "1 GiB", "2 GiB", "4 GiB", "8 GiB"],
@@ -1226,7 +1225,7 @@ pub fn setting_description(idx: usize) -> &'static str {
         8 => "Override $USER and $LOGNAME inside the sandbox. 'system' uses your real username; 'sample' sets it to 'user'; 'input' lets you type any custom name.",
         9 => "Override /etc/machine-id inside the sandbox. 'system' uses the real ID; 'random' generates a fresh UUID each launch; 'sample' uses a fixed placeholder; 'input' lets you type a 32-char hex value.",
         10 => "Override /proc/cpuinfo inside the sandbox. 'system' exposes the real CPU; 'sample' shows a generic Intel i7; 'edit' opens a text editor so you can write a fully custom cpuinfo — pre-filled with your real CPU data.",
-        11 => "Override /etc/os-release inside the sandbox. 'system' exposes the real OS info; 'sample' reports a generic 'Linux' identity; 'input' lets you type any OS name (e.g. 'ubuntu') to present to the app.",
+        11 => "Override /etc/os-release inside the sandbox. Choose a preset (Ubuntu, Arch, Windows 11, ArduinoIDE) or 'input' to type any custom OS name. 'system' exposes the real OS release.",
         12 => "Maximum RAM the app may use (RAM + swap both capped). Enforced via systemd-run MemoryMax + MemorySwapMax=0. 'none' disables the limit. Requires systemd.",
         _ => "No description available.",
     }
@@ -1275,8 +1274,11 @@ pub fn option_description(setting_idx: usize, choice_idx: usize) -> &'static str
         (10, 2) => "edit — Open a text editor (nvim/vim/vi/nano) to write a custom /proc/cpuinfo. Pre-filled with your real CPU info on first use. Content is saved per-app.",
         // OS release
         (11, 0) => "system — Expose the real /etc/os-release to the app. No spoofing.",
-        (11, 1) => "sample — Report a generic 'Linux' OS identity. The app won't see your real distribution name.",
-        (11, 2) => "input — Type a custom OS name (e.g. 'ubuntu'). Written to /etc/os-release inside the sandbox.",
+        (11, 1) => "Ubuntu — Presents as Ubuntu 24.04 LTS. Apps see NAME=Ubuntu, ID=ubuntu, VERSION_ID=24.04.",
+        (11, 2) => "Arch — Presents as Arch Linux. Apps see NAME=\"Arch Linux\", ID=arch, BUILD_ID=rolling.",
+        (11, 3) => "Windows 11 — Presents as Windows 11. Apps see NAME=\"Windows 11\", ID=windows, VERSION_ID=11.",
+        (11, 4) => "ArduinoIDE — Presents as ArduinoIDE. Apps see NAME=ArduinoIDE, ID=arduinoide, VERSION_ID=2.3.",
+        (11, 5) => "input — Type a custom OS name (e.g. 'fedora'). Used as ID= and NAME= in /etc/os-release inside the sandbox.",
         // RAM limit
         (12, 0) => "none — No RAM limit. The app may use as much memory as the system allows.",
         (12, 1) => "512 MiB — Hard cap at 512 MiB (RAM + swap). Processes are OOM-killed if they exceed this.",
@@ -1329,9 +1331,12 @@ pub fn setting_current(config: &AppConfig, idx: usize) -> usize {
             _              => 2,  // "custom" or legacy path both show as "edit"
         },
         CFG_SPOOF_OS => match config.spoof_os.as_deref() {
-            None => 0,
-            Some(v) if v == OS_RELEASE_SAMPLE => 1,
-            _ => 2,
+            None               => 0,
+            Some("ubuntu")     => 1,
+            Some("arch")       => 2,
+            Some("windows")    => 3,
+            Some("arduinoide") => 4,
+            _                  => 5,
         },
         CFG_RAM_LIMIT => match config.ram_limit {
             None        => 0,
@@ -1383,8 +1388,11 @@ pub fn apply_setting(config: &mut AppConfig, idx: usize, choice: usize) {
         (10, 1) => config.spoof_cpuinfo = Some("sample".to_string()),
         // (10, 2) = "edit" — handled by on_option_picker which opens editor
         (11, 0) => config.spoof_os = None,
-        (11, 1) => config.spoof_os = Some(OS_RELEASE_SAMPLE.to_string()),
-        // (11, 2) = "input" — handled by on_option_picker which opens TextInput
+        (11, 1) => config.spoof_os = Some("ubuntu".to_string()),
+        (11, 2) => config.spoof_os = Some("arch".to_string()),
+        (11, 3) => config.spoof_os = Some("windows".to_string()),
+        (11, 4) => config.spoof_os = Some("arduinoide".to_string()),
+        // (11, 5) = "input" — handled by on_option_picker which opens TextInput
         (12, 0) => config.ram_limit = None,
         (12, 1) => config.ram_limit = Some(512),
         (12, 2) => config.ram_limit = Some(1024),
@@ -1460,7 +1468,8 @@ fn on_option_picker(app: &mut App, code: KeyCode) {
 
             // "input" option opens the free-text overlay for hostname/username/machine-id/os.
             let is_input_choice = match idx {
-                CFG_SPOOF_HOSTNAME | CFG_SPOOF_USERNAME | CFG_SPOOF_OS => choice == 2,
+                CFG_SPOOF_HOSTNAME | CFG_SPOOF_USERNAME => choice == 2,
+                CFG_SPOOF_OS => choice == 5,
                 CFG_SPOOF_MACHINE_ID => choice == 3,
                 _ => false,
             };
@@ -1477,7 +1486,7 @@ fn on_option_picker(app: &mut App, code: KeyCode) {
                     CFG_SPOOF_HOSTNAME   => current == HOSTNAME_SAMPLE,
                     CFG_SPOOF_USERNAME   => current == USERNAME_SAMPLE,
                     CFG_SPOOF_MACHINE_ID => current == "random" || current == MACHINE_ID_SAMPLE,
-                    CFG_SPOOF_OS         => current == OS_RELEASE_SAMPLE,
+                    CFG_SPOOF_OS         => matches!(current.as_str(), "ubuntu" | "arch" | "windows" | "arduinoide"),
                     _ => false,
                 };
                 let value = if is_preset || current.is_empty() { String::new() } else { current };

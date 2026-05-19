@@ -466,9 +466,12 @@ wryayer config firefox spoof-cpuinfo sample        # built-in generic Intel i7
 wryayer config firefox spoof-cpuinfo ~/fakecpu.txt # custom file
 
 # Spoof /etc/os-release (hide real distro identity from the app)
-wryayer config firefox spoof-os sample   # → generic "Linux"
-wryayer config firefox spoof-os ubuntu   # present as Ubuntu
-wryayer config firefox spoof-os system   # disable
+wryayer config firefox spoof-os ubuntu      # present as Ubuntu 24.04 LTS
+wryayer config firefox spoof-os arch        # present as Arch Linux
+wryayer config firefox spoof-os windows     # present as Windows 11
+wryayer config firefox spoof-os arduinoide  # present as ArduinoIDE
+wryayer config firefox spoof-os fedora      # custom: any name works via "input" in TUI
+wryayer config firefox spoof-os system      # disable
 
 # Disable any spoofing
 wryayer config firefox spoof-hostname system
@@ -484,7 +487,7 @@ Press `?` on the **installed** tab for a full key-bindings reference.
 | `spoof-username <value\|sample\|system\|off>` | Any string | Sets `$USER` and `$LOGNAME` |
 | `spoof-machine-id <system\|random\|sample\|hex\|off>` | See below | Writes `/etc/machine-id` |
 | `spoof-cpuinfo <sample\|path\|system\|off>` | Path or `sample` | Binds the file over `/proc/cpuinfo` |
-| `spoof-os <sample\|name\|system\|off>` | OS name or `sample` | Writes `/etc/os-release` and `/usr/lib/os-release` |
+| `spoof-os <ubuntu\|arch\|windows\|arduinoide\|name\|system\|off>` | Preset or any OS name | Writes `/etc/os-release` and `/usr/lib/os-release` |
 
 **Sample values:**
 
@@ -494,7 +497,7 @@ Press `?` on the **installed** tab for a full key-bindings reference.
 | username | `user` |
 | machine-id | `cafebabe0011223344556677deadbeef` |
 | cpuinfo | Built-in generic Intel Core i7-8550U on x86_64 |
-| os-release | `NAME=Linux  ID=linux  PRETTY_NAME=Linux  VERSION_ID=1.0` |
+| os-release presets | `ubuntu` → Ubuntu 24.04 LTS · `arch` → Arch Linux · `windows` → Windows 11 · `arduinoide` → ArduinoIDE · any other value used as a custom OS name |
 
 **machine-id modes:**
 

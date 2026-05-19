@@ -163,9 +163,12 @@ complete -c wryayer -n "__fish_seen_subcommand_from spoofcpuinfo" -a system -d '
 complete -c wryayer -n "__fish_seen_subcommand_from spoofcpuinfo" -a sample -d 'Built-in generic Intel Core i7-8550U cpuinfo'
 complete -c wryayer -n "__fish_seen_subcommand_from spoofcpuinfo" -a off    -d 'Alias for system — remove spoofing'
 
-complete -c wryayer -n "__fish_seen_subcommand_from spoofos" -a system -d 'Use real /etc/os-release (no spoofing)'
-complete -c wryayer -n "__fish_seen_subcommand_from spoofos" -a sample -d 'Generic Linux identity (ID=linux)'
-complete -c wryayer -n "__fish_seen_subcommand_from spoofos" -a off    -d 'Alias for system — remove spoofing'
+complete -c wryayer -n "__fish_seen_subcommand_from spoofos" -a system     -d 'Use real /etc/os-release (no spoofing)'
+complete -c wryayer -n "__fish_seen_subcommand_from spoofos" -a ubuntu     -d 'Spoof as Ubuntu 24.04 LTS'
+complete -c wryayer -n "__fish_seen_subcommand_from spoofos" -a arch       -d 'Spoof as Arch Linux'
+complete -c wryayer -n "__fish_seen_subcommand_from spoofos" -a windows    -d 'Spoof as Windows 11'
+complete -c wryayer -n "__fish_seen_subcommand_from spoofos" -a arduinoide -d 'Spoof as ArduinoIDE'
+complete -c wryayer -n "__fish_seen_subcommand_from spoofos" -a off        -d 'Alias for system — remove spoofing'
 
 # Level 3i — ramlimit values
 complete -c wryayer -n "__fish_seen_subcommand_from ramlimit" -a none -d 'No RAM limit (default)'
