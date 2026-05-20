@@ -473,6 +473,10 @@ wryayer config firefox spoof-os arduinoide  # present as ArduinoIDE
 wryayer config firefox spoof-os fedora      # custom: any name works via "input" in TUI
 wryayer config firefox spoof-os system      # disable
 
+# Spoof terminal — fix fastfetch showing "bwrap" instead of your real terminal
+wryayer config fastfetch spoof-terminal on   # detect kitty/foot/alacritty/… and set TERM_PROGRAM
+wryayer config fastfetch spoof-terminal off  # disable (default)
+
 # Disable any spoofing
 wryayer config firefox spoof-hostname system
 ```
@@ -488,6 +492,7 @@ Press `?` on the **installed** tab for a full key-bindings reference.
 | `spoof-machine-id <system\|random\|sample\|hex\|off>` | See below | Writes `/etc/machine-id` |
 | `spoof-cpuinfo <sample\|path\|system\|off>` | Path or `sample` | Binds the file over `/proc/cpuinfo` |
 | `spoof-os <ubuntu\|arch\|windows\|arduinoide\|name\|system\|off>` | Preset or any OS name | Writes `/etc/os-release` and `/usr/lib/os-release` |
+| `spoof-terminal <on\|off>` | `on` or `off` | Detects real terminal via process tree and sets `TERM_PROGRAM` inside sandbox |
 
 **Sample values:**
 

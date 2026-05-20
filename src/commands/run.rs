@@ -469,6 +469,30 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
         }
     }
 
+    // ── Terminal spoofing ─────────────────────────────────────────────────────────
+    // Walk the outer process tree to find the real terminal emulator and set
+    // TERM_PROGRAM so fastfetch/neofetch report the correct terminal instead
+    // of "bwrap" (which is what the process-tree walk inside bwrap finds).
+    if config.spoof_terminal {
+        let term_prog = std::env::var("TERM_PROGRAM").unwrap_or_default();
+        // If the terminal already set TERM_PROGRAM, we only need to ensure it's
+        // forwarded — it's already inherited since we never call env_clear().
+        // If not, detect via process tree and synthesise the right vars.
+        if term_prog.is_empty() {
+            if let Some(detected) = detect_terminal_name() {
+                let prog = terminal_program_name(&detected);
+                // Set terminal-specific identifiers that fastfetch checks before
+                // falling back to the process-tree walk (which would find "bwrap").
+                if detected == "kitty" && std::env::var("KITTY_WINDOW_ID").is_err() {
+                    cmd.env("KITTY_WINDOW_ID", "1");
+                } else if detected.starts_with("wezterm") && std::env::var("WEZTERM_PANE").is_err() {
+                    cmd.env("WEZTERM_PANE", "0");
+                }
+                cmd.env("TERM_PROGRAM", prog);
+            }
+        }
+    }
+
     // ── Isolated XDG_RUNTIME_DIR ───────────────────────────────────────────────
     //
     // Electron/Qt apps (VS Code, Discord, …) store per-instance IPC sockets in
@@ -582,6 +606,65 @@ fn fix_home_sonames(app_root: &Path) -> bool {
         run_ldconfig(app_root);
     }
     any_installed
+}
+
+// ── Terminal detection helpers ────────────────────────────────────────────────
+
+/// Walk /proc upward from the current process to find the name of the running
+/// terminal emulator. Returns the comm name of the first recognised terminal
+/// ancestor, or None if nothing was found within 32 hops.
+fn detect_terminal_name() -> Option<String> {
+    const KNOWN: &[&str] = &[
+        "kitty", "foot", "footclient", "alacritty", "wezterm", "wezterm-gui",
+        "ghostty", "gnome-terminal", "gnome-terminal-", "konsole", "xterm",
+        "urxvt", "rxvt", "st", "xfce4-terminal", "tilix", "termite",
+        "sakura", "lxterminal", "mate-terminal", "terminator",
+    ];
+
+    let mut pid = unsafe { libc::getpid() };
+    for _ in 0..32 {
+        let status = std::fs::read_to_string(format!("/proc/{pid}/status"))
+            .unwrap_or_default();
+        let ppid: i32 = status.lines()
+            .find_map(|l| {
+                l.strip_prefix("PPid:").map(|v| v.trim().parse().ok())
+            })
+            .flatten()
+            .unwrap_or(0);
+        if ppid <= 1 { break; }
+        let comm = std::fs::read_to_string(format!("/proc/{ppid}/comm"))
+            .unwrap_or_default();
+        let comm = comm.trim();
+        for &t in KNOWN {
+            if comm == t || comm.starts_with(t) {
+                return Some(comm.to_string());
+            }
+        }
+        pid = ppid;
+    }
+    None
+}
+
+/// Map a detected terminal comm name to the canonical TERM_PROGRAM string
+/// that fastfetch (and other tools) recognise.
+fn terminal_program_name(comm: &str) -> String {
+    if comm.starts_with("wezterm") { return "WezTerm".into(); }
+    match comm {
+        "kitty"                      => "kitty",
+        "foot" | "footclient"        => "foot",
+        "alacritty"                  => "alacritty",
+        "ghostty"                    => "ghostty",
+        "gnome-terminal"
+        | "gnome-terminal-"          => "GNOME Terminal",
+        "konsole"                    => "konsole",
+        "xfce4-terminal"             => "xfce4-terminal",
+        "xterm"                      => "xterm",
+        "urxvt" | "rxvt"             => "rxvt-unicode",
+        "tilix"                      => "tilix",
+        "terminator"                 => "Terminator",
+        other                        => return other.to_string(),
+    }
+    .to_string()
 }
 
 /// Bind /dev/null over every file in `dir` whose name starts with `prefix`.

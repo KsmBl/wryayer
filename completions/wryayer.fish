@@ -158,13 +158,14 @@ complete -c wryayer -n '__fish_seen_subcommand_from completions' \
 #           config firefox spoof-machine-id <TAB>     → system random sample off
 #           config firefox spoof-cpuinfo <TAB>        → sample system off (+ files)
 #           config firefox spoof-os <TAB>             → system ubuntu arch windows arduinoide off
+#           config firefox spoof-terminal <TAB>       → on off
 #           config firefox ram-limit <TAB>            → none 512 1024 2048 4096 8192
 
 set -l cfg_settings \
     tempmode tempdelete \
     network camera microphone audio \
     share \
-    spoof-hostname spoof-username spoof-machine-id spoof-cpuinfo spoof-os \
+    spoof-hostname spoof-username spoof-machine-id spoof-cpuinfo spoof-os spoof-terminal \
     ram-limit
 
 # ── Level 1 — app name ────────────────────────────────────────────────────────
@@ -209,6 +210,9 @@ complete -c wryayer \
 complete -c wryayer \
     -n "__fish_seen_subcommand_from config; and __wryayer_config_has_app; and not __fish_seen_subcommand_from $cfg_settings" \
     -a spoof-os        -d 'Override /etc/os-release inside the sandbox'
+complete -c wryayer \
+    -n "__fish_seen_subcommand_from config; and __wryayer_config_has_app; and not __fish_seen_subcommand_from $cfg_settings" \
+    -a spoof-terminal  -d 'Detect real terminal and pass it into sandbox (fixes fastfetch showing bwrap)'
 complete -c wryayer \
     -n "__fish_seen_subcommand_from config; and __wryayer_config_has_app; and not __fish_seen_subcommand_from $cfg_settings" \
     -a ram-limit       -d 'Limit maximum RAM usage in MiB (requires systemd)'
@@ -270,6 +274,10 @@ complete -c wryayer -n '__fish_seen_subcommand_from spoof-os' -a arch       -d '
 complete -c wryayer -n '__fish_seen_subcommand_from spoof-os' -a windows    -d 'Spoof as Windows 11'
 complete -c wryayer -n '__fish_seen_subcommand_from spoof-os' -a arduinoide -d 'Spoof as ArduinoIDE'
 complete -c wryayer -n '__fish_seen_subcommand_from spoof-os' -a off        -d 'Alias for system — disable spoofing'
+
+# ── Level 3i2 — spoof-terminal values ────────────────────────────────────────
+complete -c wryayer -n '__fish_seen_subcommand_from spoof-terminal' -a on  -d 'Detect real terminal and set TERM_PROGRAM inside the sandbox'
+complete -c wryayer -n '__fish_seen_subcommand_from spoof-terminal' -a off -d 'Disable terminal spoofing (default)'
 
 # ── Level 3j — ram-limit values ──────────────────────────────────────────────
 complete -c wryayer -n '__fish_seen_subcommand_from ram-limit' -a none -d 'No RAM limit (default)'
