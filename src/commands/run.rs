@@ -109,7 +109,7 @@ pub fn run(app_name: &str, bin: Option<&str>, args: &[String]) -> Result<()> {
         // Replace this process with a fresh bwrap so the retry gets a clean
         // exec() hand-off (correct signal disposition, no extra wryayer in the
         // process tree).
-        let mut cmd = bwrap_cmd(&app_root_str, &binary, args, &temp, &config);
+        let (mut cmd, _) = bwrap_cmd(&app_root_str, &binary, args, &temp, &config);
         set_bwrap_env(&mut cmd);
         if let Some(mib) = config.ram_limit {
             if has_systemd_run() {
@@ -130,7 +130,7 @@ fn launch_bwrap(
     temp: &TempBind,
     config: &AppConfig,
 ) -> Result<ExitStatus> {
-    let mut cmd = bwrap_cmd(app_root_str, binary, args, temp, config);
+    let (mut cmd, spoof_dir) = bwrap_cmd(app_root_str, binary, args, temp, config);
     set_bwrap_env(&mut cmd);
     if let Some(mib) = config.ram_limit {
         if has_systemd_run() {
@@ -139,7 +139,11 @@ fn launch_bwrap(
             eprintln!("warning: systemd-run not found — running without RAM limit");
         }
     }
-    cmd.status().context("failed to run bwrap")
+    let status = cmd.status().context("failed to run bwrap")?;
+    if let Some(dir) = spoof_dir {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    Ok(status)
 }
 
 fn set_bwrap_env(cmd: &mut Command) {
@@ -261,8 +265,20 @@ pub fn wrap_with_ram_limit(inner: Command, mib: u64) -> Command {
 
 // ── bwrap command builder ─────────────────────────────────────────────────────
 
-fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, config: &AppConfig) -> Command {
-    let mut cmd = Command::new("bwrap");
+fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, config: &AppConfig) -> (Command, Option<PathBuf>) {
+    // Terminal spoofing: exec bwrap through a symlink named after the detected
+    // terminal. Linux sets task->comm from the exec basename, so fastfetch's
+    // process-tree walk sees the terminal name instead of "bwrap".
+    let (bwrap_exe, term_spoof_dir): (PathBuf, Option<PathBuf>) = if config.spoof_terminal {
+        match make_bwrap_spoof_exe() {
+            Some((link, dir)) => (link, Some(dir)),
+            None => (resolve_bwrap_path(), None),
+        }
+    } else {
+        (PathBuf::from("bwrap"), None)
+    };
+
+    let mut cmd = Command::new(&bwrap_exe);
 
     cmd.args(["--bind", app_root, "/"]);
     cmd.args(["--dev-bind", "/dev", "/dev"]);
@@ -469,17 +485,6 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
         }
     }
 
-    // ── Terminal spoofing ─────────────────────────────────────────────────────────
-    // Walk the outer process tree to find the real terminal emulator, then set
-    // the env var that fastfetch/neofetch actually use to detect that terminal.
-    // Each terminal has its own specific env var — TERM_PROGRAM is NOT a generic
-    // solution (fastfetch only recognises it for ghostty and WezTerm).
-    if config.spoof_terminal {
-        if let Some(detected) = detect_terminal_name() {
-            apply_terminal_env(&mut cmd, &detected);
-        }
-    }
-
     // ── Isolated XDG_RUNTIME_DIR ───────────────────────────────────────────────
     //
     // Electron/Qt apps (VS Code, Discord, …) store per-instance IPC sockets in
@@ -534,7 +539,7 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
 
     cmd.args(["--", binary]);
     cmd.args(args);
-    cmd
+    (cmd, term_spoof_dir)
 }
 
 /// Scan the sandbox's `home/` subtree for ELF files with missing soname
@@ -632,56 +637,30 @@ fn detect_terminal_name() -> Option<String> {
     None
 }
 
-/// Set the env var(s) that fastfetch actually checks to identify each terminal.
-/// Each terminal has its own detection scheme — there is no single generic var.
-fn apply_terminal_env(cmd: &mut Command, comm: &str) {
-    let current_term = std::env::var("TERM").unwrap_or_default();
+/// Find the absolute path to bwrap by searching PATH.
+fn resolve_bwrap_path() -> PathBuf {
+    std::env::var_os("PATH")
+        .and_then(|p| {
+            std::env::split_paths(&p).find_map(|d| {
+                let b = d.join("bwrap");
+                if b.exists() { Some(b) } else { None }
+            })
+        })
+        .unwrap_or_else(|| PathBuf::from("/usr/bin/bwrap"))
+}
 
-    if comm == "kitty" {
-        // fastfetch checks KITTY_WINDOW_ID (set by kitty; may be absent when
-        // running through a launcher script that does exec).
-        if std::env::var("KITTY_WINDOW_ID").is_err() {
-            cmd.env("KITTY_WINDOW_ID", "1");
-        }
-    } else if comm == "foot" || comm == "footclient" {
-        // fastfetch detects foot by checking whether $TERM starts with "foot".
-        // foot can be configured to use "xterm-256color" instead, so we force it.
-        if !current_term.starts_with("foot") {
-            cmd.env("TERM", "foot");
-        }
-    } else if comm == "alacritty" {
-        // fastfetch checks $TERM == "alacritty" (alacritty sets this by default).
-        if current_term != "alacritty" {
-            cmd.env("TERM", "alacritty");
-        }
-    } else if comm.starts_with("wezterm") {
-        // fastfetch checks WEZTERM_PANE (always set by wezterm; may be absent
-        // when exec'd through a launcher).
-        if std::env::var("WEZTERM_PANE").is_err() {
-            cmd.env("WEZTERM_PANE", "0");
-        }
-    } else if comm == "ghostty" {
-        // fastfetch checks TERM_PROGRAM=ghostty.  ghostty sets this itself;
-        // force it in case the launcher stripped it.
-        cmd.env("TERM_PROGRAM", "ghostty");
-    } else if comm.starts_with("gnome-terminal")
-        || comm == "xfce4-terminal"
-        || comm == "tilix"
-        || comm == "mate-terminal"
-    {
-        // VTE-based terminals: fastfetch checks VTE_VERSION.
-        if std::env::var("VTE_VERSION").is_err() {
-            cmd.env("VTE_VERSION", "7400");
-        }
-    } else if comm == "konsole" {
-        // fastfetch checks KONSOLE_VERSION.
-        if std::env::var("KONSOLE_VERSION").is_err() {
-            cmd.env("KONSOLE_VERSION", "220401");
-        }
-    }
-    // For terminals that set their own distinctive env vars (WezTerm sets
-    // TERM_PROGRAM, GNOME Terminal/VTE sets VTE_VERSION, etc.) the values are
-    // already inherited from the outer environment — no override needed.
+/// Create a symlink `/tmp/.wryayer-spoof-<pid>/<term>` → bwrap and return
+/// `(symlink_path, dir_to_clean_up)`.  The symlink name sets task->comm in the
+/// exec'd process — fastfetch reads comm, not env vars, for terminal detection.
+fn make_bwrap_spoof_exe() -> Option<(PathBuf, PathBuf)> {
+    let term = detect_terminal_name()?;
+    let bwrap = resolve_bwrap_path();
+    let dir = PathBuf::from(format!("/tmp/.wryayer-spoof-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).ok()?;
+    let link = dir.join(&term);
+    let _ = std::fs::remove_file(&link);
+    std::os::unix::fs::symlink(&bwrap, &link).ok()?;
+    Some((link, dir))
 }
 
 /// Bind /dev/null over every file in `dir` whose name starts with `prefix`.
