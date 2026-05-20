@@ -49,6 +49,9 @@ pub struct AppConfig {
     pub spoof_cpuinfo: Option<String>,
     /// Override /etc/os-release inside the sandbox — "sample" uses a generic ID; any other value is used as the OS name
     pub spoof_os: Option<String>,
+    /// Detect the real terminal emulator and pass it into the sandbox via TERM_PROGRAM
+    /// so tools like fastfetch report the correct terminal instead of "bwrap".
+    pub spoof_terminal: bool,
     /// Maximum RAM the app may use in MiB — enforced via systemd-run (None = no limit)
     pub ram_limit: Option<u64>,
 }
@@ -68,6 +71,7 @@ impl Default for AppConfig {
             spoof_machine_id: None,
             spoof_cpuinfo: None,
             spoof_os: None,
+            spoof_terminal: false,
             ram_limit: None,
         }
     }
@@ -161,6 +165,9 @@ pub fn parse_ini(content: &str) -> Result<AppConfig> {
             ("spoof_os", v) => {
                 config.spoof_os = if v.is_empty() || v == "off" || v == "system" { None } else { Some(v.to_owned()) };
             }
+            ("spoof_terminal", v) => {
+                config.spoof_terminal = matches!(v, "on" | "true" | "1");
+            }
             ("ram_limit", v) => {
                 config.ram_limit = if v.is_empty() || v == "0" || v == "off" || v == "none" {
                     None
@@ -236,7 +243,8 @@ pub fn format_ini(config: &AppConfig) -> String {
         || config.spoof_username.is_some()
         || config.spoof_machine_id.is_some()
         || config.spoof_cpuinfo.is_some()
-        || config.spoof_os.is_some();
+        || config.spoof_os.is_some()
+        || config.spoof_terminal;
     if has_spoof {
         s.push_str("\n[spoof]\n");
         s.push_str("; spoof_machine_id = random  — fresh UUID on every launch\n");
@@ -254,6 +262,9 @@ pub fn format_ini(config: &AppConfig) -> String {
         }
         if let Some(ref v) = config.spoof_os {
             s.push_str(&format!("spoof_os = {v}\n"));
+        }
+        if config.spoof_terminal {
+            s.push_str("spoof_terminal = on\n");
         }
     }
     if let Some(mib) = config.ram_limit {

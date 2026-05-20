@@ -60,6 +60,11 @@ pub enum Screen {
         started: Instant,
         reload: bool,
         show_log: bool,
+        /// Set when the subprocess emits `PROMPT_LAUNCHER_CHOICE:<pkg>:<bins>`.
+        /// Triggers the NoLauncherChoice popup once the operation finishes.
+        launcher_choice: Option<(String, Vec<String>)>,
+        /// The --into target from the original install, if this was a merge install.
+        into_target: Option<String>,
     },
     Config {
         app_name: String,
@@ -134,6 +139,15 @@ pub enum Screen {
         pkg: String,
         selected: usize, // 0 = install second copy, 1 = uninstall
     },
+    /// Shown after an install fails because no binary was found in the package.
+    /// User picks "keep without launcher" or "clean up (already done)".
+    NoLauncherChoice {
+        pkg: String,
+        available_bins: Vec<String>,
+        selected: usize, // 0 = keep, 1 = clean (already done)
+        /// The --into target if this was a merge install, so the retry can pass it.
+        into_target: Option<String>,
+    },
 }
 
 pub enum PendingAction {
@@ -170,11 +184,12 @@ pub struct App {
     pub update_available: HashMap<String, String>,
     // Install tab — async search
     pub search_input: String,
-    pub search_results: Vec<String>,
+    /// (package_name, optional_repo) pairs returned by pkg_search.
+    pub search_results: Vec<(String, Option<String>)>,
     pub search_searching: bool,
     pub search_gen: u64,
-    pub search_tx: Sender<(u64, Vec<String>)>,
-    pub search_rx: Receiver<(u64, Vec<String>)>,
+    pub search_tx: Sender<(u64, Vec<(String, Option<String>)>)>,
+    pub search_rx: Receiver<(u64, Vec<(String, Option<String>)>)>,
     pub avail_state: ListState,
     pub search_list_focused: bool,
     // Import tab
@@ -264,7 +279,7 @@ impl App {
         self.avail_state
             .selected()
             .and_then(|i| self.search_results.get(i))
-            .map(String::as_str)
+            .map(|(name, _)| name.as_str())
     }
 }
 
@@ -288,11 +303,20 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(
 
     loop {
         // Drain op channel
-        if let Screen::Operation { rx, log, done, success, progress, .. } = &mut app.screen {
+        if let Screen::Operation { rx, log, done, success, progress, launcher_choice, .. } = &mut app.screen {
             loop {
                 match rx.try_recv() {
                     Ok(Msg::Line(l)) => {
-                        if let Some(p) = parse_progress(&l) {
+                        if let Some(rest) = l.strip_prefix("PROMPT_LAUNCHER_CHOICE:") {
+                            if let Some((pkg, bins_str)) = rest.split_once(':') {
+                                let bins: Vec<String> = if bins_str.is_empty() {
+                                    vec![]
+                                } else {
+                                    bins_str.split(',').map(str::to_string).collect()
+                                };
+                                *launcher_choice = Some((pkg.to_string(), bins));
+                            }
+                        } else if let Some(p) = parse_progress(&l) {
                             *progress = Some(p);
                         } else {
                             log.push(l);
@@ -301,6 +325,15 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(
                     Ok(Msg::Done(ok)) => { *done = true; *success = ok; }
                     Err(_) => break,
                 }
+            }
+        }
+
+        // Auto-transition to NoLauncherChoice popup when op finishes with the marker set.
+        if let Screen::Operation { done: true, success: false, launcher_choice: Some(_), .. } = &app.screen {
+            let screen = std::mem::replace(&mut app.screen, Screen::Main);
+            if let Screen::Operation { launcher_choice: Some((pkg, bins)), into_target, .. } = screen {
+                app.screen = Screen::NoLauncherChoice { pkg, available_bins: bins, selected: 0, into_target };
+                app.needs_clear = true;
             }
         }
 
@@ -525,6 +558,7 @@ fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
         Screen::RenameApp { .. } => 13,
         Screen::DuplicateInstall { .. } => 14,
         Screen::AlreadyInstalled { .. } => 15,
+        Screen::NoLauncherChoice { .. } => 16,
     };
 
     match tag {
@@ -544,6 +578,7 @@ fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
         13 => on_rename_app(app, code),
         14 => on_duplicate_install(app, code),
         15 => on_already_installed(app, code),
+        16 => on_no_launcher_choice(app, code),
         _ => {}
     }
     Ok(())
@@ -615,11 +650,19 @@ fn on_installed(app: &mut App, code: KeyCode) {
         }
         KeyCode::Char('r') | KeyCode::Enter => {
             if let Some(m) = app.selected_installed() {
-                // Hand off to the event loop, which will suspend the TUI and
-                // run the app attached to the real terminal. Going through the
-                // operation overlay (with piped stdout) would mangle interactive
-                // and ANSI-art output.
-                app.run_request = Some(m.app.name.clone());
+                if m.app.main_binary.is_empty() {
+                    app.status = format!(
+                        "'{}' has no launcher — reinstall with: wryayer install --bin-names <name> {}",
+                        m.app.name,
+                        m.app.pkg_name.as_deref().unwrap_or(&m.app.name),
+                    );
+                } else {
+                    // Hand off to the event loop, which will suspend the TUI and
+                    // run the app attached to the real terminal. Going through the
+                    // operation overlay (with piped stdout) would mangle interactive
+                    // and ANSI-art output.
+                    app.run_request = Some(m.app.name.clone());
+                }
             }
         }
         KeyCode::Char('d') | KeyCode::Delete => {
@@ -889,6 +932,50 @@ fn on_already_installed(app: &mut App, code: KeyCode) {
                             danger: true,
                         };
                     }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+// ── No-launcher choice popup ──────────────────────────────────────────────────
+
+fn on_no_launcher_choice(app: &mut App, code: KeyCode) {
+    let Screen::NoLauncherChoice { pkg, selected, into_target, .. } = &mut app.screen else { return };
+    match code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            app.screen = Screen::Main;
+            app.needs_clear = true;
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            if *selected > 0 { *selected -= 1; }
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if *selected < 1 { *selected += 1; }
+        }
+        KeyCode::Enter | KeyCode::Char(' ') => {
+            let pkg = pkg.clone();
+            let into_target = into_target.clone();
+            match *selected {
+                0 => {
+                    // Re-run install with --keep-without-launcher, preserving --into if set.
+                    let mut args = vec!["install".into(), pkg.clone(), "--keep-without-launcher".into()];
+                    if let Some(t) = &into_target {
+                        args.extend(["--into".into(), t.clone()]);
+                    }
+                    launch_op(
+                        app,
+                        format!("Install — {pkg} (no launcher)"),
+                        args,
+                        None,
+                        true,
+                    );
+                }
+                _ => {
+                    // Clean up — install already cleaned up on error; just go back.
+                    app.screen = Screen::Main;
+                    app.needs_clear = true;
                 }
             }
         }
@@ -1224,16 +1311,17 @@ fn on_op_done(app: &mut App, code: KeyCode) -> Result<()> {
 
 // Rows: 0=network 1=camera 2=microphone 3=audio 4=temp_mode 5=temp_delete 6=shared_dirs
 //       7=spoof_hostname 8=spoof_username 9=spoof_machine_id 10=spoof_cpuinfo 11=spoof_os
-//       12=ram_limit 13=Save
-pub const CFG_LEN: usize = 14;
+//       12=spoof_terminal 13=ram_limit 14=Save
+pub const CFG_LEN: usize = 15;
 pub const CFG_SHARES: usize = 6;
 pub const CFG_SPOOF_HOSTNAME: usize = 7;
 pub const CFG_SPOOF_USERNAME: usize = 8;
 pub const CFG_SPOOF_MACHINE_ID: usize = 9;
 pub const CFG_SPOOF_CPUINFO: usize = 10;
 pub const CFG_SPOOF_OS: usize = 11;
-pub const CFG_RAM_LIMIT: usize = 12;
-pub const CFG_SAVE: usize = 13;
+pub const CFG_SPOOF_TERMINAL: usize = 12;
+pub const CFG_RAM_LIMIT: usize = 13;
+pub const CFG_SAVE: usize = 14;
 
 /// A fixed 32-char hex machine-id that apps can use as a plausible-looking ID.
 pub const MACHINE_ID_SAMPLE: &str = "cafebabe0011223344556677deadbeef";
@@ -1337,6 +1425,7 @@ pub fn setting_options(idx: usize) -> Vec<&'static str> {
         CFG_SPOOF_OS => vec!["system", "Ubuntu", "Arch", "Windows 11", "ArduinoIDE", "input"],
         CFG_SPOOF_CPUINFO => vec!["system", "sample", "edit"],
         CFG_SPOOF_MACHINE_ID => vec!["system", "random", "sample", "input"],
+        CFG_SPOOF_TERMINAL => vec!["off", "on"],
         CFG_RAM_LIMIT => vec!["none", "512 MiB", "1 GiB", "2 GiB", "4 GiB", "8 GiB"],
         _ => vec![],
     }
@@ -1357,7 +1446,8 @@ pub fn setting_title(idx: usize) -> &'static str {
         9 => "Spoof machine ID",
         10 => "Spoof CPU info",
         11 => "Spoof OS release",
-        12 => "RAM limit",
+        12 => "Spoof terminal",
+        13 => "RAM limit",
         _ => "Option",
     }
 }
@@ -1377,7 +1467,8 @@ pub fn setting_description(idx: usize) -> &'static str {
         9 => "Override /etc/machine-id inside the sandbox. 'system' uses the real ID; 'random' generates a fresh UUID each launch; 'sample' uses a fixed placeholder; 'input' lets you type a 32-char hex value.",
         10 => "Override /proc/cpuinfo inside the sandbox. 'system' exposes the real CPU; 'sample' shows a generic Intel i7; 'edit' opens a text editor so you can write a fully custom cpuinfo — pre-filled with your real CPU data.",
         11 => "Override /etc/os-release inside the sandbox. Choose a preset (Ubuntu, Arch, Windows 11, ArduinoIDE) or 'input' to type any custom OS name. 'system' exposes the real OS release.",
-        12 => "Maximum RAM the app may use (RAM + swap both capped). Enforced via systemd-run MemoryMax + MemorySwapMax=0. 'none' disables the limit. Requires systemd.",
+        12 => "Detect the real terminal emulator (kitty, foot, alacritty, …) and pass TERM_PROGRAM into the sandbox. Fixes tools like fastfetch that show 'bwrap' as the terminal name.",
+        13 => "Maximum RAM the app may use (RAM + swap both capped). Enforced via systemd-run MemoryMax + MemorySwapMax=0. 'none' disables the limit. Requires systemd.",
         _ => "No description available.",
     }
 }
@@ -1430,13 +1521,16 @@ pub fn option_description(setting_idx: usize, choice_idx: usize) -> &'static str
         (11, 3) => "Windows 11 — Presents as Windows 11. Apps see NAME=\"Windows 11\", ID=windows, VERSION_ID=11.",
         (11, 4) => "ArduinoIDE — Presents as ArduinoIDE. Apps see NAME=ArduinoIDE, ID=arduinoide, VERSION_ID=2.3.",
         (11, 5) => "input — Type a custom OS name (e.g. 'fedora'). Used as ID= and NAME= in /etc/os-release inside the sandbox.",
+        // Spoof terminal
+        (12, 0) => "off — Do not override terminal identity. Tools inside the sandbox may show 'bwrap' as the terminal.",
+        (12, 1) => "on — Detect the real terminal (kitty, foot, alacritty, …) via the process tree and set TERM_PROGRAM inside the sandbox. fastfetch and similar tools will show the correct terminal name.",
         // RAM limit
-        (12, 0) => "none — No RAM limit. The app may use as much memory as the system allows.",
-        (12, 1) => "512 MiB — Hard cap at 512 MiB (RAM + swap). Processes are OOM-killed if they exceed this.",
-        (12, 2) => "1 GiB — Cap the app at 1 GiB (1024 MiB) of RAM.",
-        (12, 3) => "2 GiB — Cap the app at 2 GiB (2048 MiB) of RAM. Good default for everyday apps.",
-        (12, 4) => "4 GiB — Cap the app at 4 GiB (4096 MiB) of RAM.",
-        (12, 5) => "8 GiB — Cap the app at 8 GiB (8192 MiB) of RAM.",
+        (13, 0) => "none — No RAM limit. The app may use as much memory as the system allows.",
+        (13, 1) => "512 MiB — Hard cap at 512 MiB (RAM + swap). Processes are OOM-killed if they exceed this.",
+        (13, 2) => "1 GiB — Cap the app at 1 GiB (1024 MiB) of RAM.",
+        (13, 3) => "2 GiB — Cap the app at 2 GiB (2048 MiB) of RAM. Good default for everyday apps.",
+        (13, 4) => "4 GiB — Cap the app at 4 GiB (4096 MiB) of RAM.",
+        (13, 5) => "8 GiB — Cap the app at 8 GiB (8192 MiB) of RAM.",
         _ => "No description available.",
     }
 }
@@ -1489,6 +1583,7 @@ pub fn setting_current(config: &AppConfig, idx: usize) -> usize {
             Some("arduinoide") => 4,
             _                  => 5,
         },
+        CFG_SPOOF_TERMINAL => if config.spoof_terminal { 1 } else { 0 },
         CFG_RAM_LIMIT => match config.ram_limit {
             None        => 0,
             Some(512)   => 1,
@@ -1544,12 +1639,14 @@ pub fn apply_setting(config: &mut AppConfig, idx: usize, choice: usize) {
         (11, 3) => config.spoof_os = Some("windows".to_string()),
         (11, 4) => config.spoof_os = Some("arduinoide".to_string()),
         // (11, 5) = "input" — handled by on_option_picker which opens TextInput
-        (12, 0) => config.ram_limit = None,
-        (12, 1) => config.ram_limit = Some(512),
-        (12, 2) => config.ram_limit = Some(1024),
-        (12, 3) => config.ram_limit = Some(2048),
-        (12, 4) => config.ram_limit = Some(4096),
-        (12, 5) => config.ram_limit = Some(8192),
+        (12, 0) => config.spoof_terminal = false,
+        (12, 1) => config.spoof_terminal = true,
+        (13, 0) => config.ram_limit = None,
+        (13, 1) => config.ram_limit = Some(512),
+        (13, 2) => config.ram_limit = Some(1024),
+        (13, 3) => config.ram_limit = Some(2048),
+        (13, 4) => config.ram_limit = Some(4096),
+        (13, 5) => config.ram_limit = Some(8192),
         _ => {}
     }
 }
@@ -1934,6 +2031,9 @@ fn on_file_browser(app: &mut App, code: KeyCode) {
 // ── Shared helpers ────────────────────────────────────────────────────────────
 
 fn launch_op(app: &mut App, title: String, args: Vec<String>, total_bytes: Option<u64>, reload: bool) {
+    let into_target = args.windows(2)
+        .find(|w| w[0] == "--into")
+        .map(|w| w[1].clone());
     let (tx, rx) = mpsc::channel();
     spawn_wryayer(args, tx);
     app.log_scroll = 0;
@@ -1948,6 +2048,8 @@ fn launch_op(app: &mut App, title: String, args: Vec<String>, total_bytes: Optio
         started: Instant::now(),
         reload,
         show_log: false,
+        launcher_choice: None,
+        into_target,
     };
 }
 
@@ -2013,6 +2115,7 @@ fn spawn_wryayer(args: Vec<String>, tx: mpsc::Sender<Msg>) {
     thread::spawn(move || {
         let mut child = match Command::new(&exe)
             .args(&args)
+            .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()

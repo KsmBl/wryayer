@@ -16,6 +16,7 @@ pub fn run(
     app_name: Option<&str>,
     bin_names: &[String],
     into: Option<&str>,
+    keep_no_launcher: bool,
 ) -> Result<()> {
     let merge_mode = into.is_some();
 
@@ -236,11 +237,24 @@ pub fn run(
             available.sort();
             available.dedup();
 
-            if !bin_names_explicit_for_closure
-                && prompt_keep_without_launcher(&alias_name_owned, &available)
-            {
+            // Explicit flag (from TUI after user confirmed the popup).
+            if keep_no_launcher {
                 keep_without_launcher = true;
                 break;
+            }
+
+            if !bin_names_explicit_for_closure {
+                use std::io::IsTerminal as _;
+                if std::io::stdin().is_terminal() {
+                    if prompt_keep_without_launcher(&alias_name_owned, &available) {
+                        keep_without_launcher = true;
+                        break;
+                    }
+                } else {
+                    // Non-interactive (TUI subprocess): emit a marker so the TUI
+                    // can show the keep-vs-clean choice popup.
+                    eprintln!("PROMPT_LAUNCHER_CHOICE:{}:{}", pkg_name, available.join(","));
+                }
             }
 
             let hint = if available.is_empty() {

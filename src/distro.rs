@@ -145,11 +145,14 @@ pub fn pkg_latest_version(pkg: &str) -> Result<Option<String>> {
 }
 
 /// Search available packages matching `query`. Returns a list of package names.
-pub fn pkg_search(query: &str) -> Vec<String> {
+/// Returns `(package_name, repo)` pairs for display. Repo is the source
+/// repository name (e.g. "core", "aur", "extra") or None when not applicable.
+/// Results are deduplicated by package name (first occurrence wins).
+pub fn pkg_search(query: &str) -> Vec<(String, Option<String>)> {
     match current() {
         Distro::Arch   => arch::search(query),
-        Distro::Debian => debian::search(query),
-        Distro::Fedora => fedora::search(query),
+        Distro::Debian => debian::search(query).into_iter().map(|n| (n, None)).collect(),
+        Distro::Fedora => fedora::search(query).into_iter().map(|n| (n, None)).collect(),
     }
 }
 
@@ -522,28 +525,49 @@ mod arch {
         Ok(result > 0)
     }
 
-    pub fn search(query: &str) -> Vec<String> {
-        // Official repos — fast, local pacman sync DB
-        let official: Vec<String> = Command::new("pacman")
-            .args(["-Ssq", query])
+    pub fn search(query: &str) -> Vec<(String, Option<String>)> {
+        // Official repos — use full `pacman -Ss` output (not -q) so we get
+        // the "repo/pkgname version" prefix. This lets us:
+        //   a) show the repo in the TUI for context
+        //   b) deduplicate packages that appear in multiple repos (e.g. core/bash
+        //      and cachyos-core-v3/bash on CachyOS) — keep the first occurrence,
+        //      which is what pacman would choose anyway.
+        let out = Command::new("pacman")
+            .args(["-Ss", query])
             .output()
-            .map(|o| {
-                String::from_utf8_lossy(&o.stdout)
-                    .lines()
-                    .map(str::to_string)
-                    .collect()
-            })
-            .unwrap_or_default();
+            .unwrap_or_else(|_| std::process::Output {
+                status: unsafe { std::mem::zeroed() },
+                stdout: vec![],
+                stderr: vec![],
+            });
 
-        // AUR — RPC search, same endpoint used by dep resolution
-        let official_set: std::collections::HashSet<&str> =
-            official.iter().map(String::as_str).collect();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut results: Vec<(String, Option<String>)> = vec![];
+
+        for line in stdout.lines() {
+            // Package header lines: "repo/pkgname version [flags]"
+            // Description lines start with whitespace — skip.
+            if line.starts_with(|c: char| c.is_whitespace()) {
+                continue;
+            }
+            if let Some((repo_name, _rest)) = line.split_once(' ') {
+                if let Some((repo, name)) = repo_name.split_once('/') {
+                    if !seen.contains(name) {
+                        seen.insert(name.to_string());
+                        results.push((name.to_string(), Some(repo.to_string())));
+                    }
+                }
+            }
+        }
+
+        // AUR — RPC search, annotate with "aur", skip packages already in official results.
         let aur = search_aur(query)
             .into_iter()
-            .filter(|n| !official_set.contains(n.as_str()))
+            .filter(|n| !seen.contains(n.as_str()))
+            .map(|n| (n, Some("aur".to_string())))
             .collect::<Vec<_>>();
 
-        let mut results = official;
         results.extend(aur);
         results
     }

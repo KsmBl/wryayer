@@ -45,7 +45,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             let danger = *danger;
             draw_confirm(f, area, &title, &body, danger);
         }
-        Screen::Operation { title, log, done, success, total_bytes, progress, started, show_log, .. } => {
+        Screen::Operation { title, log, done, success, total_bytes, progress, started, show_log, launcher_choice, .. } => {
+            let _ = launcher_choice; // handled by the event loop auto-transition
             let title = title.clone();
             let log = log.clone();
             let done = *done;
@@ -137,6 +138,12 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             let pkg = pkg.clone();
             let selected = *selected;
             draw_already_installed(f, area, &pkg, selected);
+        }
+        Screen::NoLauncherChoice { pkg, available_bins, selected, .. } => {
+            let pkg = pkg.clone();
+            let available_bins = available_bins.clone();
+            let selected = *selected;
+            draw_no_launcher_choice(f, area, &pkg, &available_bins, selected);
         }
     }
 }
@@ -232,7 +239,7 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
     let ver = m.packages.iter().find(|p| p.name == real_pkg)
         .map(|p| p.version.as_str()).unwrap_or("?");
     let installed = m.app.installed_at.get(..10).unwrap_or(&m.app.installed_at);
-    let launchers = m.app.launchers.join(", ");
+    let has_launcher = !m.app.main_binary.is_empty();
     let dim = Style::default().fg(C_DIM);
 
     let size_str = app.app_sizes.get(&m.app.name)
@@ -257,11 +264,24 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
             Span::styled(m.app.name.as_str(), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
         ])
     };
+
+    let launchers_line = if m.app.launchers.is_empty() {
+        Line::from(vec![
+            Span::styled("  Launchers:  ", dim),
+            Span::styled("none", Style::default().fg(C_DIM)),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("  Launchers:  ", dim),
+            Span::raw(m.app.launchers.join(", ")),
+        ])
+    };
+
     let mut lines = vec![
         name_line,
         Line::from(vec![Span::styled("  Version:    ", dim), Span::styled(ver, Style::default().fg(C_GREEN))]),
         Line::from(vec![Span::styled("  Installed:  ", dim), Span::raw(installed)]),
-        Line::from(vec![Span::styled("  Launchers:  ", dim), Span::raw(launchers)]),
+        launchers_line,
         Line::from(vec![Span::styled("  Size:       ", dim), Span::styled(size_str, Style::default().fg(C_ACCENT))]),
     ];
 
@@ -292,10 +312,21 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
     }
 
     lines.push(Line::raw(""));
-    lines.push(Line::from(Span::styled(
-        "  [r] Run  [d] Delete  [e] Export  [p] Snapshot  [o] Rollback",
-        dim,
-    )));
+    if has_launcher {
+        lines.push(Line::from(Span::styled(
+            "  [r] Run  [d] Delete  [e] Export  [p] Snapshot  [o] Rollback",
+            dim,
+        )));
+    } else {
+        lines.push(Line::from(vec![
+            Span::styled("  No launcher — reinstall with ", Style::default().fg(C_YELLOW)),
+            Span::styled("--bin-names <name>", Style::default().fg(Color::White)),
+        ]));
+        lines.push(Line::from(Span::styled(
+            "  [d] Delete  [e] Export  [p] Snapshot  [o] Rollback",
+            dim,
+        )));
+    }
     lines.push(Line::from(Span::styled(
         "  [c] Check  [u] Update  [s] Config",
         dim,
@@ -328,18 +359,25 @@ fn draw_install(f: &mut Frame, app: &mut App, area: Rect) {
     let installed_names: std::collections::HashSet<&str> =
         app.installed.iter().map(|m| m.app.name.as_str()).collect();
 
-    let items: Vec<ListItem> = app.search_results.iter().map(|pkg| {
+    let items: Vec<ListItem> = app.search_results.iter().map(|(pkg, repo)| {
+        let repo_span = repo.as_deref().map(|r| {
+            Span::styled(format!(" [{}]", r), Style::default().fg(C_DIM))
+        });
         if installed_names.contains(pkg.as_str()) {
-            ListItem::new(Line::from(vec![
+            let mut spans = vec![
                 Span::styled("✓ ", Style::default().fg(C_GREEN)),
                 Span::styled(pkg.as_str(), Style::default().fg(Color::White)),
-                Span::styled(" [installed]", Style::default().fg(C_GREEN)),
-            ]))
+            ];
+            if let Some(rs) = repo_span { spans.push(rs); }
+            spans.push(Span::styled(" [installed]", Style::default().fg(C_GREEN)));
+            ListItem::new(Line::from(spans))
         } else {
-            ListItem::new(Line::from(vec![
+            let mut spans = vec![
                 Span::raw("  "),
                 Span::styled(pkg.as_str(), Style::default().fg(Color::White)),
-            ]))
+            ];
+            if let Some(rs) = repo_span { spans.push(rs); }
+            ListItem::new(Line::from(spans))
         }
     }).collect();
 
@@ -358,7 +396,7 @@ fn draw_install(f: &mut Frame, app: &mut App, area: Rect) {
 
     // Hint for selected item
     if let Some(i) = app.avail_state.selected() {
-        if let Some(pkg) = app.search_results.get(i) {
+        if let Some((pkg, _)) = app.search_results.get(i) {
             let hint = if installed_names.contains(pkg.as_str()) {
                 Line::from(vec![
                     Span::styled(" Already installed — ", Style::default().fg(C_GREEN)),
@@ -909,6 +947,7 @@ fn draw_config(f: &mut Frame, area: Rect, app_name: &str, config: &AppConfig, se
             Some("arduinoide") => " ArduinoIDE".to_string(),
             Some(s)            => { let t: String = s.chars().take(12).collect(); format!(" {t} ") }
         }),
+        ("Terminal   ", b(config.spoof_terminal).to_string()),
         ("RAM limit  ", match config.ram_limit {
             None      => " none    ".to_string(),
             Some(mib) if mib % 1024 == 0 => format!(" {} GiB  ", mib / 1024),
@@ -1582,6 +1621,80 @@ fn draw_already_installed(f: &mut Frame, area: Rect, pkg: &str, selected: usize)
             Style::default().fg(C_DIM),
         )),
         chunks[2],
+    );
+}
+
+// ── No-launcher choice overlay ────────────────────────────────────────────────
+
+fn draw_no_launcher_choice(f: &mut Frame, area: Rect, pkg: &str, available_bins: &[String], selected: usize) {
+    let popup = centered_rect(60, 50, area);
+    f.render_widget(Clear, popup);
+
+    let block = Block::default().borders(Borders::ALL)
+        .title(format!(" '{pkg}' — no launcher binary found "))
+        .title_style(Style::default().fg(C_YELLOW).add_modifier(Modifier::BOLD))
+        .border_style(Style::default().fg(C_YELLOW));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .split(inner);
+
+    let mut items: Vec<ListItem> = vec![];
+
+    if !available_bins.is_empty() {
+        let bins_str = available_bins.join(", ");
+        let truncated: String = bins_str.chars().take(inner.width as usize - 4).collect();
+        items.push(ListItem::new(Line::from(vec![
+            Span::styled("  Available: ", Style::default().fg(C_DIM)),
+            Span::styled(truncated, Style::default().fg(Color::White)),
+        ])));
+        items.push(ListItem::new(Line::from(vec![
+            Span::styled("  Reinstall with ", Style::default().fg(C_DIM)),
+            Span::styled("--bin-names <name>", Style::default().fg(Color::White)),
+            Span::styled(" to add a launcher.", Style::default().fg(C_DIM)),
+        ])));
+        items.push(ListItem::new(Line::raw("")));
+    }
+
+    let choices: &[(&str, &str, &str, Color)] = &[
+        ("✚", "Keep without launcher", "files installed, no ~/bin/ shortcut", C_GREEN),
+        ("✕", "Clean up",              "remove all installed files",           C_RED),
+    ];
+
+    for (i, (icon, label, desc, color)) in choices.iter().enumerate() {
+        let is_sel = i == selected;
+        let label_style = if is_sel {
+            Style::default().fg(*color).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(C_DIM)
+        };
+        items.push(ListItem::new(Line::from(vec![
+            Span::styled(if is_sel { " ▶ " } else { "   " }, Style::default().fg(C_YELLOW)),
+            Span::styled(*icon, Style::default().fg(*color)),
+            Span::raw(" "),
+            Span::styled(*label, label_style),
+            Span::styled(format!("  — {desc}"), Style::default().fg(C_DIM)),
+        ])));
+    }
+
+    let mut list_state = ListState::default();
+    // The selectable rows start after the info rows.
+    let info_rows = if available_bins.is_empty() { 0 } else { 3 };
+    list_state.select(Some(info_rows + selected));
+
+    let list = List::new(items)
+        .highlight_style(Style::default().bg(C_SELECT));
+    f.render_stateful_widget(list, chunks[0], &mut list_state);
+
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            " [↑↓/jk] Navigate  [Enter] Select  [Esc/q] Cancel",
+            Style::default().fg(C_DIM),
+        )),
+        chunks[1],
     );
 }
 

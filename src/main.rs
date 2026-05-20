@@ -35,6 +35,10 @@ enum Commands {
         /// instead of creating a new one. Useful for plugins, multi-tool bundles.
         #[arg(long)]
         into: Option<String>,
+        /// Keep installed files even when no launcher binary was found (no ~/bin/ shortcut created).
+        /// Used internally by the TUI after the user confirms the choice popup.
+        #[arg(long, hide = true)]
+        keep_without_launcher: bool,
     },
     /// Remove an installed app and its launchers
     Remove {
@@ -197,6 +201,11 @@ enum ConfigSetting {
         /// OS name string, "sample", or "off" to disable
         value: String,
     },
+    /// Detect the real terminal and pass it into the sandbox so tools like fastfetch show the correct terminal name
+    SpoofTerminal {
+        /// on = detect and forward terminal identity, off = do nothing (default)
+        value: String,
+    },
     /// Limit maximum RAM usage in MiB via systemd-run (0 or "none" = no limit)
     RamLimit {
         /// RAM limit in MiB (e.g. 2048 for 2 GiB), or "none" to disable
@@ -224,7 +233,7 @@ fn main() {
     let cli = Cli::parse();
 
     let result = match cli.command {
-        Commands::Install { pkg, app_name, bin_name, bin_names, into } => {
+        Commands::Install { pkg, app_name, bin_name, bin_names, into, keep_without_launcher } => {
             let names: Vec<String> = if !bin_names.is_empty() {
                 bin_names
             } else if let Some(b) = bin_name {
@@ -232,7 +241,7 @@ fn main() {
             } else {
                 vec![]
             };
-            commands::install::run(&pkg, app_name.as_deref(), &names, into.as_deref())
+            commands::install::run(&pkg, app_name.as_deref(), &names, into.as_deref(), keep_without_launcher)
         }
         Commands::Remove { app_name, cascade } => {
             if cascade {
@@ -248,24 +257,24 @@ fn main() {
         }
         Commands::Repair { app_name } => commands::repair::run(&app_name),
         Commands::Config { app_name, setting } => match setting {
-            None => commands::config::run(&app_name, None, None, None, None, None, None, None, None, None, None, None, None),
+            None => commands::config::run(&app_name, None, None, None, None, None, None, None, None, None, None, None, None, None),
             Some(ConfigSetting::Tempmode { mode }) => {
-                commands::config::run(&app_name, Some(&mode), None, None, None, None, None, None, None, None, None, None, None)
+                commands::config::run(&app_name, Some(&mode), None, None, None, None, None, None, None, None, None, None, None, None)
             }
             Some(ConfigSetting::Tempdelete { policy }) => {
-                commands::config::run(&app_name, None, Some(&policy), None, None, None, None, None, None, None, None, None, None)
+                commands::config::run(&app_name, None, Some(&policy), None, None, None, None, None, None, None, None, None, None, None)
             }
             Some(ConfigSetting::Network { enabled }) => {
-                commands::config::run(&app_name, None, None, Some(&enabled), None, None, None, None, None, None, None, None, None)
+                commands::config::run(&app_name, None, None, Some(&enabled), None, None, None, None, None, None, None, None, None, None)
             }
             Some(ConfigSetting::Camera { enabled }) => {
-                commands::config::run(&app_name, None, None, None, Some(&enabled), None, None, None, None, None, None, None, None)
+                commands::config::run(&app_name, None, None, None, Some(&enabled), None, None, None, None, None, None, None, None, None)
             }
             Some(ConfigSetting::Microphone { enabled }) => {
-                commands::config::run(&app_name, None, None, None, None, Some(&enabled), None, None, None, None, None, None, None)
+                commands::config::run(&app_name, None, None, None, None, Some(&enabled), None, None, None, None, None, None, None, None)
             }
             Some(ConfigSetting::Audio { enabled }) => {
-                commands::config::run(&app_name, None, None, None, None, None, Some(&enabled), None, None, None, None, None, None)
+                commands::config::run(&app_name, None, None, None, None, None, Some(&enabled), None, None, None, None, None, None, None)
             }
             Some(ConfigSetting::Share { action }) => match action {
                 ShareAction::Add { path } => commands::config::share_add(&app_name, &path),
@@ -273,22 +282,25 @@ fn main() {
                 ShareAction::List => commands::config::share_list(&app_name),
             },
             Some(ConfigSetting::SpoofHostname { value }) => {
-                commands::config::run(&app_name, None, None, None, None, None, None, Some(&value), None, None, None, None, None)
+                commands::config::run(&app_name, None, None, None, None, None, None, Some(&value), None, None, None, None, None, None)
             }
             Some(ConfigSetting::SpoofUsername { value }) => {
-                commands::config::run(&app_name, None, None, None, None, None, None, None, Some(&value), None, None, None, None)
+                commands::config::run(&app_name, None, None, None, None, None, None, None, Some(&value), None, None, None, None, None)
             }
             Some(ConfigSetting::SpoofMachineId { value }) => {
-                commands::config::run(&app_name, None, None, None, None, None, None, None, None, Some(&value), None, None, None)
+                commands::config::run(&app_name, None, None, None, None, None, None, None, None, Some(&value), None, None, None, None)
             }
             Some(ConfigSetting::SpoofCpuinfo { path }) => {
-                commands::config::run(&app_name, None, None, None, None, None, None, None, None, None, Some(&path), None, None)
+                commands::config::run(&app_name, None, None, None, None, None, None, None, None, None, Some(&path), None, None, None)
             }
             Some(ConfigSetting::SpoofOs { value }) => {
-                commands::config::run(&app_name, None, None, None, None, None, None, None, None, None, None, Some(&value), None)
+                commands::config::run(&app_name, None, None, None, None, None, None, None, None, None, None, Some(&value), None, None)
+            }
+            Some(ConfigSetting::SpoofTerminal { value }) => {
+                commands::config::run(&app_name, None, None, None, None, None, None, None, None, None, None, None, Some(&value), None)
             }
             Some(ConfigSetting::RamLimit { mib }) => {
-                commands::config::run(&app_name, None, None, None, None, None, None, None, None, None, None, None, Some(&mib))
+                commands::config::run(&app_name, None, None, None, None, None, None, None, None, None, None, None, None, Some(&mib))
             }
         },
         Commands::Export { app_name, output } => {
