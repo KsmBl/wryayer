@@ -4,6 +4,44 @@ use anyhow::{Context, Result};
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 
+// ── Dep cache ──────────────────────────────────────────────────────────────────
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PkgDepCache {
+    source: String,   // "official" or "aur"
+    resolved: String, // canonical name (may differ for virtual providers)
+    version: String,
+    deps: Vec<String>,
+}
+
+fn dep_cache_dir() -> Option<PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    let dir = PathBuf::from(home).join(".cache").join("wryayer").join("deps");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir)
+}
+
+fn dep_cache_path(pkg_name: &str) -> Option<PathBuf> {
+    let safe: String = pkg_name
+        .chars()
+        .map(|c| if c.is_alphanumeric() || matches!(c, '-' | '_' | '.') { c } else { '_' })
+        .collect();
+    Some(dep_cache_dir()?.join(format!("{safe}.toml")))
+}
+
+fn read_dep_cache(pkg_name: &str) -> Option<PkgDepCache> {
+    let content = std::fs::read_to_string(dep_cache_path(pkg_name)?).ok()?;
+    toml::from_str(&content).ok()
+}
+
+fn write_dep_cache(pkg_name: &str, entry: &PkgDepCache) {
+    if let Some(path) = dep_cache_path(pkg_name) {
+        if let Ok(content) = toml::to_string_pretty(entry) {
+            let _ = std::fs::write(path, content);
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ResolvedPackage {
     pub name: String,
@@ -63,7 +101,36 @@ pub fn resolve_full_dep_tree(root_pkg: &str) -> Result<Vec<ResolvedPackage>> {
 
         if !aur_pending.is_empty() {
             if distro::current() == Distro::Arch {
-                let aur_results = query_aur_batch(&aur_pending)?;
+                let mut uncached: Vec<String> = Vec::new();
+                let mut aur_results: std::collections::HashMap<String, AurInfo> =
+                    std::collections::HashMap::new();
+
+                for pkg in &aur_pending {
+                    if let Some(c) = read_dep_cache(pkg) {
+                        if c.source == "aur" {
+                            aur_results.insert(pkg.clone(), AurInfo { version: c.version, depends: c.deps });
+                            continue;
+                        }
+                    }
+                    uncached.push(pkg.clone());
+                }
+
+                if !uncached.is_empty() {
+                    let fetched = query_aur_batch(&uncached)?;
+                    for (name, info) in &fetched {
+                        write_dep_cache(name, &PkgDepCache {
+                            source: "aur".into(),
+                            resolved: name.clone(),
+                            version: info.version.clone(),
+                            deps: info.depends.clone(),
+                        });
+                        aur_results.insert(name.clone(), AurInfo {
+                            version: info.version.clone(),
+                            depends: info.depends.clone(),
+                        });
+                    }
+                }
+
                 for pkg in &aur_pending {
                     if visited.contains(pkg) {
                         continue;
@@ -106,8 +173,20 @@ pub fn resolve_full_dep_tree(root_pkg: &str) -> Result<Vec<ResolvedPackage>> {
 /// providers and soname deps as needed.
 /// Returns (resolved_name, version, deps) or None if not found anywhere.
 fn query_official(pkg_name: &str) -> Result<Option<(String, String, Vec<String>)>> {
+    if let Some(c) = read_dep_cache(pkg_name) {
+        if c.source == "official" {
+            return Ok(Some((c.resolved, c.version, c.deps)));
+        }
+    }
+
     // 1. Direct lookup
     if let Some((ver, deps)) = distro::query_pkg_info(pkg_name)? {
+        write_dep_cache(pkg_name, &PkgDepCache {
+            source: "official".into(),
+            resolved: pkg_name.to_string(),
+            version: ver.clone(),
+            deps: deps.clone(),
+        });
         return Ok(Some((pkg_name.to_string(), ver, deps)));
     }
 
@@ -115,6 +194,12 @@ fn query_official(pkg_name: &str) -> Result<Option<(String, String, Vec<String>)
     if let Some(provider) = distro::resolve_virtual(pkg_name)? {
         if !provider.is_empty() && provider != pkg_name {
             if let Some((ver, deps)) = distro::query_pkg_info(&provider)? {
+                write_dep_cache(pkg_name, &PkgDepCache {
+                    source: "official".into(),
+                    resolved: provider.clone(),
+                    version: ver.clone(),
+                    deps: deps.clone(),
+                });
                 return Ok(Some((provider, ver, deps)));
             }
         }
@@ -124,6 +209,12 @@ fn query_official(pkg_name: &str) -> Result<Option<(String, String, Vec<String>)
     if is_soname_dep(pkg_name) {
         if let Some(owner) = distro::soname_owner(pkg_name)? {
             if let Some((ver, deps)) = distro::query_pkg_info(&owner)? {
+                write_dep_cache(pkg_name, &PkgDepCache {
+                    source: "official".into(),
+                    resolved: owner.clone(),
+                    version: ver.clone(),
+                    deps: deps.clone(),
+                });
                 return Ok(Some((owner, ver, deps)));
             }
         }
