@@ -1425,7 +1425,7 @@ pub fn setting_options(idx: usize) -> Vec<&'static str> {
         CFG_SPOOF_OS => vec!["system", "Ubuntu", "Arch", "Windows 11", "ArduinoIDE", "input"],
         CFG_SPOOF_CPUINFO => vec!["system", "sample", "edit"],
         CFG_SPOOF_MACHINE_ID => vec!["system", "random", "sample", "input"],
-        CFG_SPOOF_TERMINAL => vec!["off", "on"],
+        CFG_SPOOF_TERMINAL => vec!["off", "detect"],
         CFG_RAM_LIMIT => vec!["none", "512 MiB", "1 GiB", "2 GiB", "4 GiB", "8 GiB"],
         _ => vec![],
     }
@@ -1446,7 +1446,7 @@ pub fn setting_title(idx: usize) -> &'static str {
         9 => "Spoof machine ID",
         10 => "Spoof CPU info",
         11 => "Spoof OS release",
-        12 => "Spoof terminal",
+        12 => "Spoof terminal name",
         13 => "RAM limit",
         _ => "Option",
     }
@@ -1467,7 +1467,7 @@ pub fn setting_description(idx: usize) -> &'static str {
         9 => "Override /etc/machine-id inside the sandbox. 'system' uses the real ID; 'random' generates a fresh UUID each launch; 'sample' uses a fixed placeholder; 'input' lets you type a 32-char hex value.",
         10 => "Override /proc/cpuinfo inside the sandbox. 'system' exposes the real CPU; 'sample' shows a generic Intel i7; 'edit' opens a text editor so you can write a fully custom cpuinfo — pre-filled with your real CPU data.",
         11 => "Override /etc/os-release inside the sandbox. Choose a preset (Ubuntu, Arch, Windows 11, ArduinoIDE) or 'input' to type any custom OS name. 'system' exposes the real OS release.",
-        12 => "Detect the real terminal emulator (kitty, foot, alacritty, …) and pass TERM_PROGRAM into the sandbox. Fixes tools like fastfetch that show 'bwrap' as the terminal name.",
+        12 => "'detect' walks the process tree to find your real terminal emulator (kitty, foot, alacritty, WezTerm, …) and sets the env var that identifies it inside the sandbox (KITTY_WINDOW_ID, $TERM, WEZTERM_PANE, …). Fixes fastfetch/neofetch showing 'bwrap' instead of your real terminal.",
         13 => "Maximum RAM the app may use (RAM + swap both capped). Enforced via systemd-run MemoryMax + MemorySwapMax=0. 'none' disables the limit. Requires systemd.",
         _ => "No description available.",
     }
@@ -1522,8 +1522,8 @@ pub fn option_description(setting_idx: usize, choice_idx: usize) -> &'static str
         (11, 4) => "ArduinoIDE — Presents as ArduinoIDE. Apps see NAME=ArduinoIDE, ID=arduinoide, VERSION_ID=2.3.",
         (11, 5) => "input — Type a custom OS name (e.g. 'fedora'). Used as ID= and NAME= in /etc/os-release inside the sandbox.",
         // Spoof terminal
-        (12, 0) => "off — Do not override terminal identity. Tools inside the sandbox may show 'bwrap' as the terminal.",
-        (12, 1) => "on — Detect the real terminal (kitty, foot, alacritty, …) via the process tree and set TERM_PROGRAM inside the sandbox. fastfetch and similar tools will show the correct terminal name.",
+        (12, 0) => "off — Do not override terminal identity. Tools like fastfetch may show 'bwrap' as the terminal.",
+        (12, 1) => "detect — Walk the process tree to find the real terminal (kitty, foot, alacritty, WezTerm, …) and set the correct env var inside the sandbox. Fixes fastfetch showing 'bwrap'.",
         // RAM limit
         (13, 0) => "none — No RAM limit. The app may use as much memory as the system allows.",
         (13, 1) => "512 MiB — Hard cap at 512 MiB (RAM + swap). Processes are OOM-killed if they exceed this.",

@@ -947,7 +947,7 @@ fn draw_config(f: &mut Frame, area: Rect, app_name: &str, config: &AppConfig, se
             Some("arduinoide") => " ArduinoIDE".to_string(),
             Some(s)            => { let t: String = s.chars().take(12).collect(); format!(" {t} ") }
         }),
-        ("Terminal   ", b(config.spoof_terminal).to_string()),
+        ("Spoof term.", if config.spoof_terminal { " detect".to_string() } else { "  off  ".to_string() }),
         ("RAM limit  ", match config.ram_limit {
             None      => " none    ".to_string(),
             Some(mib) if mib % 1024 == 0 => format!(" {} GiB  ", mib / 1024),

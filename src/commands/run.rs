@@ -470,26 +470,13 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
     }
 
     // ── Terminal spoofing ─────────────────────────────────────────────────────────
-    // Walk the outer process tree to find the real terminal emulator and set
-    // TERM_PROGRAM so fastfetch/neofetch report the correct terminal instead
-    // of "bwrap" (which is what the process-tree walk inside bwrap finds).
+    // Walk the outer process tree to find the real terminal emulator, then set
+    // the env var that fastfetch/neofetch actually use to detect that terminal.
+    // Each terminal has its own specific env var — TERM_PROGRAM is NOT a generic
+    // solution (fastfetch only recognises it for ghostty and WezTerm).
     if config.spoof_terminal {
-        let term_prog = std::env::var("TERM_PROGRAM").unwrap_or_default();
-        // If the terminal already set TERM_PROGRAM, we only need to ensure it's
-        // forwarded — it's already inherited since we never call env_clear().
-        // If not, detect via process tree and synthesise the right vars.
-        if term_prog.is_empty() {
-            if let Some(detected) = detect_terminal_name() {
-                let prog = terminal_program_name(&detected);
-                // Set terminal-specific identifiers that fastfetch checks before
-                // falling back to the process-tree walk (which would find "bwrap").
-                if detected == "kitty" && std::env::var("KITTY_WINDOW_ID").is_err() {
-                    cmd.env("KITTY_WINDOW_ID", "1");
-                } else if detected.starts_with("wezterm") && std::env::var("WEZTERM_PANE").is_err() {
-                    cmd.env("WEZTERM_PANE", "0");
-                }
-                cmd.env("TERM_PROGRAM", prog);
-            }
+        if let Some(detected) = detect_terminal_name() {
+            apply_terminal_env(&mut cmd, &detected);
         }
     }
 
@@ -645,26 +632,56 @@ fn detect_terminal_name() -> Option<String> {
     None
 }
 
-/// Map a detected terminal comm name to the canonical TERM_PROGRAM string
-/// that fastfetch (and other tools) recognise.
-fn terminal_program_name(comm: &str) -> String {
-    if comm.starts_with("wezterm") { return "WezTerm".into(); }
-    match comm {
-        "kitty"                      => "kitty",
-        "foot" | "footclient"        => "foot",
-        "alacritty"                  => "alacritty",
-        "ghostty"                    => "ghostty",
-        "gnome-terminal"
-        | "gnome-terminal-"          => "GNOME Terminal",
-        "konsole"                    => "konsole",
-        "xfce4-terminal"             => "xfce4-terminal",
-        "xterm"                      => "xterm",
-        "urxvt" | "rxvt"             => "rxvt-unicode",
-        "tilix"                      => "tilix",
-        "terminator"                 => "Terminator",
-        other                        => return other.to_string(),
+/// Set the env var(s) that fastfetch actually checks to identify each terminal.
+/// Each terminal has its own detection scheme — there is no single generic var.
+fn apply_terminal_env(cmd: &mut Command, comm: &str) {
+    let current_term = std::env::var("TERM").unwrap_or_default();
+
+    if comm == "kitty" {
+        // fastfetch checks KITTY_WINDOW_ID (set by kitty; may be absent when
+        // running through a launcher script that does exec).
+        if std::env::var("KITTY_WINDOW_ID").is_err() {
+            cmd.env("KITTY_WINDOW_ID", "1");
+        }
+    } else if comm == "foot" || comm == "footclient" {
+        // fastfetch detects foot by checking whether $TERM starts with "foot".
+        // foot can be configured to use "xterm-256color" instead, so we force it.
+        if !current_term.starts_with("foot") {
+            cmd.env("TERM", "foot");
+        }
+    } else if comm == "alacritty" {
+        // fastfetch checks $TERM == "alacritty" (alacritty sets this by default).
+        if current_term != "alacritty" {
+            cmd.env("TERM", "alacritty");
+        }
+    } else if comm.starts_with("wezterm") {
+        // fastfetch checks WEZTERM_PANE (always set by wezterm; may be absent
+        // when exec'd through a launcher).
+        if std::env::var("WEZTERM_PANE").is_err() {
+            cmd.env("WEZTERM_PANE", "0");
+        }
+    } else if comm == "ghostty" {
+        // fastfetch checks TERM_PROGRAM=ghostty.  ghostty sets this itself;
+        // force it in case the launcher stripped it.
+        cmd.env("TERM_PROGRAM", "ghostty");
+    } else if comm.starts_with("gnome-terminal")
+        || comm == "xfce4-terminal"
+        || comm == "tilix"
+        || comm == "mate-terminal"
+    {
+        // VTE-based terminals: fastfetch checks VTE_VERSION.
+        if std::env::var("VTE_VERSION").is_err() {
+            cmd.env("VTE_VERSION", "7400");
+        }
+    } else if comm == "konsole" {
+        // fastfetch checks KONSOLE_VERSION.
+        if std::env::var("KONSOLE_VERSION").is_err() {
+            cmd.env("KONSOLE_VERSION", "220401");
+        }
     }
-    .to_string()
+    // For terminals that set their own distinctive env vars (WezTerm sets
+    // TERM_PROGRAM, GNOME Terminal/VTE sets VTE_VERSION, etc.) the values are
+    // already inherited from the outer environment — no override needed.
 }
 
 /// Bind /dev/null over every file in `dir` whose name starts with `prefix`.
