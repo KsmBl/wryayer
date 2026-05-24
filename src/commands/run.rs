@@ -544,7 +544,12 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
             }
         }
 
-        cmd.env("XDG_RUNTIME_DIR", isolated_rt);
+        // Use bwrap's --setenv rather than cmd.env() so XDG_RUNTIME_DIR is only
+        // overridden inside the sandbox.  cmd.env() would also set it on the bwrap
+        // process itself; when wrapped with systemd-run --scope, systemd-run
+        // inherits that env and then cannot find the user bus socket under the
+        // isolated path, causing "Failed to connect to user scope bus".
+        cmd.args(["--setenv", "XDG_RUNTIME_DIR", &isolated_rt]);
     }
 
     cmd.args(["--", binary]);
