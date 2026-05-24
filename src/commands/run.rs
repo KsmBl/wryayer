@@ -239,44 +239,31 @@ pub fn has_systemd_run() -> bool {
 }
 
 /// Wrap `inner` (a fully-constructed bwrap command) inside a transient
-/// systemd user service with a MemoryMax cgroup limit.
+/// systemd scope unit with a MemoryMax cgroup limit.
+///
+/// `--scope` is used instead of a service unit because scope mode makes
+/// systemd-run exec() the target directly (no fork).  The child process
+/// therefore inherits the real PTY from the calling shell, so bash and other
+/// interactive programs get a proper terminal and full job control.  A service
+/// unit separates the process from the TTY and requires --pipe / --setenv
+/// workarounds that still don't give the child a real PTY.
 pub fn wrap_with_ram_limit(inner: Command, mib: u64) -> Command {
     let mut outer = Command::new("systemd-run");
     outer.arg("--user")
-         .arg("--wait")
-         // Connect the service's stdin/stdout/stderr to this process's streams
-         // so interactive apps (bash, etc.) get a proper terminal.  Without
-         // --pipe, systemd-run detaches the service from the TTY and bash exits.
-         .arg("--pipe")
+         .arg("--scope")
          .arg("--quiet")
          .arg("-p").arg(format!("MemoryMax={mib}M"))
-         .arg("-p").arg("MemorySwapMax=0");
-
-    // systemd-run services do NOT inherit the caller's environment — the service
-    // starts with the systemd activation environment.  Pass every explicitly-set
-    // env var to the service via --setenv so the sandbox has its full environment.
-    for (k, v) in inner.get_envs() {
-        if let Some(val) = v {
-            outer.arg(format!(
-                "--setenv={}={}",
-                k.to_string_lossy(),
-                val.to_string_lossy()
-            ));
-        }
-    }
-
-    // Also forward terminal-specific vars that are in the shell environment but
-    // not in the systemd activation environment.
-    for key in &["TERM", "COLORTERM"] {
-        if let Ok(val) = std::env::var(key) {
-            outer.arg(format!("--setenv={key}={val}"));
-        }
-    }
-
-    outer.arg("--");
+         .arg("-p").arg("MemorySwapMax=0")
+         .arg("--");
     outer.arg(inner.get_program());
     for arg in inner.get_args() {
         outer.arg(arg);
+    }
+    for (k, v) in inner.get_envs() {
+        match v {
+            Some(val) => { outer.env(k, val); }
+            None      => { outer.env_remove(k); }
+        }
     }
     outer
 }
