@@ -239,26 +239,44 @@ pub fn has_systemd_run() -> bool {
 }
 
 /// Wrap `inner` (a fully-constructed bwrap command) inside a transient
-/// systemd user service with a MemoryMax cgroup limit.  All program args
-/// and env overrides are transferred; --wait makes systemd-run block until
-/// the service exits and propagate its exit code.
+/// systemd user service with a MemoryMax cgroup limit.
 pub fn wrap_with_ram_limit(inner: Command, mib: u64) -> Command {
     let mut outer = Command::new("systemd-run");
     outer.arg("--user")
          .arg("--wait")
+         // Connect the service's stdin/stdout/stderr to this process's streams
+         // so interactive apps (bash, etc.) get a proper terminal.  Without
+         // --pipe, systemd-run detaches the service from the TTY and bash exits.
+         .arg("--pipe")
          .arg("--quiet")
          .arg("-p").arg(format!("MemoryMax={mib}M"))
-         .arg("-p").arg("MemorySwapMax=0")
-         .arg("--");
+         .arg("-p").arg("MemorySwapMax=0");
+
+    // systemd-run services do NOT inherit the caller's environment — the service
+    // starts with the systemd activation environment.  Pass every explicitly-set
+    // env var to the service via --setenv so the sandbox has its full environment.
+    for (k, v) in inner.get_envs() {
+        if let Some(val) = v {
+            outer.arg(format!(
+                "--setenv={}={}",
+                k.to_string_lossy(),
+                val.to_string_lossy()
+            ));
+        }
+    }
+
+    // Also forward terminal-specific vars that are in the shell environment but
+    // not in the systemd activation environment.
+    for key in &["TERM", "COLORTERM"] {
+        if let Ok(val) = std::env::var(key) {
+            outer.arg(format!("--setenv={key}={val}"));
+        }
+    }
+
+    outer.arg("--");
     outer.arg(inner.get_program());
     for arg in inner.get_args() {
         outer.arg(arg);
-    }
-    for (k, v) in inner.get_envs() {
-        match v {
-            Some(val) => { outer.env(k, val); }
-            None      => { outer.env_remove(k); }
-        }
     }
     outer
 }
@@ -351,6 +369,11 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
     let _ = std::fs::create_dir_all(&spoof_dir);
 
     if let Some(ref hostname) = config.spoof_hostname {
+        // --unshare-uts gives the sandbox its own UTS namespace; --hostname sets
+        // the kernel hostname within it.  gethostname() (used by fastfetch, bash's
+        // \h prompt, etc.) reads from the kernel UTS namespace, NOT /etc/hostname,
+        // so only this approach makes the spoof visible to those programs.
+        cmd.args(["--unshare-uts", "--hostname", hostname.as_str()]);
         let hf = spoof_dir.join("hostname");
         let _ = std::fs::write(&hf, format!("{hostname}\n"));
         if let Some(s) = hf.to_str() {
