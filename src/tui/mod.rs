@@ -65,6 +65,12 @@ pub enum Screen {
         launcher_choice: Option<(String, Vec<String>)>,
         /// The --into target from the original install, if this was a merge install.
         into_target: Option<String>,
+        /// Set when the subprocess emits `PROMPT_OUTDATED_PACKAGES:<pkg>`.
+        /// Triggers the OutdatedPackages popup once the operation finishes.
+        outdated_pkg: Option<String>,
+        /// The args originally passed to launch_op — stored so the OutdatedPackages
+        /// popup can relaunch the same operation with --sync-db appended.
+        original_args: Vec<String>,
     },
     Config {
         app_name: String,
@@ -147,6 +153,14 @@ pub enum Screen {
         selected: usize, // 0 = keep, 1 = clean (already done)
         /// The --into target if this was a merge install, so the retry can pass it.
         into_target: Option<String>,
+    },
+    /// Shown when a download returns 404 (package databases are out of date).
+    /// User picks "Update & retry" or "Cancel".
+    OutdatedPackages {
+        pkg: String,
+        /// The original install args; retry appends --sync-db to these.
+        install_args: Vec<String>,
+        selected: usize, // 0 = update & retry, 1 = cancel
     },
 }
 
@@ -303,7 +317,7 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(
 
     loop {
         // Drain op channel
-        if let Screen::Operation { rx, log, done, success, progress, launcher_choice, .. } = &mut app.screen {
+        if let Screen::Operation { rx, log, done, success, progress, launcher_choice, outdated_pkg, .. } = &mut app.screen {
             loop {
                 match rx.try_recv() {
                     Ok(Msg::Line(l)) => {
@@ -316,6 +330,8 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(
                                 };
                                 *launcher_choice = Some((pkg.to_string(), bins));
                             }
+                        } else if let Some(rest) = l.strip_prefix("PROMPT_OUTDATED_PACKAGES:") {
+                            *outdated_pkg = Some(rest.to_string());
                         } else if let Some(p) = parse_progress(&l) {
                             *progress = Some(p);
                         } else {
@@ -333,6 +349,15 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(
             let screen = std::mem::replace(&mut app.screen, Screen::Main);
             if let Screen::Operation { launcher_choice: Some((pkg, bins)), into_target, .. } = screen {
                 app.screen = Screen::NoLauncherChoice { pkg, available_bins: bins, selected: 0, into_target };
+                app.needs_clear = true;
+            }
+        }
+
+        // Auto-transition to OutdatedPackages popup when op finishes with the marker set.
+        if let Screen::Operation { done: true, success: false, outdated_pkg: Some(_), .. } = &app.screen {
+            let screen = std::mem::replace(&mut app.screen, Screen::Main);
+            if let Screen::Operation { outdated_pkg: Some(pkg), original_args, .. } = screen {
+                app.screen = Screen::OutdatedPackages { pkg, install_args: original_args, selected: 0 };
                 app.needs_clear = true;
             }
         }
@@ -559,6 +584,7 @@ fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
         Screen::DuplicateInstall { .. } => 14,
         Screen::AlreadyInstalled { .. } => 15,
         Screen::NoLauncherChoice { .. } => 16,
+        Screen::OutdatedPackages { .. } => 17,
     };
 
     match tag {
@@ -579,6 +605,7 @@ fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
         14 => on_duplicate_install(app, code),
         15 => on_already_installed(app, code),
         16 => on_no_launcher_choice(app, code),
+        17 => on_outdated_packages(app, code),
         _ => {}
     }
     Ok(())
@@ -974,6 +1001,40 @@ fn on_no_launcher_choice(app: &mut App, code: KeyCode) {
                 }
                 _ => {
                     // Clean up — install already cleaned up on error; just go back.
+                    app.screen = Screen::Main;
+                    app.needs_clear = true;
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn on_outdated_packages(app: &mut App, code: KeyCode) {
+    let Screen::OutdatedPackages { selected, install_args, pkg, .. } = &mut app.screen else { return };
+    match code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            app.screen = Screen::Main;
+            app.needs_clear = true;
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            if *selected > 0 { *selected -= 1; }
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if *selected < 1 { *selected += 1; }
+        }
+        KeyCode::Enter | KeyCode::Char(' ') => {
+            let s = *selected;
+            let pkg = pkg.clone();
+            let mut args = install_args.clone();
+            match s {
+                0 => {
+                    // Update sources and retry: append --sync-db so the install
+                    // command runs 'sudo pacman -Sy' before downloading.
+                    args.push("--sync-db".into());
+                    launch_op(app, format!("Install — {pkg} (update sources)"), args, None, true);
+                }
+                _ => {
                     app.screen = Screen::Main;
                     app.needs_clear = true;
                 }
@@ -2035,6 +2096,7 @@ fn launch_op(app: &mut App, title: String, args: Vec<String>, total_bytes: Optio
         .find(|w| w[0] == "--into")
         .map(|w| w[1].clone());
     let (tx, rx) = mpsc::channel();
+    let original_args = args.clone();
     spawn_wryayer(args, tx);
     app.log_scroll = 0;
     app.screen = Screen::Operation {
@@ -2050,6 +2112,8 @@ fn launch_op(app: &mut App, title: String, args: Vec<String>, total_bytes: Optio
         show_log: false,
         launcher_choice: None,
         into_target,
+        outdated_pkg: None,
+        original_args,
     };
 }
 

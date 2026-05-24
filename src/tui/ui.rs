@@ -145,6 +145,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             let selected = *selected;
             draw_no_launcher_choice(f, area, &pkg, &available_bins, selected);
         }
+        Screen::OutdatedPackages { pkg, selected, .. } => {
+            let pkg = pkg.clone();
+            let selected = *selected;
+            draw_outdated_packages(f, area, &pkg, selected);
+        }
     }
 }
 
@@ -1625,6 +1630,71 @@ fn draw_already_installed(f: &mut Frame, area: Rect, pkg: &str, selected: usize)
 }
 
 // ── No-launcher choice overlay ────────────────────────────────────────────────
+
+fn draw_outdated_packages(f: &mut Frame, area: Rect, pkg: &str, selected: usize) {
+    let popup = centered_rect(62, 40, area);
+    f.render_widget(Clear, popup);
+
+    let block = Block::default().borders(Borders::ALL)
+        .title(" Package databases may be out of date ")
+        .title_style(Style::default().fg(C_YELLOW).add_modifier(Modifier::BOLD))
+        .border_style(Style::default().fg(C_YELLOW));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .split(inner);
+
+    let mut items: Vec<ListItem> = vec![
+        ListItem::new(Line::from(vec![
+            Span::styled("  Got 404 downloading ", Style::default().fg(C_DIM)),
+            Span::styled(pkg, Style::default().fg(Color::White)),
+            Span::styled(" — the mirror no longer", Style::default().fg(C_DIM)),
+        ])),
+        ListItem::new(Line::from(vec![
+            Span::styled("  hosts the version in your local database.", Style::default().fg(C_DIM)),
+        ])),
+        ListItem::new(Line::raw("")),
+    ];
+
+    let choices: &[(&str, &str, &str, Color)] = &[
+        ("↻", "Update & retry", "run 'sudo pacman -Sy', then retry install", C_GREEN),
+        ("✕", "Cancel",         "return to main screen",                     C_RED),
+    ];
+
+    for (i, (icon, label, desc, color)) in choices.iter().enumerate() {
+        let is_sel = i == selected;
+        let label_style = if is_sel {
+            Style::default().fg(*color).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(C_DIM)
+        };
+        items.push(ListItem::new(Line::from(vec![
+            Span::styled(if is_sel { " ▶ " } else { "   " }, Style::default().fg(C_YELLOW)),
+            Span::styled(*icon, Style::default().fg(*color)),
+            Span::raw(" "),
+            Span::styled(*label, label_style),
+            Span::styled(format!("  — {desc}"), Style::default().fg(C_DIM)),
+        ])));
+    }
+
+    let mut list_state = ListState::default();
+    list_state.select(Some(3 + selected)); // 3 info rows before the choices
+
+    let list = List::new(items)
+        .highlight_style(Style::default().bg(C_SELECT));
+    f.render_stateful_widget(list, chunks[0], &mut list_state);
+
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            " [↑↓/jk] Navigate  [Enter] Select  [Esc/q] Cancel",
+            Style::default().fg(C_DIM),
+        )),
+        chunks[1],
+    );
+}
 
 fn draw_no_launcher_choice(f: &mut Frame, area: Rect, pkg: &str, available_bins: &[String], selected: usize) {
     let popup = centered_rect(60, 50, area);

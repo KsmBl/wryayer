@@ -39,6 +39,10 @@ enum Commands {
         /// Used internally by the TUI after the user confirms the choice popup.
         #[arg(long, hide = true)]
         keep_without_launcher: bool,
+        /// Refresh package databases with 'sudo pacman -Sy' before downloading.
+        /// Used internally by the TUI after the user confirms an outdated-databases popup.
+        #[arg(long, hide = true)]
+        sync_db: bool,
     },
     /// Remove an installed app and its launchers
     Remove {
@@ -233,7 +237,7 @@ fn main() {
     let cli = Cli::parse();
 
     let result = match cli.command {
-        Commands::Install { pkg, app_name, bin_name, bin_names, into, keep_without_launcher } => {
+        Commands::Install { pkg, app_name, bin_name, bin_names, into, keep_without_launcher, sync_db } => {
             let names: Vec<String> = if !bin_names.is_empty() {
                 bin_names
             } else if let Some(b) = bin_name {
@@ -241,7 +245,7 @@ fn main() {
             } else {
                 vec![]
             };
-            commands::install::run(&pkg, app_name.as_deref(), &names, into.as_deref(), keep_without_launcher)
+            commands::install::run(&pkg, app_name.as_deref(), &names, into.as_deref(), keep_without_launcher, sync_db)
         }
         Commands::Remove { app_name, cascade } => {
             if cascade {

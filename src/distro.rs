@@ -304,6 +304,10 @@ mod arch {
     }
 
     pub fn download(pkg: &str, cache_dir: &Path) -> Result<PathBuf> {
+        download_impl(pkg, cache_dir, true)
+    }
+
+    fn download_impl(pkg: &str, cache_dir: &Path, allow_refresh: bool) -> Result<PathBuf> {
         let output = Command::new("pacman")
             .args(["-Spdd", "--noconfirm", pkg])
             .output()
@@ -352,9 +356,11 @@ mod arch {
             }
         };
 
+        let is_404 = format!("{primary_err:#}").contains("404");
+
         // On transient failures (not 404 — that means the package doesn't exist at
-        // that path) try every other mirror from the pacman mirrorlist files.
-        if !format!("{primary_err:#}").contains("404") {
+        // that path on this mirror) try every other mirror from the mirrorlist files.
+        if !is_404 {
             for fallback_url in mirror_fallback_urls(url, filename) {
                 eprintln!("  Retrying with fallback mirror...");
                 if download_url(&fallback_url, &dest).is_ok() {
@@ -364,12 +370,40 @@ mod arch {
             }
         }
 
-        Err(primary_err).with_context(|| {
-            format!(
-                "failed to download '{pkg}'\n  \
-                 If you see a 404, your package databases may be out of date: sudo pacman -Sy"
-            )
-        })
+        // 404 means the local package database is stale: the cached URL points to
+        // a version that's no longer on the mirror. Offer to refresh and retry.
+        if is_404 && allow_refresh {
+            let is_tty = unsafe { libc::isatty(libc::STDIN_FILENO) != 0 };
+            if is_tty {
+                eprint!(
+                    "\n  Package databases may be out of date (got 404 for '{pkg}').\n  \
+                     Update sources with 'sudo pacman -Sy'? [Y/n]: "
+                );
+                use std::io::Write;
+                let _ = std::io::stderr().flush();
+                let mut ans = String::new();
+                let _ = std::io::stdin().read_line(&mut ans);
+                let ans = ans.trim().to_ascii_lowercase();
+                if ans.is_empty() || ans == "y" || ans == "yes" {
+                    eprintln!("  Syncing package databases...");
+                    let ok = Command::new("sudo")
+                        .args(["pacman", "-Sy"])
+                        .status()
+                        .map(|s| s.success())
+                        .unwrap_or(false);
+                    if ok {
+                        return download_impl(pkg, cache_dir, false);
+                    }
+                    eprintln!("  warning: sudo pacman -Sy failed");
+                }
+            } else {
+                // Non-interactive (TUI subprocess): emit a marker so the TUI can
+                // show a popup and relaunch the install with --sync-db.
+                eprintln!("PROMPT_OUTDATED_PACKAGES:{pkg}");
+            }
+        }
+
+        Err(primary_err).with_context(|| format!("failed to download '{pkg}'"))
     }
 
     /// Return alternative download URLs for `filename` by substituting the same

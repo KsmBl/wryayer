@@ -17,7 +17,20 @@ pub fn run(
     bin_names: &[String],
     into: Option<&str>,
     keep_no_launcher: bool,
+    sync_db: bool,
 ) -> Result<()> {
+    if sync_db {
+        eprintln!("  Updating package databases...");
+        let ok = std::process::Command::new("sudo")
+            .args(["pacman", "-Sy"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !ok {
+            eprintln!("  warning: 'sudo pacman -Sy' failed — proceeding with existing databases");
+        }
+    }
+
     let merge_mode = into.is_some();
 
     // target_name: where the package's files actually live on disk.
