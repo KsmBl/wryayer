@@ -52,8 +52,6 @@ pub struct AppConfig {
     /// Detect the real terminal emulator and pass it into the sandbox via TERM_PROGRAM
     /// so tools like fastfetch report the correct terminal instead of "bwrap".
     pub spoof_terminal: bool,
-    /// XKB keyboard layout to inject via XKB_DEFAULT_LAYOUT (None = inherit from host)
-    pub keyboard_layout: Option<String>,
     /// Maximum RAM the app may use in MiB — enforced via systemd-run (None = no limit)
     pub ram_limit: Option<u64>,
 }
@@ -74,7 +72,6 @@ impl Default for AppConfig {
             spoof_cpuinfo: None,
             spoof_os: None,
             spoof_terminal: false,
-            keyboard_layout: None,
             ram_limit: None,
         }
     }
@@ -202,13 +199,6 @@ pub fn parse_ini(content: &str) -> Result<AppConfig> {
             ("spoof_terminal", v) => {
                 config.spoof_terminal = matches!(v, "on" | "true" | "1");
             }
-            ("keyboard_layout", v) => {
-                config.keyboard_layout = if v.is_empty() || v == "off" || v == "system" {
-                    None
-                } else {
-                    Some(v.to_owned())
-                };
-            }
             ("ram_limit", v) => {
                 config.ram_limit = if v.is_empty() || v == "0" || v == "off" || v == "none" {
                     None
@@ -307,12 +297,6 @@ pub fn format_ini(config: &AppConfig) -> String {
         if config.spoof_terminal {
             s.push_str("spoof_terminal = on\n");
         }
-    }
-    if let Some(ref layout) = config.keyboard_layout {
-        s.push_str("\n[keyboard]\n");
-        s.push_str("; Keyboard layout injected via XKB_DEFAULT_LAYOUT inside the sandbox\n");
-        s.push_str("; valid: us, de, colemak, dvorak (or any XKB layout name)\n");
-        s.push_str(&format!("keyboard_layout = {layout}\n"));
     }
     if let Some(mib) = config.ram_limit {
         s.push_str("\n[resources]\n");

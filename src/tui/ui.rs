@@ -972,14 +972,6 @@ fn draw_config(f: &mut Frame, area: Rect, app_name: &str, config: &AppConfig, se
             Some(s)            => { let t: String = s.chars().take(12).collect(); format!(" {t} ") }
         }),
         ("Spoof term.", if config.spoof_terminal { " detect".to_string() } else { "  off  ".to_string() }),
-        ("Keyboard   ", match config.keyboard_layout.as_deref() {
-            None            => " system  ".to_string(),
-            Some("us")      => " qwerty  ".to_string(),
-            Some("de")      => " qwertz  ".to_string(),
-            Some("colemak") => " colemak ".to_string(),
-            Some("dvorak")  => " dvorak  ".to_string(),
-            Some(s)         => { let t: String = s.chars().take(10).collect(); format!(" {t} ") }
-        }),
         ("RAM limit  ", match config.ram_limit {
             None      => " none    ".to_string(),
             Some(mib) if mib % 1024 == 0 => format!(" {} GiB  ", mib / 1024),

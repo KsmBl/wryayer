@@ -17,7 +17,6 @@ pub fn run(
     spoof_cpuinfo: Option<&str>,
     spoof_os: Option<&str>,
     spoof_terminal: Option<&str>,
-    keyboard_layout: Option<&str>,
     ram_limit: Option<&str>,
 ) -> Result<()> {
     read_manifest(app_name)
@@ -27,7 +26,7 @@ pub fn run(
     let changed = [
         temp_mode, temp_delete, network, camera, microphone, audio,
         spoof_hostname, spoof_username, spoof_machine_id, spoof_cpuinfo, spoof_os,
-        spoof_terminal, keyboard_layout, ram_limit,
+        spoof_terminal, ram_limit,
     ]
     .iter()
     .any(Option::is_some);
@@ -81,13 +80,6 @@ pub fn run(
             "on" | "true" | "1" => true,
             "off" | "false" | "0" => false,
             other => bail!("unknown spoof_terminal value '{other}'\n  valid: on, off"),
-        };
-    }
-
-    if let Some(v) = keyboard_layout {
-        config.keyboard_layout = match v {
-            "off" | "system" | "" => None,
-            other => Some(other.to_owned()),
         };
     }
 
@@ -205,10 +197,6 @@ fn print_config(app_name: &str, config: &AppConfig) {
         eprintln!("    cpuinfo    = {}", spoof_str(&config.spoof_cpuinfo));
         eprintln!("    os-release = {}", spoof_str(&config.spoof_os));
         eprintln!("    terminal   = {}", b(config.spoof_terminal));
-    }
-    match &config.keyboard_layout {
-        None         => eprintln!("  keyboard    = system"),
-        Some(layout) => eprintln!("  keyboard    = {layout}"),
     }
     match config.ram_limit {
         None      => eprintln!("  ram_limit   = none"),
