@@ -10,7 +10,7 @@ use crate::commands::dedup::format_bytes;
 use crate::config::{AppConfig, LocalDelete, TempMode};
 
 use super::{
-    App, Screen, Tab, CFG_SAVE, CFG_SHARES,
+    App, Screen, Tab, CFG_SAVE, CFG_SHARES, APP_CFG_SAVE,
     setting_description, setting_options, setting_current, setting_title,
     HOSTNAME_SAMPLE, MACHINE_ID_SAMPLE, USERNAME_SAMPLE,
 };
@@ -1050,6 +1050,15 @@ fn draw_settings_tab(f: &mut Frame, app: &mut App, area: Rect) {
             Some(mib) if mib % 1024 == 0 => format!("{} GiB", mib / 1024),
             Some(mib) => format!("{} MiB", mib),
         }),
+        ("Resolution",  match config.spoof_resolution.as_deref() {
+            None             => "system".into(),
+            Some("1280x720") => "1280×720".into(),
+            Some("1920x1080")=> "1920×1080".into(),
+            Some("2560x1440")=> "2560×1440".into(),
+            Some("3840x2160")=> "3840×2160".into(),
+            Some(s)          => s.chars().take(10).collect(),
+        }),
+        ("Shortcut",    if config.create_shortcut { "yes".into() } else { "no".into() }),
     ];
 
     // Reserve last 2 rows for separator + save
@@ -1257,6 +1266,14 @@ fn draw_config(f: &mut Frame, area: Rect, app_name: &str, config: &AppConfig, se
             Some(mib) if mib % 1024 == 0 => format!(" {} GiB  ", mib / 1024),
             Some(mib) => format!(" {} MiB  ", mib),
         }),
+        ("Resolution ", match config.spoof_resolution.as_deref() {
+            None             => " system  ".to_string(),
+            Some("1280x720") => " 1280×720".to_string(),
+            Some("1920x1080")=> " 1920×1080".to_string(),
+            Some("2560x1440")=> " 2560×1440".to_string(),
+            Some("3840x2160")=> " 3840×2160".to_string(),
+            Some(s)          => { let t: String = s.chars().take(10).collect(); format!(" {t}") }
+        }),
     ];
 
     let row_h = 2u16;
@@ -1297,7 +1314,7 @@ fn draw_config(f: &mut Frame, area: Rect, app_name: &str, config: &AppConfig, se
     }
 
     // Save button — always at the bottom
-    let is_sel_save = selected == CFG_SAVE;
+    let is_sel_save = selected == APP_CFG_SAVE;
     let btn_style = if is_sel_save {
         Style::default().fg(Color::Black).bg(C_GREEN).add_modifier(Modifier::BOLD)
     } else {

@@ -495,6 +495,33 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
         }
     }
 
+    // ── Resolution spoofing ───────────────────────────────────────────────────
+    if let Some(ref res) = config.spoof_resolution {
+        if let Some((w, h)) = parse_resolution(res) {
+            // Bind a fake xrandr script so apps that shell out to xrandr see
+            // the target resolution. (Chromium/Electron query X11/Wayland
+            // directly via libxrandr and are not affected by this path.)
+            let xrandr_script = format!(
+                "#!/bin/sh\n\
+                 echo 'Screen 0: minimum 320 x 200, current {w} x {h}, maximum 16384 x 16384'\n\
+                 echo 'Virtual-1 connected primary {w}x{h}+0+0 (normal left inverted right x axis y axis) 527mm x 296mm'\n\
+                 echo '   {w}x{h}     60.00*+'\n"
+            );
+            let xf = spoof_dir.join("xrandr");
+            if std::fs::write(&xf, &xrandr_script).is_ok() {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&xf, std::fs::Permissions::from_mode(0o755));
+                if let Some(s) = xf.to_str() {
+                    cmd.args(["--ro-bind", s, "/usr/bin/xrandr"]);
+                }
+            }
+            // Env vars used by some native apps and toolkits to detect resolution
+            let res_str = format!("{w}x{h}");
+            cmd.args(["--setenv", "RESOLUTION", &res_str]);
+            cmd.args(["--setenv", "SCREEN_RESOLUTION", &res_str]);
+        }
+    }
+
     // ── Isolated XDG_RUNTIME_DIR ───────────────────────────────────────────────
     //
     // Electron/Qt apps (VS Code, Discord, …) store per-instance IPC sockets in
@@ -650,6 +677,14 @@ fn detect_terminal_name() -> Option<String> {
         pid = ppid;
     }
     None
+}
+
+/// Parse "WxH" or "W×H" into (width, height).
+fn parse_resolution(s: &str) -> Option<(u32, u32)> {
+    // Accept both ASCII 'x' and Unicode '×'
+    let sep = if s.contains('×') { '×' } else { 'x' };
+    let (w, h) = s.split_once(sep)?;
+    Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
 }
 
 /// Find the absolute path to bwrap by searching PATH.

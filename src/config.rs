@@ -54,6 +54,10 @@ pub struct AppConfig {
     pub spoof_terminal: bool,
     /// Maximum RAM the app may use in MiB — enforced via systemd-run (None = no limit)
     pub ram_limit: Option<u64>,
+    /// Spoof screen resolution reported by xrandr and via env vars — e.g. "1920x1080"
+    pub spoof_resolution: Option<String>,
+    /// Whether to create a ~/bin shortcut by default when installing (global only)
+    pub create_shortcut: bool,
 }
 
 impl Default for AppConfig {
@@ -73,6 +77,8 @@ impl Default for AppConfig {
             spoof_os: None,
             spoof_terminal: false,
             ram_limit: None,
+            spoof_resolution: None,
+            create_shortcut: true,
         }
     }
 }
@@ -206,6 +212,16 @@ pub fn parse_ini(content: &str) -> Result<AppConfig> {
                     v.parse::<u64>().ok().filter(|&n| n > 0)
                 };
             }
+            ("spoof_resolution", v) => {
+                config.spoof_resolution = if v.is_empty() || v == "off" || v == "system" {
+                    None
+                } else {
+                    Some(v.to_owned())
+                };
+            }
+            ("create_shortcut", v) => {
+                config.create_shortcut = !matches!(v, "off" | "false" | "0" | "no");
+            }
             _ => {}
         }
     }
@@ -302,6 +318,16 @@ pub fn format_ini(config: &AppConfig) -> String {
         s.push_str("\n[resources]\n");
         s.push_str("; Maximum RAM in MiB (RAM + swap). Enforced via systemd-run MemoryMax+MemorySwapMax.\n");
         s.push_str(&format!("ram_limit = {mib}\n"));
+    }
+    if let Some(ref res) = config.spoof_resolution {
+        s.push_str("\n[spoof]\n");
+        s.push_str("; Screen resolution to report via xrandr and env vars (e.g. 1920x1080)\n");
+        s.push_str(&format!("spoof_resolution = {res}\n"));
+    }
+    if !config.create_shortcut {
+        s.push_str("\n[behavior]\n");
+        s.push_str("; Create ~/bin/<name> shortcut by default when installing apps\n");
+        s.push_str("create_shortcut = off\n");
     }
     s
 }

@@ -1382,20 +1382,20 @@ fn execute_action(app: &mut App, action: PendingAction) {
         PendingAction::Install { pkg, app_name: None, into: None } => {
             let title = format!("Install — {pkg}");
             let args = vec!["install".into(), pkg.clone()];
-            app.screen = Screen::AskShortcut { pkg, title, args, selected: 0 };
+            app.screen = Screen::AskShortcut { pkg, title, args, selected: if app.global_config.create_shortcut { 0 } else { 1 } };
             app.needs_clear = true;
         }
         PendingAction::Install { pkg, app_name: Some(an), into: None } => {
             let title = format!("Install — {pkg} as {an}");
             let args = vec!["install".into(), pkg.clone(), "--app-name".into(), an];
-            app.screen = Screen::AskShortcut { pkg, title, args, selected: 0 };
+            app.screen = Screen::AskShortcut { pkg, title, args, selected: if app.global_config.create_shortcut { 0 } else { 1 } };
             app.needs_clear = true;
         }
         PendingAction::Install { pkg, app_name, into: Some(target) } => {
             let mut args = vec!["install".into(), pkg.clone(), "--into".into(), target.clone()];
             if let Some(an) = app_name { args.extend(["--app-name".into(), an]); }
             let title = format!("Install — {pkg} → {target}");
-            app.screen = Screen::AskShortcut { pkg, title, args, selected: 0 };
+            app.screen = Screen::AskShortcut { pkg, title, args, selected: if app.global_config.create_shortcut { 0 } else { 1 } };
             app.needs_clear = true;
         }
         PendingAction::Export(name) => {
@@ -1474,8 +1474,8 @@ fn on_op_done(app: &mut App, code: KeyCode) -> Result<()> {
 
 // Rows: 0=network 1=camera 2=microphone 3=audio 4=temp_mode 5=temp_delete 6=shared_dirs
 //       7=spoof_hostname 8=spoof_username 9=spoof_machine_id 10=spoof_cpuinfo 11=spoof_os
-//       12=spoof_terminal 13=ram_limit 14=Save
-pub const CFG_LEN: usize = 15;
+//       12=spoof_terminal 13=ram_limit 14=spoof_resolution
+// Per-app Config: 15=Save   |   Global Settings: 15=create_shortcut 16=Save
 pub const CFG_SHARES: usize = 6;
 pub const CFG_SPOOF_HOSTNAME: usize = 7;
 pub const CFG_SPOOF_USERNAME: usize = 8;
@@ -1484,7 +1484,14 @@ pub const CFG_SPOOF_CPUINFO: usize = 10;
 pub const CFG_SPOOF_OS: usize = 11;
 pub const CFG_SPOOF_TERMINAL: usize = 12;
 pub const CFG_RAM_LIMIT: usize = 13;
-pub const CFG_SAVE: usize = 14;
+pub const CFG_SPOOF_RESOLUTION: usize = 14;
+/// Save button in the per-app Config screen (one row shorter — no create_shortcut)
+pub const APP_CFG_SAVE: usize = 15;
+pub const APP_CFG_LEN: usize = 16;
+/// create_shortcut only shown in the global Settings tab, not per-app Config
+pub const CFG_CREATE_SHORTCUT: usize = 15;
+pub const CFG_SAVE: usize = 16;
+pub const CFG_LEN: usize = 17;
 
 /// A fixed 32-char hex machine-id that apps can use as a plausible-looking ID.
 pub const MACHINE_ID_SAMPLE: &str = "cafebabe0011223344556677deadbeef";
@@ -1506,10 +1513,10 @@ fn on_config(app: &mut App, code: KeyCode) {
             *selected = selected.saturating_sub(1);
         }
         KeyCode::Down | KeyCode::Char('j') => {
-            *selected = (*selected + 1).min(CFG_LEN - 1);
+            *selected = (*selected + 1).min(APP_CFG_LEN - 1);
         }
         KeyCode::Right | KeyCode::Char(' ') => {
-            if *selected == CFG_SAVE {
+            if *selected == APP_CFG_SAVE {
                 let name = app_name.clone();
                 let cfg = config.clone();
                 app.screen = Screen::Main;
@@ -1529,12 +1536,12 @@ fn on_config(app: &mut App, code: KeyCode) {
         }
         KeyCode::Left => {
             // Inverse of Right — cycle backward. Special rows are no-ops.
-            if *selected != CFG_SAVE && *selected != CFG_SHARES {
+            if *selected != APP_CFG_SAVE && *selected != CFG_SHARES {
                 cycle_setting(config, *selected, -1);
             }
         }
         KeyCode::Enter => {
-            if *selected == CFG_SAVE {
+            if *selected == APP_CFG_SAVE {
                 let name = app_name.clone();
                 let cfg = config.clone();
                 app.screen = Screen::Main;
@@ -1590,6 +1597,8 @@ pub fn setting_options(idx: usize) -> Vec<&'static str> {
         CFG_SPOOF_MACHINE_ID => vec!["system", "random", "sample", "input"],
         CFG_SPOOF_TERMINAL => vec!["off", "detect"],
         CFG_RAM_LIMIT => vec!["none", "512 MiB", "1 GiB", "2 GiB", "4 GiB", "8 GiB"],
+        CFG_SPOOF_RESOLUTION => vec!["system", "1280×720", "1920×1080", "2560×1440", "3840×2160", "input"],
+        CFG_CREATE_SHORTCUT => vec!["yes", "no"],
         _ => vec![],
     }
 }
@@ -1611,6 +1620,8 @@ pub fn setting_title(idx: usize) -> &'static str {
         11 => "Spoof OS release",
         12 => "Spoof terminal name",
         13 => "RAM limit",
+        14 => "Spoof resolution",
+        15 => "Default shortcut",
         _ => "Option",
     }
 }
@@ -1632,6 +1643,8 @@ pub fn setting_description(idx: usize) -> &'static str {
         11 => "Override /etc/os-release inside the sandbox.\n\nChoose a preset (Ubuntu, Arch, Windows 11, ArduinoIDE) or 'input' to type any OS name.\n'system' exposes the real OS release.",
         12 => "Detect your real terminal emulator and pass its identity into the sandbox.\n\nWalks the process tree to find kitty, foot, alacritty, WezTerm, etc., then sets the matching env var (KITTY_WINDOW_ID, WEZTERM_PANE, …).\n\nFixes fastfetch / neofetch showing 'bwrap' instead of your real terminal.",
         13 => "Maximum RAM the app may use (RAM + swap both capped).\n\nEnforced via systemd-run MemoryMax + MemorySwapMax=0.\n'none' disables the limit. Requires systemd.",
+        14 => "Spoof the screen resolution reported to the app.\n\nCreates a fake xrandr binary inside the sandbox and sets resolution env vars. Works for apps that call xrandr as a subprocess.\n\nNote: Chromium/Electron apps query the display server directly (X11/Wayland) and are not affected by this setting.",
+        15 => "Whether to pre-select 'Yes' or 'No' in the shortcut prompt shown before each install.\n\nThe prompt always appears — this only controls which answer is highlighted by default.",
         _ => "No description available.",
     }
 }
@@ -1694,6 +1707,16 @@ pub fn option_description(setting_idx: usize, choice_idx: usize) -> &'static str
         (13, 3) => "2 GiB — Cap the app at 2 GiB (2048 MiB) of RAM. Good default for everyday apps.",
         (13, 4) => "4 GiB — Cap the app at 4 GiB (4096 MiB) of RAM.",
         (13, 5) => "8 GiB — Cap the app at 8 GiB (8192 MiB) of RAM.",
+        // Spoof resolution
+        (14, 0) => "system — No resolution spoofing. The app sees the real screen dimensions.",
+        (14, 1) => "1280×720 — Report HD (1280×720) to xrandr and via env vars.",
+        (14, 2) => "1920×1080 — Report FHD (1920×1080) to xrandr and via env vars.",
+        (14, 3) => "2560×1440 — Report QHD (2560×1440) to xrandr and via env vars.",
+        (14, 4) => "3840×2160 — Report 4K (3840×2160) to xrandr and via env vars.",
+        (14, 5) => "input — Type a custom resolution (e.g. 1600x900). Stored as WxH.",
+        // Default shortcut
+        (15, 0) => "yes — Pre-select 'Yes' in the shortcut prompt. The prompt still appears; press Enter to confirm quickly.",
+        (15, 1) => "no — Pre-select 'No' in the shortcut prompt. Useful if you rarely want ~/bin shortcuts.",
         _ => "No description available.",
     }
 }
@@ -1760,6 +1783,15 @@ pub fn setting_current(config: &AppConfig, idx: usize) -> usize {
             Some(n) if n <= 4096 => 4,
             _           => 5,
         },
+        CFG_SPOOF_RESOLUTION => match config.spoof_resolution.as_deref() {
+            None             => 0,
+            Some("1280x720") => 1,
+            Some("1920x1080")=> 2,
+            Some("2560x1440")=> 3,
+            Some("3840x2160")=> 4,
+            _                => 5,
+        },
+        CFG_CREATE_SHORTCUT => if config.create_shortcut { 0 } else { 1 },
         _ => 0,
     }
 }
@@ -1810,6 +1842,14 @@ pub fn apply_setting(config: &mut AppConfig, idx: usize, choice: usize) {
         (13, 3) => config.ram_limit = Some(2048),
         (13, 4) => config.ram_limit = Some(4096),
         (13, 5) => config.ram_limit = Some(8192),
+        (14, 0) => config.spoof_resolution = None,
+        (14, 1) => config.spoof_resolution = Some("1280x720".to_string()),
+        (14, 2) => config.spoof_resolution = Some("1920x1080".to_string()),
+        (14, 3) => config.spoof_resolution = Some("2560x1440".to_string()),
+        (14, 4) => config.spoof_resolution = Some("3840x2160".to_string()),
+        // (14, 5) = "input" — handled by on_option_picker which opens TextInput
+        (15, 0) => config.create_shortcut = true,
+        (15, 1) => config.create_shortcut = false,
         _ => {}
     }
 }
@@ -1877,27 +1917,30 @@ fn on_option_picker(app: &mut App, code: KeyCode) {
                 return;
             }
 
-            // "input" option opens the free-text overlay for hostname/username/machine-id/os.
+            // "input" option opens the free-text overlay for hostname/username/machine-id/os/resolution.
             let is_input_choice = match idx {
                 CFG_SPOOF_HOSTNAME | CFG_SPOOF_USERNAME => choice == 2,
                 CFG_SPOOF_OS => choice == 5,
                 CFG_SPOOF_MACHINE_ID => choice == 3,
+                CFG_SPOOF_RESOLUTION => choice == 5,
                 _ => false,
             };
             if is_input_choice {
                 let current = match idx {
-                    CFG_SPOOF_HOSTNAME   => cfg.spoof_hostname.clone().unwrap_or_default(),
-                    CFG_SPOOF_USERNAME   => cfg.spoof_username.clone().unwrap_or_default(),
-                    CFG_SPOOF_MACHINE_ID => cfg.spoof_machine_id.clone().unwrap_or_default(),
-                    CFG_SPOOF_OS         => cfg.spoof_os.clone().unwrap_or_default(),
+                    CFG_SPOOF_HOSTNAME    => cfg.spoof_hostname.clone().unwrap_or_default(),
+                    CFG_SPOOF_USERNAME    => cfg.spoof_username.clone().unwrap_or_default(),
+                    CFG_SPOOF_MACHINE_ID  => cfg.spoof_machine_id.clone().unwrap_or_default(),
+                    CFG_SPOOF_OS          => cfg.spoof_os.clone().unwrap_or_default(),
+                    CFG_SPOOF_RESOLUTION  => cfg.spoof_resolution.clone().unwrap_or_default(),
                     _ => String::new(),
                 };
                 // Clear pre-fill when current value is one of the fixed presets.
                 let is_preset = match idx {
-                    CFG_SPOOF_HOSTNAME   => current == HOSTNAME_SAMPLE,
-                    CFG_SPOOF_USERNAME   => current == USERNAME_SAMPLE,
-                    CFG_SPOOF_MACHINE_ID => current == "random" || current == MACHINE_ID_SAMPLE,
-                    CFG_SPOOF_OS         => matches!(current.as_str(), "ubuntu" | "arch" | "windows" | "arduinoide"),
+                    CFG_SPOOF_HOSTNAME    => current == HOSTNAME_SAMPLE,
+                    CFG_SPOOF_USERNAME    => current == USERNAME_SAMPLE,
+                    CFG_SPOOF_MACHINE_ID  => current == "random" || current == MACHINE_ID_SAMPLE,
+                    CFG_SPOOF_OS          => matches!(current.as_str(), "ubuntu" | "arch" | "windows" | "arduinoide"),
+                    CFG_SPOOF_RESOLUTION  => matches!(current.as_str(), "1280x720" | "1920x1080" | "2560x1440" | "3840x2160"),
                     _ => false,
                 };
                 let value = if is_preset || current.is_empty() { String::new() } else { current };
@@ -1981,11 +2024,12 @@ fn on_setting_help(app: &mut App, _code: KeyCode) {
 fn set_spoof_field(config: &mut AppConfig, idx: usize, value: String) {
     let v = if value.is_empty() { None } else { Some(value) };
     match idx {
-        CFG_SPOOF_HOSTNAME   => config.spoof_hostname   = v,
-        CFG_SPOOF_USERNAME   => config.spoof_username   = v,
-        CFG_SPOOF_MACHINE_ID => config.spoof_machine_id = v,
-        CFG_SPOOF_CPUINFO    => config.spoof_cpuinfo    = v,
-        CFG_SPOOF_OS         => config.spoof_os         = v,
+        CFG_SPOOF_HOSTNAME    => config.spoof_hostname    = v,
+        CFG_SPOOF_USERNAME    => config.spoof_username    = v,
+        CFG_SPOOF_MACHINE_ID  => config.spoof_machine_id  = v,
+        CFG_SPOOF_CPUINFO     => config.spoof_cpuinfo     = v,
+        CFG_SPOOF_OS          => config.spoof_os          = v,
+        CFG_SPOOF_RESOLUTION  => config.spoof_resolution  = v,
         _ => {}
     }
 }

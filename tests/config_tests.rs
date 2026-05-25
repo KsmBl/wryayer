@@ -187,6 +187,8 @@ fn round_trip_all_non_default_values() {
         spoof_os:            None,
         spoof_terminal:      false,
         ram_limit:           None,
+        spoof_resolution:    None,
+        create_shortcut:     true,
     };
     let parsed = parse_ini(&format_ini(&original)).unwrap();
     assert_eq!(parsed.temp_mode,   TempMode::Ramdisk);
