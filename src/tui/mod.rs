@@ -592,8 +592,20 @@ fn open_editor_inline(
     terminal.clear()?;
     app.needs_clear = false;
 
-    // If the editor ran and the file exists, update config and go to Config screen.
-    if edited && cpuinfo_path.exists() {
+    // If the editor ran and the file exists, update config and return to the right screen.
+    if app_name.is_empty() {
+        // Global settings: update in-memory global config, return to Settings tab.
+        if edited && cpuinfo_path.exists() {
+            app.global_config.spoof_cpuinfo = Some("custom".to_string());
+            let _ = crate::config::write_global_config(&app.global_config);
+            app.status = "CPU info saved.".to_string();
+        } else if chosen.is_none() {
+            app.status = "No editor available — install nvim, vim, vi, or nano.".to_string();
+        }
+        app.global_selected = CFG_SPOOF_CPUINFO;
+        app.tab = Tab::Settings;
+        app.screen = Screen::Main;
+    } else if edited && cpuinfo_path.exists() {
         if let Ok(mut cfg) = crate::config::read_config(app_name) {
             cfg.spoof_cpuinfo = Some("custom".to_string());
             let _ = crate::config::write_config(app_name, &cfg);
