@@ -552,13 +552,30 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
         cmd.args(["--setenv", "XDG_RUNTIME_DIR", &isolated_rt]);
     }
 
-    // Keyboard layout: inject XKB_DEFAULT_LAYOUT so XKB-aware toolkits use the
-    // configured layout instead of inheriting the host compositor's setting.
+    // Keyboard layout.
+    //
+    // XKB_DEFAULT_LAYOUT is only a libxkbcommon fallback — Wayland compositors
+    // push keymaps via the wl_keyboard protocol so the env var is ignored by
+    // native Wayland apps.  For X11/XWayland apps we also need to call
+    // setxkbmap inside the sandbox, which talks to the X display and actually
+    // changes the active keymap for X clients.
+    //
+    // Implementation: bind the host setxkbmap binary into the sandbox and use a
+    // minimal sh wrapper that calls it before exec-ing the real binary.  The
+    // wrapper uses "$0"/"$@" so all positional args are forwarded untouched.
+    // setxkbmap failures are silenced (no DISPLAY on pure-Wayland sessions, or
+    // setxkbmap absent) — the env var fallback still applies in those cases.
     if let Some(ref layout) = config.keyboard_layout {
         cmd.args(["--setenv", "XKB_DEFAULT_LAYOUT", layout.as_str()]);
+        cmd.args(["--ro-bind-try", "/usr/bin/setxkbmap", "/usr/bin/setxkbmap"]);
+        cmd.args([
+            "--", "sh", "-c",
+            "setxkbmap \"$XKB_DEFAULT_LAYOUT\" 2>/dev/null; exec \"$0\" \"$@\"",
+            binary,
+        ]);
+    } else {
+        cmd.args(["--", binary]);
     }
-
-    cmd.args(["--", binary]);
     cmd.args(args);
     (cmd, term_spoof_dir)
 }
