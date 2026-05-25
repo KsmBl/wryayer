@@ -186,6 +186,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 draw_bg_op_view(f, area, &title, &log, done, success, progress, elapsed, app.log_scroll);
             }
         }
+        Screen::AskShortcut { pkg, selected, .. } => {
+            let pkg = pkg.clone();
+            let selected = *selected;
+            draw_ask_shortcut(f, area, &pkg, selected);
+        }
     }
 }
 
@@ -2014,6 +2019,59 @@ fn draw_outdated_packages(f: &mut Frame, area: Rect, pkg: &str, selected: usize)
             Style::default().fg(C_DIM),
         )),
         chunks[1],
+    );
+}
+
+fn draw_ask_shortcut(f: &mut Frame, area: Rect, pkg: &str, selected: usize) {
+    let popup = centered_rect(52, 40, area);
+    f.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Create shortcut? ")
+        .title_style(Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD))
+        .border_style(Style::default().fg(C_ACCENT));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(2), Constraint::Min(0), Constraint::Length(1)])
+        .split(inner);
+
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("  ~/bin/", Style::default().fg(C_DIM)),
+            Span::styled(pkg, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+        ])),
+        chunks[0],
+    );
+
+    let choices: &[(&str, &str, Color)] = &[
+        ("Yes", "add shortcut to ~/bin/", C_GREEN),
+        ("No",  "install without shortcut", C_DIM),
+    ];
+    let items: Vec<ListItem> = choices.iter().enumerate().map(|(i, (label, desc, color))| {
+        let is_sel = i == selected;
+        ListItem::new(Line::from(vec![
+            Span::styled(if is_sel { " ▶ " } else { "   " }, Style::default().fg(C_ACCENT)),
+            Span::styled(*label, Style::default().fg(if is_sel { *color } else { C_DIM })
+                .add_modifier(if is_sel { Modifier::BOLD } else { Modifier::empty() })),
+            Span::styled(format!("  — {desc}"), Style::default().fg(C_DIM)),
+        ]))
+    }).collect();
+
+    let mut list_state = ListState::default();
+    list_state.select(Some(selected));
+    let list = List::new(items).highlight_style(Style::default().bg(C_SELECT));
+    f.render_stateful_widget(list, chunks[1], &mut list_state);
+
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            " [↑↓] Navigate  [Enter] Confirm  [Esc] Cancel",
+            Style::default().fg(C_DIM),
+        )),
+        chunks[2],
     );
 }
 

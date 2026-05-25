@@ -177,6 +177,14 @@ pub enum Screen {
         install_args: Vec<String>,
         selected: usize, // 0 = update & retry, 1 = cancel
     },
+    /// Ask whether to create a ~/bin/<pkg> shortcut before starting the install.
+    AskShortcut {
+        pkg: String,
+        title: String,
+        /// Install args ready to pass to spawn_wryayer (without --keep-without-launcher).
+        args: Vec<String>,
+        selected: usize, // 0 = yes (create shortcut), 1 = no (skip)
+    },
 }
 
 pub enum PendingAction {
@@ -654,6 +662,7 @@ fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
         Screen::NoLauncherChoice { .. } => 16,
         Screen::OutdatedPackages { .. } => 17,
         Screen::BgOpView { .. } => 18,
+        Screen::AskShortcut { .. } => 19,
     };
 
     match tag {
@@ -676,6 +685,7 @@ fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
         16 => on_no_launcher_choice(app, code),
         17 => on_outdated_packages(app, code),
         18 => on_bg_op_view(app, code),
+        19 => on_ask_shortcut(app, code),
         _ => {}
     }
     Ok(())
@@ -1432,19 +1442,22 @@ fn execute_action(app: &mut App, action: PendingAction) {
             launch_op(app, format!("Update — {name}"), vec!["update".into(), name], None, true),
         PendingAction::Install { pkg, app_name: None, into: None } => {
             let title = format!("Install — {pkg}");
-            let args = vec!["install".into(), pkg];
-            do_install(app, title, args);
+            let args = vec!["install".into(), pkg.clone()];
+            app.screen = Screen::AskShortcut { pkg, title, args, selected: 0 };
+            app.needs_clear = true;
         }
         PendingAction::Install { pkg, app_name: Some(an), into: None } => {
             let title = format!("Install — {pkg} as {an}");
-            let args = vec!["install".into(), pkg, "--app-name".into(), an];
-            do_install(app, title, args);
+            let args = vec!["install".into(), pkg.clone(), "--app-name".into(), an];
+            app.screen = Screen::AskShortcut { pkg, title, args, selected: 0 };
+            app.needs_clear = true;
         }
         PendingAction::Install { pkg, app_name, into: Some(target) } => {
             let mut args = vec!["install".into(), pkg.clone(), "--into".into(), target.clone()];
             if let Some(an) = app_name { args.extend(["--app-name".into(), an]); }
             let title = format!("Install — {pkg} → {target}");
-            do_install(app, title, args);
+            app.screen = Screen::AskShortcut { pkg, title, args, selected: 0 };
+            app.needs_clear = true;
         }
         PendingAction::Export(name) => {
             let total = dir_bytes(&format!(
@@ -2430,6 +2443,35 @@ fn on_bg_op_view(app: &mut App, code: KeyCode) {
         }
         KeyCode::Down | KeyCode::Char('j') => {
             app.log_scroll += 1;
+        }
+        _ => {}
+    }
+}
+
+// ── Shortcut confirmation ─────────────────────────────────────────────────────
+
+fn on_ask_shortcut(app: &mut App, code: KeyCode) {
+    let Screen::AskShortcut { selected, .. } = &mut app.screen else { return };
+    match code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            app.install_queue.clear();
+            app.screen = Screen::Main;
+            app.needs_clear = true;
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            if *selected > 0 { *selected -= 1; }
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if *selected < 1 { *selected += 1; }
+        }
+        KeyCode::Enter | KeyCode::Char(' ') => {
+            let screen = std::mem::replace(&mut app.screen, Screen::Main);
+            if let Screen::AskShortcut { title, mut args, selected, .. } = screen {
+                if selected == 1 {
+                    args.push("--keep-without-launcher".into());
+                }
+                do_install(app, title, args);
+            }
         }
         _ => {}
     }
