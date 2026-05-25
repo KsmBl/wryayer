@@ -24,16 +24,10 @@ const C_SELECT: Color = Color::Rgb(40, 60, 80);
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
-    let bg_count = app.background_ops.len();
 
-    let mut constraints = vec![Constraint::Length(3), Constraint::Min(0)];
-    for _ in 0..bg_count {
-        constraints.push(Constraint::Length(1));
-    }
-    constraints.push(Constraint::Length(1));
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints(constraints)
+        .constraints([Constraint::Length(3), Constraint::Min(0), Constraint::Length(1)])
         .split(area);
 
     draw_tabs(f, app, chunks[0]);
@@ -46,11 +40,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Tab::Settings  => draw_settings_tab(f, app, chunks[1]),
     }
 
-    for i in 0..bg_count {
-        draw_bg_op_mini(f, app, i, chunks[2 + i]);
-    }
-
-    draw_statusbar(f, app, chunks[2 + bg_count]);
+    draw_statusbar(f, app, chunks[2]);
 
     // Overlays
     match &app.screen {
@@ -173,18 +163,6 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             let pkg = pkg.clone();
             let selected = *selected;
             draw_outdated_packages(f, area, &pkg, selected);
-        }
-        Screen::BgOpView { idx } => {
-            let idx = *idx;
-            if let Some(op) = app.background_ops.get(idx) {
-                let title = op.title.clone();
-                let log = op.log.clone();
-                let done = op.done;
-                let success = op.success;
-                let progress = op.progress;
-                let elapsed = op.started.elapsed();
-                draw_bg_op_view(f, area, &title, &log, done, success, progress, elapsed, app.log_scroll);
-            }
         }
         Screen::AskShortcut { pkg, selected, .. } => {
             let pkg = pkg.clone();
@@ -1072,7 +1050,6 @@ fn draw_settings_tab(f: &mut Frame, app: &mut App, area: Rect) {
             Some(mib) if mib % 1024 == 0 => format!("{} GiB", mib / 1024),
             Some(mib) => format!("{} MiB", mib),
         }),
-        ("Bg installs", b(config.background_installs).to_string()),
     ];
 
     // Reserve last 2 rows for separator + save
@@ -1280,7 +1257,6 @@ fn draw_config(f: &mut Frame, area: Rect, app_name: &str, config: &AppConfig, se
             Some(mib) if mib % 1024 == 0 => format!(" {} GiB  ", mib / 1024),
             Some(mib) => format!(" {} MiB  ", mib),
         }),
-        ("Bg installs", if config.background_installs { "  on " } else { " off " }.to_string()),
     ];
 
     let row_h = 2u16;
@@ -2185,100 +2161,6 @@ fn draw_duplicate_install(f: &mut Frame, area: Rect, pkg: &str, value: &str) {
             " [Enter] Install  [Esc] Cancel  [Backspace] Delete char",
             Style::default().fg(C_DIM),
         )),
-        chunks[2],
-    );
-}
-
-// ── Background op tray bar ────────────────────────────────────────────────────
-
-fn draw_bg_op_mini(f: &mut Frame, app: &App, idx: usize, area: Rect) {
-    let Some(op) = app.background_ops.get(idx) else { return };
-    let color = if op.done { if op.success { C_GREEN } else { C_RED } } else { C_ACCENT };
-    let icon = if op.done { if op.success { "✓" } else { "✗" } } else { "…" };
-    let elapsed = op.started.elapsed();
-    let elapsed_str = format!("{:.1}s", elapsed.as_secs_f32());
-    let max_title = (area.width as usize).saturating_sub(24).max(8);
-    let title: String = op.title.chars().take(max_title).collect();
-    let line = Line::from(vec![
-        Span::styled(format!(" [{}] ", idx + 1), Style::default().fg(C_YELLOW).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("{icon} "), Style::default().fg(color)),
-        Span::styled(title, Style::default().fg(if op.done { C_DIM } else { Color::White })),
-        Span::styled(format!("  {elapsed_str}"), Style::default().fg(color)),
-        Span::styled(if op.done { "  [Enter] dismiss" } else { "  [Enter] view" }, Style::default().fg(C_DIM)),
-    ]);
-    f.render_widget(
-        Paragraph::new(line).style(Style::default().bg(Color::Rgb(20, 20, 30))),
-        area,
-    );
-}
-
-// ── Background op full log view ───────────────────────────────────────────────
-
-fn draw_bg_op_view(
-    f: &mut Frame,
-    area: Rect,
-    title: &str,
-    log: &[String],
-    done: bool,
-    success: bool,
-    _progress: Option<(u64, u64)>,
-    elapsed: std::time::Duration,
-    log_scroll: usize,
-) {
-    let border_color = if !done { C_ACCENT } else if success { C_GREEN } else { C_RED };
-    let popup = centered_rect(80, 70, area);
-    f.render_widget(Clear, popup);
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(0), Constraint::Length(1)])
-        .split(popup);
-
-    let spin = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-    let frame_idx = (elapsed.as_millis() / 100) as usize % spin.len();
-    let spinner = if done { if success { "✓" } else { "✗" } } else { spin[frame_idx] };
-    let status = if !done {
-        format!(" {spinner}  Running… {:.1}s", elapsed.as_secs_f32())
-    } else if success {
-        format!(" {spinner}  Done  ({:.1}s)", elapsed.as_secs_f32())
-    } else {
-        format!(" {spinner}  Failed  ({:.1}s)", elapsed.as_secs_f32())
-    };
-
-    let header_block = Block::default()
-        .borders(Borders::LEFT | Borders::RIGHT | Borders::TOP)
-        .title(format!(" {title} "))
-        .title_style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD))
-        .border_style(Style::default().fg(border_color));
-    f.render_widget(
-        Paragraph::new(status).block(header_block).style(Style::default().fg(border_color)),
-        chunks[0],
-    );
-
-    let log_block = Block::default()
-        .borders(Borders::LEFT | Borders::RIGHT)
-        .border_style(Style::default().fg(border_color));
-    let inner = log_block.inner(chunks[1]);
-    f.render_widget(log_block, chunks[1]);
-
-    let visible = inner.height as usize;
-    let scroll = log_scroll.min(log.len().saturating_sub(visible));
-    let lines: Vec<Line> = log.iter().skip(scroll).take(visible).map(|l| {
-        Line::from(Span::styled(format!(" {l}"), Style::default().fg(log_line_color(l))))
-    }).collect();
-    f.render_widget(Paragraph::new(lines), inner);
-
-    let footer = if done {
-        "  [↑↓] Scroll  [q/Esc/Enter] Close"
-    } else {
-        "  [↑↓] Scroll  [q/Esc] Close"
-    };
-    f.render_widget(
-        Paragraph::new(Span::styled(footer, Style::default().fg(border_color).add_modifier(Modifier::BOLD)))
-            .alignment(Alignment::Center)
-            .block(Block::default()
-                .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
-                .border_style(Style::default().fg(border_color))),
         chunks[2],
     );
 }

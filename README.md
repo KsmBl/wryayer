@@ -409,7 +409,11 @@ Key bindings:
 | `?` | Show key-bindings reference |
 | `Shift+Q` | Force-quit from anywhere |
 
-The **Settings** tab lets you edit global defaults applied to every newly installed app. Settings behave identically to per-app config but are stored in `~/.wryayer/defaults.ini`. Press `Enter` or `←`/`→` to change a value; press `Enter` on **Save & Close** to persist. Per-app overrides always take precedence over global defaults.
+**Multi-select install** — In the Install tab, press `Space` to mark one or more search results, then `Enter` to install all marked packages one after another. Marks persist across searches so you can search for different packages and add them to the queue before starting. Only marked packages are installed; pressing `Enter` with no marks installs the hovered item.
+
+**Shortcut prompt** — Before each install begins, a popup asks whether to create a `~/bin/<name>` launcher shortcut. Choose "Yes" (the default) to create the shortcut, or "No" to install without one.
+
+The **Settings** tab uses a native two-panel layout: the left panel lists all settings with their current values colour-coded (green = on, red = off, yellow = other); the right panel shows a description and the available choices for the selected row. Press `Enter` or `←`/`→` to change a value; press `Enter` on **Save** to persist. Settings are stored in `~/.wryayer/defaults.ini` and apply as defaults to every newly installed app. Per-app overrides always take precedence.
 
 ---
 
@@ -566,6 +570,7 @@ The config is stored as a human-readable INI file at `~/.wryayer/<app>/config.in
 - [x] **TUI package search from AUR** — Install tab searches both official repos and the AUR
 - [x] **Identity spoofing** — spoof hostname, username, machine-id, and cpuinfo per app
 - [x] **Global default settings** — Settings tab in TUI and `~/.wryayer/defaults.ini` set defaults inherited by all new apps
+- [x] **Multi-select install** — mark multiple search results with `Space`, install them all sequentially with `Enter`; marks persist across searches
 - [ ] **Per-app env var overrides** — let users set `LANG`, `QT_SCALE_FACTOR`, etc. in `config.ini`
 - [ ] **Dependency graph viewer** — TUI screen showing the full package tree for an installed app
 - [ ] **Auto-snapshot on update** — capture a snapshot automatically before each update so failures can be undone with one keystroke

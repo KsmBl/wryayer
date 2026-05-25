@@ -30,19 +30,6 @@ pub enum Msg {
     Done(bool),
 }
 
-// ── Background operation ──────────────────────────────────────────────────────
-
-pub struct BackgroundOp {
-    pub id: usize,
-    pub title: String,
-    pub log: Vec<String>,
-    pub done: bool,
-    pub success: bool,
-    pub rx: Receiver<Msg>,
-    pub progress: Option<(u64, u64)>,
-    pub started: Instant,
-}
-
 // ── File browser entry ────────────────────────────────────────────────────────
 
 pub struct FbEntry {
@@ -153,8 +140,6 @@ pub enum Screen {
         pkg: String,
         value: String,
     },
-    /// Full log view for a background operation (opened with number key).
-    BgOpView { idx: usize },
     /// Choice between uninstalling an existing app or installing a second copy.
     AlreadyInstalled {
         pkg: String,
@@ -258,10 +243,8 @@ pub struct App {
     // ── Detail panel ─────────────────────────────────────────────────────────
     pub detail_focused: bool,
     pub detail_scroll: usize,
-    // ── Install multi-select + background ops ─────────────────────────────────
+    // ── Install multi-select ──────────────────────────────────────────────────
     pub selected_pkgs: HashSet<String>,
-    pub background_ops: Vec<BackgroundOp>,
-    pub bg_op_id: usize,
     pub install_queue: VecDeque<String>,
 }
 
@@ -305,8 +288,6 @@ impl App {
             detail_focused: false,
             detail_scroll: 0,
             selected_pkgs: HashSet::new(),
-            background_ops: Vec::new(),
-            bg_op_id: 0,
             install_queue: VecDeque::new(),
         })
     }
@@ -402,39 +383,6 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(
             if let Screen::Operation { outdated_pkg: Some(pkg), original_args, .. } = screen {
                 app.screen = Screen::OutdatedPackages { pkg, install_args: original_args, selected: 0 };
                 app.needs_clear = true;
-            }
-        }
-
-        // Drain background op channels
-        let mut newly_done: Vec<(String, bool)> = vec![];
-        for op in &mut app.background_ops {
-            if !op.done {
-                loop {
-                    match op.rx.try_recv() {
-                        Ok(Msg::Line(l)) => {
-                            if let Some(p) = parse_progress(&l) {
-                                op.progress = Some(p);
-                            } else if l.starts_with("PROMPT_LAUNCHER_CHOICE:") {
-                                op.log.push("Note: no launcher binary found in package".to_string());
-                            } else if l.starts_with("PROMPT_OUTDATED_PACKAGES:") {
-                                op.log.push("Note: package databases may be outdated — run 'sudo pacman -Sy' and retry".to_string());
-                            } else {
-                                op.log.push(l);
-                            }
-                        }
-                        Ok(Msg::Done(ok)) => { op.done = true; op.success = ok; }
-                        Err(_) => break,
-                    }
-                }
-                if op.done {
-                    newly_done.push((op.title.clone(), op.success));
-                }
-            }
-        }
-        for (title, success) in newly_done {
-            app.status = if success { format!("✓ {title}") } else { format!("✗ {title}") };
-            if success {
-                app.reload_installed();
             }
         }
 
@@ -673,8 +621,7 @@ fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
         Screen::AlreadyInstalled { .. } => 15,
         Screen::NoLauncherChoice { .. } => 16,
         Screen::OutdatedPackages { .. } => 17,
-        Screen::BgOpView { .. } => 18,
-        Screen::AskShortcut { .. } => 19,
+        Screen::AskShortcut { .. } => 18,
     };
 
     match tag {
@@ -696,8 +643,7 @@ fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
         15 => on_already_installed(app, code),
         16 => on_no_launcher_choice(app, code),
         17 => on_outdated_packages(app, code),
-        18 => on_bg_op_view(app, code),
-        19 => on_ask_shortcut(app, code),
+        18 => on_ask_shortcut(app, code),
         _ => {}
     }
     Ok(())
@@ -744,21 +690,6 @@ fn on_main(app: &mut App, code: KeyCode) -> Result<()> {
     // Import tab: always a text input.
     let in_text_input = matches!(app.tab, Tab::Import)
         || (matches!(app.tab, Tab::Install) && !app.search_list_focused);
-
-    // Number keys 1-9: open a background op view when not typing
-    if !in_text_input {
-        if let KeyCode::Char(c) = code {
-            if c.is_ascii_digit() && c != '0' {
-                let idx = (c as usize) - ('1' as usize);
-                if idx < app.background_ops.len() {
-                    app.screen = Screen::BgOpView { idx };
-                    app.log_scroll = 0;
-                    app.needs_clear = true;
-                    return Ok(());
-                }
-            }
-        }
-    }
 
     if !in_text_input && matches!(code, KeyCode::Char('q') | KeyCode::Esc) {
         app.quit = true;
@@ -1203,6 +1134,9 @@ fn on_install(app: &mut App, code: KeyCode) {
                     app.avail_state.select(Some(0));
                 }
             }
+            KeyCode::Enter if !app.selected_pkgs.is_empty() => {
+                enqueue_marked(app);
+            }
             _ => {}
         }
     } else {
@@ -1240,14 +1174,7 @@ fn on_install(app: &mut App, code: KeyCode) {
             }
             KeyCode::Enter => {
                 if !app.selected_pkgs.is_empty() {
-                    // Build install queue in display order from marked package names
-                    let pkgs: Vec<String> = app.search_results.iter()
-                        .filter(|(name, _)| app.selected_pkgs.contains(name.as_str()))
-                        .map(|(name, _)| name.clone())
-                        .collect();
-                    app.selected_pkgs.clear();
-                    app.install_queue = pkgs.into_iter().collect();
-                    process_install_queue(app);
+                    enqueue_marked(app);
                 } else if let Some(pkg) = app.selected_available() {
                     let pkg = pkg.to_string();
                     if app.installed.iter().any(|m| m.app.name == pkg) {
@@ -1547,8 +1474,8 @@ fn on_op_done(app: &mut App, code: KeyCode) -> Result<()> {
 
 // Rows: 0=network 1=camera 2=microphone 3=audio 4=temp_mode 5=temp_delete 6=shared_dirs
 //       7=spoof_hostname 8=spoof_username 9=spoof_machine_id 10=spoof_cpuinfo 11=spoof_os
-//       12=spoof_terminal 13=ram_limit 14=background_installs 15=Save
-pub const CFG_LEN: usize = 16;
+//       12=spoof_terminal 13=ram_limit 14=Save
+pub const CFG_LEN: usize = 15;
 pub const CFG_SHARES: usize = 6;
 pub const CFG_SPOOF_HOSTNAME: usize = 7;
 pub const CFG_SPOOF_USERNAME: usize = 8;
@@ -1557,8 +1484,7 @@ pub const CFG_SPOOF_CPUINFO: usize = 10;
 pub const CFG_SPOOF_OS: usize = 11;
 pub const CFG_SPOOF_TERMINAL: usize = 12;
 pub const CFG_RAM_LIMIT: usize = 13;
-pub const CFG_BG_INSTALLS: usize = 14;
-pub const CFG_SAVE: usize = 15;
+pub const CFG_SAVE: usize = 14;
 
 /// A fixed 32-char hex machine-id that apps can use as a plausible-looking ID.
 pub const MACHINE_ID_SAMPLE: &str = "cafebabe0011223344556677deadbeef";
@@ -1664,7 +1590,6 @@ pub fn setting_options(idx: usize) -> Vec<&'static str> {
         CFG_SPOOF_MACHINE_ID => vec!["system", "random", "sample", "input"],
         CFG_SPOOF_TERMINAL => vec!["off", "detect"],
         CFG_RAM_LIMIT => vec!["none", "512 MiB", "1 GiB", "2 GiB", "4 GiB", "8 GiB"],
-        CFG_BG_INSTALLS => vec!["off", "on"],
         _ => vec![],
     }
 }
@@ -1686,7 +1611,6 @@ pub fn setting_title(idx: usize) -> &'static str {
         11 => "Spoof OS release",
         12 => "Spoof terminal name",
         13 => "RAM limit",
-        14 => "Background installs",
         _ => "Option",
     }
 }
@@ -1708,7 +1632,6 @@ pub fn setting_description(idx: usize) -> &'static str {
         11 => "Override /etc/os-release inside the sandbox.\n\nChoose a preset (Ubuntu, Arch, Windows 11, ArduinoIDE) or 'input' to type any OS name.\n'system' exposes the real OS release.",
         12 => "Detect your real terminal emulator and pass its identity into the sandbox.\n\nWalks the process tree to find kitty, foot, alacritty, WezTerm, etc., then sets the matching env var (KITTY_WINDOW_ID, WEZTERM_PANE, …).\n\nFixes fastfetch / neofetch showing 'bwrap' instead of your real terminal.",
         13 => "Maximum RAM the app may use (RAM + swap both capped).\n\nEnforced via systemd-run MemoryMax + MemorySwapMax=0.\n'none' disables the limit. Requires systemd.",
-        14 => "Move install progress to a tray bar at the bottom instead of a full-screen overlay.\n\nAllows browsing and searching while a package installs in the background.\n\nPress [1]–[9] to open a running install's log. Press Enter to dismiss a finished install.",
         _ => "No description available.",
     }
 }
@@ -1771,8 +1694,6 @@ pub fn option_description(setting_idx: usize, choice_idx: usize) -> &'static str
         (13, 3) => "2 GiB — Cap the app at 2 GiB (2048 MiB) of RAM. Good default for everyday apps.",
         (13, 4) => "4 GiB — Cap the app at 4 GiB (4096 MiB) of RAM.",
         (13, 5) => "8 GiB — Cap the app at 8 GiB (8192 MiB) of RAM.",
-        (14, 0) => "off — Show install progress as a modal overlay (default). Navigation is blocked while the operation runs.",
-        (14, 1) => "on — Move install progress to a tray bar at the bottom. Press [1]-[9] to view a running install. Allows browsing while packages install.",
         _ => "No description available.",
     }
 }
@@ -1839,7 +1760,6 @@ pub fn setting_current(config: &AppConfig, idx: usize) -> usize {
             Some(n) if n <= 4096 => 4,
             _           => 5,
         },
-        CFG_BG_INSTALLS => if config.background_installs { 1 } else { 0 },
         _ => 0,
     }
 }
@@ -1890,8 +1810,6 @@ pub fn apply_setting(config: &mut AppConfig, idx: usize, choice: usize) {
         (13, 3) => config.ram_limit = Some(2048),
         (13, 4) => config.ram_limit = Some(4096),
         (13, 5) => config.ram_limit = Some(8192),
-        (14, 0) => config.background_installs = false,
-        (14, 1) => config.background_installs = true,
         _ => {}
     }
 }
@@ -2376,6 +2294,27 @@ fn on_file_browser(app: &mut App, code: KeyCode) {
 // ── Install queue + background ops ────────────────────────────────────────────
 
 /// Pop the next package from the install queue and show InstallTarget or Confirm.
+/// Build the install queue from all marked packages and kick it off.
+/// Marks in display order come first, then any marked packages not currently
+/// in search_results (sorted). Clears selected_pkgs before returning.
+fn enqueue_marked(app: &mut App) {
+    // Preserve visible display order for marks that appear in current results
+    let mut pkgs: Vec<String> = app.search_results.iter()
+        .filter(|(name, _)| app.selected_pkgs.contains(name.as_str()))
+        .map(|(name, _)| name.clone())
+        .collect();
+    // Append marks that are outside the current search results (sorted)
+    let mut hidden: Vec<String> = app.selected_pkgs.iter()
+        .filter(|p| !pkgs.contains(*p))
+        .cloned()
+        .collect();
+    hidden.sort();
+    pkgs.extend(hidden);
+    app.selected_pkgs.clear();
+    app.install_queue = pkgs.into_iter().collect();
+    process_install_queue(app);
+}
+
 /// Already-installed packages are skipped with a status note.
 fn process_install_queue(app: &mut App) {
     loop {
@@ -2409,57 +2348,6 @@ fn process_install_queue(app: &mut App) {
     }
 }
 
-/// Run an install — background tray if the setting is on, modal overlay otherwise.
-fn do_install(app: &mut App, title: String, args: Vec<String>) {
-    if app.global_config.background_installs {
-        launch_bg_op(app, title, args);
-        process_install_queue(app);
-    } else {
-        launch_op(app, title, args, None, true);
-    }
-}
-
-fn launch_bg_op(app: &mut App, title: String, args: Vec<String>) {
-    let (tx, rx) = mpsc::channel();
-    spawn_wryayer(args, tx);
-    app.bg_op_id += 1;
-    app.background_ops.push(BackgroundOp {
-        id: app.bg_op_id,
-        title,
-        log: vec![],
-        done: false,
-        success: false,
-        rx,
-        progress: None,
-        started: Instant::now(),
-    });
-}
-
-fn on_bg_op_view(app: &mut App, code: KeyCode) {
-    match code {
-        KeyCode::Esc | KeyCode::Char('q') => {
-            app.screen = Screen::Main;
-            app.needs_clear = true;
-        }
-        KeyCode::Enter => {
-            if let Screen::BgOpView { idx } = app.screen {
-                if app.background_ops.get(idx).map(|o| o.done).unwrap_or(false) {
-                    app.background_ops.remove(idx);
-                }
-            }
-            app.screen = Screen::Main;
-            app.needs_clear = true;
-        }
-        KeyCode::Up | KeyCode::Char('k') => {
-            if app.log_scroll > 0 { app.log_scroll -= 1; }
-        }
-        KeyCode::Down | KeyCode::Char('j') => {
-            app.log_scroll += 1;
-        }
-        _ => {}
-    }
-}
-
 // ── Shortcut confirmation ─────────────────────────────────────────────────────
 
 fn on_ask_shortcut(app: &mut App, code: KeyCode) {
@@ -2482,7 +2370,7 @@ fn on_ask_shortcut(app: &mut App, code: KeyCode) {
                 if selected == 1 {
                     args.push("--keep-without-launcher".into());
                 }
-                do_install(app, title, args);
+                launch_op(app, title, args, None, true);
             }
         }
         _ => {}
