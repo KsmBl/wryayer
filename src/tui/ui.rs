@@ -9,7 +9,11 @@ use ratatui::{
 use crate::commands::dedup::format_bytes;
 use crate::config::{AppConfig, LocalDelete, TempMode};
 
-use super::{App, Screen, Tab, CFG_SAVE};
+use super::{
+    App, Screen, Tab, CFG_SAVE, CFG_SHARES,
+    setting_description, setting_options, setting_current, setting_title,
+    HOSTNAME_SAMPLE, MACHINE_ID_SAMPLE, USERNAME_SAMPLE,
+};
 
 const C_ACCENT: Color = Color::Cyan;
 const C_GREEN: Color = Color::Green;
@@ -984,10 +988,212 @@ fn fractional_bar(width: usize, fraction: f64) -> String {
 
 // ── Settings tab (global defaults) ───────────────────────────────────────────
 
-fn draw_settings_tab(f: &mut Frame, app: &mut App, _area: Rect) {
-    let config = app.global_config.clone();
+fn draw_settings_tab(f: &mut Frame, app: &mut App, area: Rect) {
+    let config = &app.global_config;
     let selected = app.global_selected;
-    draw_config(f, f.area(), "", &config, selected);
+
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(38), Constraint::Percentage(62)])
+        .split(area);
+
+    // ── Left: settings list ───────────────────────────────────────────────────
+    let list_block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Default Settings ")
+        .title_style(Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD))
+        .border_style(Style::default().fg(C_ACCENT));
+    let list_inner = list_block.inner(cols[0]);
+    f.render_widget(list_block, cols[0]);
+
+    let b = |v: bool| if v { " on  " } else { " off " };
+    let share_label = if config.shared_dirs.is_empty() {
+        "none →".to_string()
+    } else {
+        format!("{}  →", config.shared_dirs.len())
+    };
+    let spoof_label = |v: &Option<String>, sample: &str| -> String {
+        match v.as_deref() {
+            None | Some("") => "system".to_string(),
+            Some(s) if s == sample => "sample".to_string(),
+            Some(s) => s.chars().take(10).collect(),
+        }
+    };
+    let rows: &[(&str, String)] = &[
+        ("Network",     b(config.network).to_string()),
+        ("Camera",      b(config.camera).to_string()),
+        ("Microphone",  b(config.microphone).to_string()),
+        ("Audio",       b(config.audio).to_string()),
+        ("Temp mode",   match config.temp_mode {
+            TempMode::System  => "system".into(),
+            TempMode::Ramdisk => "ramdisk".into(),
+            TempMode::Local   => "local".into(),
+            TempMode::Uuid    => "uuid".into(),
+        }),
+        ("Temp delete", match config.temp_delete {
+            LocalDelete::Never   => "never".into(),
+            LocalDelete::OnStart => "on_start".into(),
+            LocalDelete::OnClose => "on_close".into(),
+        }),
+        ("Shared dirs", share_label),
+        ("Hostname",    spoof_label(&config.spoof_hostname,    HOSTNAME_SAMPLE)),
+        ("Username",    spoof_label(&config.spoof_username,    USERNAME_SAMPLE)),
+        ("Machine ID",  match config.spoof_machine_id.as_deref() {
+            None            => "system".into(),
+            Some("random")  => "random".into(),
+            Some(v) if v == MACHINE_ID_SAMPLE => "sample".into(),
+            Some(s)         => s.chars().take(10).collect(),
+        }),
+        ("CPU info",    match config.spoof_cpuinfo.as_deref() {
+            None           => "system".into(),
+            Some("sample") => "sample".into(),
+            Some(s)        => s.chars().take(10).collect(),
+        }),
+        ("OS release",  match config.spoof_os.as_deref() {
+            None               => "system".into(),
+            Some("ubuntu")     => "Ubuntu".into(),
+            Some("arch")       => "Arch".into(),
+            Some("windows")    => "Windows 11".into(),
+            Some("arduinoide") => "ArduinoIDE".into(),
+            Some(s)            => s.chars().take(10).collect(),
+        }),
+        ("Spoof term.", if config.spoof_terminal { "detect".into() } else { "off".into() }),
+        ("RAM limit",   match config.ram_limit {
+            None      => "none".into(),
+            Some(mib) if mib % 1024 == 0 => format!("{} GiB", mib / 1024),
+            Some(mib) => format!("{} MiB", mib),
+        }),
+        ("Bg installs", b(config.background_installs).to_string()),
+    ];
+
+    // Reserve last 2 rows for separator + save
+    let max_rows = (list_inner.height as usize).saturating_sub(2);
+    for (idx, (label, value)) in rows.iter().enumerate().take(max_rows) {
+        let is_sel = idx == selected;
+        let y = list_inner.y + idx as u16;
+        let bg = if is_sel { C_SELECT } else { Color::Reset };
+        let val_color = match value.as_str() {
+            "on" => C_GREEN,
+            "off" => C_RED,
+            _ => C_YELLOW,
+        };
+        let label_w = 12usize;
+        let padded_label: String = format!("{:width$}", label, width = label_w);
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(if is_sel { "▶ " } else { "  " }, Style::default().fg(C_ACCENT).bg(bg)),
+                Span::styled(padded_label, Style::default().fg(if is_sel { Color::White } else { C_DIM }).bg(bg)),
+                Span::styled(" ", Style::default().bg(bg)),
+                Span::styled(format!("[{}]", value),
+                    Style::default().fg(val_color).bg(bg)
+                        .add_modifier(if is_sel { Modifier::BOLD } else { Modifier::empty() })),
+            ])),
+            Rect { x: list_inner.x, y, width: list_inner.width, height: 1 },
+        );
+    }
+
+    // Separator + Save button
+    let sep_y = list_inner.y + list_inner.height.saturating_sub(2);
+    let save_y = list_inner.y + list_inner.height.saturating_sub(1);
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            "─".repeat(list_inner.width as usize),
+            Style::default().fg(Color::Rgb(50, 50, 60)),
+        )),
+        Rect { x: list_inner.x, y: sep_y, width: list_inner.width, height: 1 },
+    );
+    let is_save = selected == CFG_SAVE;
+    let save_style = if is_save {
+        Style::default().fg(Color::Black).bg(C_GREEN).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(C_GREEN)
+    };
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(if is_save { "▶ " } else { "  " }, Style::default().fg(C_ACCENT)),
+            Span::styled("[ Save defaults ]", save_style),
+        ])),
+        Rect { x: list_inner.x, y: save_y, width: list_inner.width, height: 1 },
+    );
+
+    // ── Right: description + options ──────────────────────────────────────────
+    let desc_block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!(" {} ", setting_title(selected)))
+        .title_style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD))
+        .border_style(Style::default().fg(C_DIM));
+    let desc_inner = desc_block.inner(cols[1]);
+    f.render_widget(desc_block, cols[1]);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(4), Constraint::Length(1), Constraint::Min(0), Constraint::Length(1)])
+        .split(desc_inner);
+
+    // Description paragraph (wrapped)
+    let desc_text = if selected == CFG_SAVE {
+        "Save the current values as global defaults.\n\nThese settings apply to every new app install that does not have its own config file."
+    } else if selected == CFG_SHARES {
+        "Shared directories are per-app only.\n\nTo add shared dirs, open an installed app's config with [s] on the Installed tab."
+    } else {
+        setting_description(selected)
+    };
+    f.render_widget(
+        Paragraph::new(desc_text)
+            .style(Style::default().fg(Color::White))
+            .wrap(Wrap { trim: false }),
+        chunks[0],
+    );
+
+    // Divider
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            "─".repeat(desc_inner.width as usize),
+            Style::default().fg(Color::Rgb(50, 50, 60)),
+        )),
+        chunks[1],
+    );
+
+    // Options list
+    let opts = setting_options(selected);
+    let cur = if selected < CFG_SAVE { setting_current(config, selected) } else { usize::MAX };
+    let opt_lines: Vec<Line> = opts.iter().enumerate().map(|(i, opt)| {
+        let active = i == cur;
+        let bullet = if active { "●" } else { "○" };
+        let bullet_color = if active { C_ACCENT } else { C_DIM };
+        let text_color = if active { Color::White } else { C_DIM };
+        Line::from(vec![
+            Span::styled(format!(" {} ", bullet), Style::default().fg(bullet_color)),
+            Span::styled(*opt, Style::default().fg(text_color)
+                .add_modifier(if active { Modifier::BOLD } else { Modifier::empty() })),
+        ])
+    }).collect();
+    f.render_widget(Paragraph::new(opt_lines), chunks[2]);
+
+    // Hint
+    let hint = if selected == CFG_SAVE {
+        "  Enter or Space to save"
+    } else if opts.is_empty() {
+        "  Enter to open"
+    } else {
+        "  ← / → to cycle   Enter to pick from list   ? for help"
+    };
+    f.render_widget(
+        Paragraph::new(Span::styled(hint, Style::default().fg(C_DIM))),
+        chunks[3],
+    );
+
+    // Microphone warning
+    if !config.microphone && config.audio && desc_inner.height > 6 {
+        let warn_y = desc_inner.y + desc_inner.height.saturating_sub(2);
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                "  ⚠  PipeWire/PA mic not fully blocked — set Audio off too",
+                Style::default().fg(C_YELLOW),
+            )),
+            Rect { x: desc_inner.x, y: warn_y, width: desc_inner.width, height: 1 },
+        );
+    }
 }
 
 // ── Config overlay ────────────────────────────────────────────────────────────
@@ -1014,7 +1220,6 @@ fn draw_config(f: &mut Frame, area: Rect, app_name: &str, config: &AppConfig, se
     } else {
         format!(" {}  →", config.shared_dirs.len())
     };
-    use super::{HOSTNAME_SAMPLE, MACHINE_ID_SAMPLE, USERNAME_SAMPLE};
     let spoof_label = |v: &Option<String>, sample: &str| -> String {
         match v.as_deref() {
             None | Some("") => " system ".to_string(),
