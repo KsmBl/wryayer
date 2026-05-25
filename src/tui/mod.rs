@@ -1,7 +1,7 @@
 pub mod konami;
 mod ui;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -28,6 +28,19 @@ use crate::manifest::{list_all_apps, tree_order, Manifest};
 pub enum Msg {
     Line(String),
     Done(bool),
+}
+
+// ── Background operation ──────────────────────────────────────────────────────
+
+pub struct BackgroundOp {
+    pub id: usize,
+    pub title: String,
+    pub log: Vec<String>,
+    pub done: bool,
+    pub success: bool,
+    pub rx: Receiver<Msg>,
+    pub progress: Option<(u64, u64)>,
+    pub started: Instant,
 }
 
 // ── File browser entry ────────────────────────────────────────────────────────
@@ -140,6 +153,8 @@ pub enum Screen {
         pkg: String,
         value: String,
     },
+    /// Full log view for a background operation (opened with number key).
+    BgOpView { idx: usize },
     /// Choice between uninstalling an existing app or installing a second copy.
     AlreadyInstalled {
         pkg: String,
@@ -232,6 +247,14 @@ pub struct App {
     // ── Easter egg ────────────────────────────────────────────────────────────
     pub konami_mode: bool,
     pub konami_state: usize,
+    // ── Detail panel ─────────────────────────────────────────────────────────
+    pub detail_focused: bool,
+    pub detail_scroll: usize,
+    // ── Install multi-select + background ops ─────────────────────────────────
+    pub selected_pkgs: HashSet<String>,
+    pub background_ops: Vec<BackgroundOp>,
+    pub bg_op_id: usize,
+    pub install_queue: VecDeque<String>,
 }
 
 impl App {
@@ -271,6 +294,12 @@ impl App {
             editor_request: None,
             konami_mode: false,
             konami_state: 0,
+            detail_focused: false,
+            detail_scroll: 0,
+            selected_pkgs: HashSet::new(),
+            background_ops: Vec::new(),
+            bg_op_id: 0,
+            install_queue: VecDeque::new(),
         })
     }
 
@@ -365,6 +394,39 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(
             if let Screen::Operation { outdated_pkg: Some(pkg), original_args, .. } = screen {
                 app.screen = Screen::OutdatedPackages { pkg, install_args: original_args, selected: 0 };
                 app.needs_clear = true;
+            }
+        }
+
+        // Drain background op channels
+        let mut newly_done: Vec<(String, bool)> = vec![];
+        for op in &mut app.background_ops {
+            if !op.done {
+                loop {
+                    match op.rx.try_recv() {
+                        Ok(Msg::Line(l)) => {
+                            if let Some(p) = parse_progress(&l) {
+                                op.progress = Some(p);
+                            } else if l.starts_with("PROMPT_LAUNCHER_CHOICE:") {
+                                op.log.push("Note: no launcher binary found in package".to_string());
+                            } else if l.starts_with("PROMPT_OUTDATED_PACKAGES:") {
+                                op.log.push("Note: package databases may be outdated — run 'sudo pacman -Sy' and retry".to_string());
+                            } else {
+                                op.log.push(l);
+                            }
+                        }
+                        Ok(Msg::Done(ok)) => { op.done = true; op.success = ok; }
+                        Err(_) => break,
+                    }
+                }
+                if op.done {
+                    newly_done.push((op.title.clone(), op.success));
+                }
+            }
+        }
+        for (title, success) in newly_done {
+            app.status = if success { format!("✓ {title}") } else { format!("✗ {title}") };
+            if success {
+                app.reload_installed();
             }
         }
 
@@ -591,6 +653,7 @@ fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
         Screen::AlreadyInstalled { .. } => 15,
         Screen::NoLauncherChoice { .. } => 16,
         Screen::OutdatedPackages { .. } => 17,
+        Screen::BgOpView { .. } => 18,
     };
 
     match tag {
@@ -612,6 +675,7 @@ fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
         15 => on_already_installed(app, code),
         16 => on_no_launcher_choice(app, code),
         17 => on_outdated_packages(app, code),
+        18 => on_bg_op_view(app, code),
         _ => {}
     }
     Ok(())
@@ -647,11 +711,33 @@ fn on_main(app: &mut App, code: KeyCode) -> Result<()> {
         _ => {}
     }
 
+    // Esc while the detail panel is focused: exit detail mode, don't quit.
+    if code == KeyCode::Esc && matches!(app.tab, Tab::Installed) && app.detail_focused {
+        app.detail_focused = false;
+        return Ok(());
+    }
+
     // 'q' / Esc quit only when NOT in a text-input context.
     // Install tab: input is active while the search list is not focused.
     // Import tab: always a text input.
     let in_text_input = matches!(app.tab, Tab::Import)
         || (matches!(app.tab, Tab::Install) && !app.search_list_focused);
+
+    // Number keys 1-9: open a background op view when not typing
+    if !in_text_input {
+        if let KeyCode::Char(c) = code {
+            if c.is_ascii_digit() && c != '0' {
+                let idx = (c as usize) - ('1' as usize);
+                if idx < app.background_ops.len() {
+                    app.screen = Screen::BgOpView { idx };
+                    app.log_scroll = 0;
+                    app.needs_clear = true;
+                    return Ok(());
+                }
+            }
+        }
+    }
+
     if !in_text_input && matches!(code, KeyCode::Char('q') | KeyCode::Esc) {
         app.quit = true;
         return Ok(());
@@ -675,14 +761,37 @@ fn on_installed(app: &mut App, code: KeyCode) {
         return;
     }
 
+    // Detail panel focus mode: scroll up/down, Left/h exits
+    if app.detail_focused {
+        match code {
+            KeyCode::Left | KeyCode::Char('h') => { app.detail_focused = false; }
+            KeyCode::Up | KeyCode::Char('k') => {
+                app.detail_scroll = app.detail_scroll.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                app.detail_scroll += 1; // clamped in draw_detail
+            }
+            _ => {}
+        }
+        return;
+    }
+
     match code {
+        KeyCode::Right | KeyCode::Char('l') => {
+            if app.selected_installed().is_some() {
+                app.detail_focused = true;
+                app.detail_scroll = 0;
+            }
+        }
         KeyCode::Up | KeyCode::Char('k') => {
             let i = app.inst_state.selected().unwrap_or(0);
             app.inst_state.select(Some(if i == 0 { len - 1 } else { i - 1 }));
+            app.detail_scroll = 0;
         }
         KeyCode::Down | KeyCode::Char('j') => {
             let i = app.inst_state.selected().unwrap_or(0);
             app.inst_state.select(Some((i + 1) % len));
+            app.detail_scroll = 0;
         }
         KeyCode::Char('r') | KeyCode::Enter => {
             if let Some(m) = app.selected_installed() {
@@ -1092,17 +1201,38 @@ fn on_install(app: &mut App, code: KeyCode) {
                     app.avail_state.select(Some((i + 1).min(len - 1)));
                 }
             }
+            KeyCode::Char(' ') => {
+                if let Some(i) = app.avail_state.selected() {
+                    if let Some((pkg, _)) = app.search_results.get(i) {
+                        let is_installed = app.installed.iter().any(|m| m.app.name == *pkg);
+                        if !is_installed {
+                            let pkg = pkg.clone();
+                            if app.selected_pkgs.contains(&pkg) {
+                                app.selected_pkgs.remove(&pkg);
+                            } else {
+                                app.selected_pkgs.insert(pkg);
+                            }
+                        }
+                    }
+                }
+            }
             KeyCode::Enter => {
-                if let Some(pkg) = app.selected_available() {
+                if !app.selected_pkgs.is_empty() {
+                    // Build install queue in display order from marked package names
+                    let pkgs: Vec<String> = app.search_results.iter()
+                        .filter(|(name, _)| app.selected_pkgs.contains(name.as_str()))
+                        .map(|(name, _)| name.clone())
+                        .collect();
+                    app.selected_pkgs.clear();
+                    app.install_queue = pkgs.into_iter().collect();
+                    process_install_queue(app);
+                } else if let Some(pkg) = app.selected_available() {
                     let pkg = pkg.to_string();
                     if app.installed.iter().any(|m| m.app.name == pkg) {
                         // Already installed — let the user choose: install again or uninstall.
                         app.screen = Screen::AlreadyInstalled { pkg, selected: 0 };
                         app.needs_clear = true;
                     } else {
-                        // If there's at least one installed app, offer the
-                        // user a choice between a fresh install and merging
-                        // into an existing app (-> `wryayer install --into`).
                         let targets: Vec<String> = app.installed
                             .iter()
                             .filter(|m| m.app.alias_of.is_none())
@@ -1162,6 +1292,7 @@ fn on_install_target(app: &mut App, code: KeyCode) {
 
     match code {
         KeyCode::Esc | KeyCode::Char('q') => {
+            app.install_queue.clear(); // cancel any pending queue
             app.screen = Screen::Main;
             app.needs_clear = true;
         }
@@ -1256,6 +1387,7 @@ fn on_confirm(app: &mut App, code: KeyCode) -> Result<()> {
             }
         }
         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+            app.install_queue.clear(); // cancel any pending queue
             app.screen = Screen::Main;
         }
         _ => {}
@@ -1298,15 +1430,21 @@ fn execute_action(app: &mut App, action: PendingAction) {
             launch_op(app, format!("Remove — {name}"), vec!["remove".into(), "--cascade".into(), name], None, true),
         PendingAction::Update(name) =>
             launch_op(app, format!("Update — {name}"), vec!["update".into(), name], None, true),
-        PendingAction::Install { pkg, app_name: None, into: None } =>
-            launch_op(app, format!("Install — {pkg}"), vec!["install".into(), pkg], None, true),
-        PendingAction::Install { pkg, app_name: Some(an), into: None } =>
-            launch_op(app, format!("Install — {pkg} as {an}"),
-                vec!["install".into(), pkg, "--app-name".into(), an], None, true),
+        PendingAction::Install { pkg, app_name: None, into: None } => {
+            let title = format!("Install — {pkg}");
+            let args = vec!["install".into(), pkg];
+            do_install(app, title, args);
+        }
+        PendingAction::Install { pkg, app_name: Some(an), into: None } => {
+            let title = format!("Install — {pkg} as {an}");
+            let args = vec!["install".into(), pkg, "--app-name".into(), an];
+            do_install(app, title, args);
+        }
         PendingAction::Install { pkg, app_name, into: Some(target) } => {
             let mut args = vec!["install".into(), pkg.clone(), "--into".into(), target.clone()];
             if let Some(an) = app_name { args.extend(["--app-name".into(), an]); }
-            launch_op(app, format!("Install — {pkg} → {target}"), args, None, true);
+            let title = format!("Install — {pkg} → {target}");
+            do_install(app, title, args);
         }
         PendingAction::Export(name) => {
             let total = dir_bytes(&format!(
@@ -1371,6 +1509,9 @@ fn on_op_done(app: &mut App, code: KeyCode) -> Result<()> {
                 }
             }
             app.needs_clear = true;
+            if !app.install_queue.is_empty() {
+                process_install_queue(app);
+            }
         }
         _ => {}
     }
@@ -1381,8 +1522,8 @@ fn on_op_done(app: &mut App, code: KeyCode) -> Result<()> {
 
 // Rows: 0=network 1=camera 2=microphone 3=audio 4=temp_mode 5=temp_delete 6=shared_dirs
 //       7=spoof_hostname 8=spoof_username 9=spoof_machine_id 10=spoof_cpuinfo 11=spoof_os
-//       12=spoof_terminal 13=ram_limit 14=Save
-pub const CFG_LEN: usize = 15;
+//       12=spoof_terminal 13=ram_limit 14=background_installs 15=Save
+pub const CFG_LEN: usize = 16;
 pub const CFG_SHARES: usize = 6;
 pub const CFG_SPOOF_HOSTNAME: usize = 7;
 pub const CFG_SPOOF_USERNAME: usize = 8;
@@ -1391,7 +1532,8 @@ pub const CFG_SPOOF_CPUINFO: usize = 10;
 pub const CFG_SPOOF_OS: usize = 11;
 pub const CFG_SPOOF_TERMINAL: usize = 12;
 pub const CFG_RAM_LIMIT: usize = 13;
-pub const CFG_SAVE: usize = 14;
+pub const CFG_BG_INSTALLS: usize = 14;
+pub const CFG_SAVE: usize = 15;
 
 /// A fixed 32-char hex machine-id that apps can use as a plausible-looking ID.
 pub const MACHINE_ID_SAMPLE: &str = "cafebabe0011223344556677deadbeef";
@@ -1497,6 +1639,7 @@ pub fn setting_options(idx: usize) -> Vec<&'static str> {
         CFG_SPOOF_MACHINE_ID => vec!["system", "random", "sample", "input"],
         CFG_SPOOF_TERMINAL => vec!["off", "detect"],
         CFG_RAM_LIMIT => vec!["none", "512 MiB", "1 GiB", "2 GiB", "4 GiB", "8 GiB"],
+        CFG_BG_INSTALLS => vec!["off", "on"],
         _ => vec![],
     }
 }
@@ -1518,6 +1661,7 @@ pub fn setting_title(idx: usize) -> &'static str {
         11 => "Spoof OS release",
         12 => "Spoof terminal name",
         13 => "RAM limit",
+        14 => "Background installs",
         _ => "Option",
     }
 }
@@ -1539,6 +1683,7 @@ pub fn setting_description(idx: usize) -> &'static str {
         11 => "Override /etc/os-release inside the sandbox. Choose a preset (Ubuntu, Arch, Windows 11, ArduinoIDE) or 'input' to type any custom OS name. 'system' exposes the real OS release.",
         12 => "'detect' walks the process tree to find your real terminal emulator (kitty, foot, alacritty, WezTerm, …) and sets the env var that identifies it inside the sandbox (KITTY_WINDOW_ID, $TERM, WEZTERM_PANE, …). Fixes fastfetch/neofetch showing 'bwrap' instead of your real terminal.",
         13 => "Maximum RAM the app may use (RAM + swap both capped). Enforced via systemd-run MemoryMax + MemorySwapMax=0. 'none' disables the limit. Requires systemd.",
+        14 => "Move install progress to the bottom tray bar instead of a full-screen overlay. Allows browsing and searching while a package installs in the background. Press [1]-[9] to open a running install's log.",
         _ => "No description available.",
     }
 }
@@ -1601,6 +1746,8 @@ pub fn option_description(setting_idx: usize, choice_idx: usize) -> &'static str
         (13, 3) => "2 GiB — Cap the app at 2 GiB (2048 MiB) of RAM. Good default for everyday apps.",
         (13, 4) => "4 GiB — Cap the app at 4 GiB (4096 MiB) of RAM.",
         (13, 5) => "8 GiB — Cap the app at 8 GiB (8192 MiB) of RAM.",
+        (14, 0) => "off — Show install progress as a modal overlay (default). Navigation is blocked while the operation runs.",
+        (14, 1) => "on — Move install progress to a tray bar at the bottom. Press [1]-[9] to view a running install. Allows browsing while packages install.",
         _ => "No description available.",
     }
 }
@@ -1667,6 +1814,7 @@ pub fn setting_current(config: &AppConfig, idx: usize) -> usize {
             Some(n) if n <= 4096 => 4,
             _           => 5,
         },
+        CFG_BG_INSTALLS => if config.background_installs { 1 } else { 0 },
         _ => 0,
     }
 }
@@ -1717,6 +1865,8 @@ pub fn apply_setting(config: &mut AppConfig, idx: usize, choice: usize) {
         (13, 3) => config.ram_limit = Some(2048),
         (13, 4) => config.ram_limit = Some(4096),
         (13, 5) => config.ram_limit = Some(8192),
+        (14, 0) => config.background_installs = false,
+        (14, 1) => config.background_installs = true,
         _ => {}
     }
 }
@@ -2195,6 +2345,93 @@ fn on_file_browser(app: &mut App, code: KeyCode) {
             app.screen = Screen::SharedDirs { app_name, dirs, selected };
             app.needs_clear = true;
         }
+    }
+}
+
+// ── Install queue + background ops ────────────────────────────────────────────
+
+/// Pop the next package from the install queue and show InstallTarget or Confirm.
+/// Already-installed packages are skipped with a status note.
+fn process_install_queue(app: &mut App) {
+    loop {
+        let Some(pkg) = app.install_queue.pop_front() else { return };
+        if app.installed.iter().any(|m| m.app.name == pkg) {
+            let note = format!("'{pkg}' already installed — skipped");
+            app.status = if app.status.is_empty() { note } else { format!("{}; {}", app.status, note) };
+            continue;
+        }
+        let targets: Vec<String> = app.installed
+            .iter()
+            .filter(|m| m.app.alias_of.is_none())
+            .map(|m| m.app.name.clone())
+            .collect();
+        if targets.is_empty() {
+            app.screen = Screen::Confirm {
+                title: format!("Install '{pkg}'?"),
+                body: vec![
+                    format!("Installs {pkg} into ~/.wryayer/{pkg}/"),
+                    String::new(),
+                    "Press y to confirm, n or Esc to cancel.".into(),
+                ],
+                action: PendingAction::Install { pkg, app_name: None, into: None },
+                danger: false,
+            };
+        } else {
+            app.screen = Screen::InstallTarget { pkg, targets, selected: 0 };
+        }
+        app.needs_clear = true;
+        return;
+    }
+}
+
+/// Run an install — background tray if the setting is on, modal overlay otherwise.
+fn do_install(app: &mut App, title: String, args: Vec<String>) {
+    if app.global_config.background_installs {
+        launch_bg_op(app, title, args);
+        process_install_queue(app);
+    } else {
+        launch_op(app, title, args, None, true);
+    }
+}
+
+fn launch_bg_op(app: &mut App, title: String, args: Vec<String>) {
+    let (tx, rx) = mpsc::channel();
+    spawn_wryayer(args, tx);
+    app.bg_op_id += 1;
+    app.background_ops.push(BackgroundOp {
+        id: app.bg_op_id,
+        title,
+        log: vec![],
+        done: false,
+        success: false,
+        rx,
+        progress: None,
+        started: Instant::now(),
+    });
+}
+
+fn on_bg_op_view(app: &mut App, code: KeyCode) {
+    match code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            app.screen = Screen::Main;
+            app.needs_clear = true;
+        }
+        KeyCode::Enter => {
+            if let Screen::BgOpView { idx } = app.screen {
+                if app.background_ops.get(idx).map(|o| o.done).unwrap_or(false) {
+                    app.background_ops.remove(idx);
+                }
+            }
+            app.screen = Screen::Main;
+            app.needs_clear = true;
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            if app.log_scroll > 0 { app.log_scroll -= 1; }
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            app.log_scroll += 1;
+        }
+        _ => {}
     }
 }
 

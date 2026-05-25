@@ -20,9 +20,16 @@ const C_SELECT: Color = Color::Rgb(40, 60, 80);
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
+    let bg_count = app.background_ops.len();
+
+    let mut constraints = vec![Constraint::Length(3), Constraint::Min(0)];
+    for _ in 0..bg_count {
+        constraints.push(Constraint::Length(1));
+    }
+    constraints.push(Constraint::Length(1));
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(0), Constraint::Length(1)])
+        .constraints(constraints)
         .split(area);
 
     draw_tabs(f, app, chunks[0]);
@@ -35,7 +42,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Tab::Settings  => draw_settings_tab(f, app, chunks[1]),
     }
 
-    draw_statusbar(f, app, chunks[2]);
+    for i in 0..bg_count {
+        draw_bg_op_mini(f, app, i, chunks[2 + i]);
+    }
+
+    draw_statusbar(f, app, chunks[2 + bg_count]);
 
     // Overlays
     match &app.screen {
@@ -155,6 +166,18 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             let selected = *selected;
             draw_outdated_packages(f, area, &pkg, selected);
         }
+        Screen::BgOpView { idx } => {
+            let idx = *idx;
+            if let Some(op) = app.background_ops.get(idx) {
+                let title = op.title.clone();
+                let log = op.log.clone();
+                let done = op.done;
+                let success = op.success;
+                let progress = op.progress;
+                let elapsed = op.started.elapsed();
+                draw_bg_op_view(f, area, &title, &log, done, success, progress, elapsed, app.log_scroll);
+            }
+        }
     }
 }
 
@@ -185,14 +208,17 @@ fn draw_installed(f: &mut Frame, app: &mut App, area: Rect) {
         .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
         .split(area);
 
+    let list_active = !app.detail_focused;
+    let list_fg = if list_active { Color::White } else { C_DIM };
+    let list_border = if list_active { C_ACCENT } else { C_DIM };
+
     let items: Vec<ListItem> = app.installed.iter().enumerate().map(|(i, m)| {
         let dot = if app.update_available.contains_key(&m.app.name) {
-            Span::styled("●", Style::default().fg(C_YELLOW))
+            Span::styled("●", Style::default().fg(if list_active { C_YELLOW } else { C_DIM }))
         } else {
             Span::raw(" ")
         };
         if let Some(ref target) = m.app.alias_of {
-            // Is this the last alias of its parent?
             let is_last = app.installed.get(i + 1)
                 .map(|next| next.app.alias_of.as_deref() != Some(target.as_str()))
                 .unwrap_or(true);
@@ -200,30 +226,32 @@ fn draw_installed(f: &mut Frame, app: &mut App, area: Rect) {
             ListItem::new(Line::from(vec![
                 dot,
                 Span::styled(connector, Style::default().fg(C_DIM)),
-                Span::styled(&m.app.name, Style::default().fg(Color::Gray)),
+                Span::styled(&m.app.name, Style::default().fg(C_DIM)),
             ]))
         } else if let Some(ref dn) = m.app.display_name {
             ListItem::new(Line::from(vec![
                 dot,
-                Span::styled(format!(" {}", dn), Style::default().fg(Color::White)),
+                Span::styled(format!(" {}", dn), Style::default().fg(list_fg)),
                 Span::styled(format!(" [{}]", m.app.name), Style::default().fg(C_DIM)),
             ]))
         } else if let Some(ref pn) = m.app.pkg_name {
             ListItem::new(Line::from(vec![
                 dot,
-                Span::styled(format!(" {}", m.app.name), Style::default().fg(Color::White)),
+                Span::styled(format!(" {}", m.app.name), Style::default().fg(list_fg)),
                 Span::styled(format!(" [{}]", pn), Style::default().fg(C_DIM)),
             ]))
         } else {
             ListItem::new(Line::from(vec![
                 dot,
-                Span::styled(format!(" {}", m.app.name), Style::default().fg(Color::White)),
+                Span::styled(format!(" {}", m.app.name), Style::default().fg(list_fg)),
             ]))
         }
     }).collect();
 
     let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title(" Apps ").title_style(Style::default().fg(C_ACCENT)))
+        .block(Block::default().borders(Borders::ALL).title(" Apps ")
+            .title_style(Style::default().fg(list_border))
+            .border_style(Style::default().fg(list_border)))
         .highlight_style(Style::default().bg(C_SELECT).fg(Color::White).add_modifier(Modifier::BOLD))
         .highlight_symbol("▶ ");
 
@@ -231,9 +259,13 @@ fn draw_installed(f: &mut Frame, app: &mut App, area: Rect) {
     draw_detail(f, app, chunks[1]);
 }
 
-fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
+fn draw_detail(f: &mut Frame, app: &mut App, area: Rect) {
+    let focused = app.detail_focused;
+    let border_color = if focused { C_ACCENT } else { C_DIM };
+    let title_style = Style::default().fg(border_color);
     let block = Block::default().borders(Borders::ALL)
-        .title(" Details ").title_style(Style::default().fg(C_ACCENT));
+        .title(" Details ").title_style(title_style)
+        .border_style(Style::default().fg(border_color));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -303,6 +335,36 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
         ]));
     }
 
+    // Snapshot list
+    let home = std::env::var("HOME").unwrap_or_default();
+    let snap_dir = format!("{home}/.wryayer/{}/.snapshots", m.app.name);
+    let mut snap_labels: Vec<String> = std::fs::read_dir(&snap_dir)
+        .into_iter().flatten().flatten()
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    snap_labels.sort_by(|a, b| b.cmp(a)); // newest first
+
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!("  Snapshots ({}):", snap_labels.len()),
+            Style::default().fg(C_DIM),
+        ),
+    ]));
+    if snap_labels.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("    none", dim),
+        ]));
+    } else {
+        for label in &snap_labels {
+            lines.push(Line::from(vec![
+                Span::styled("    ", dim),
+                Span::styled(label.as_str(), Style::default().fg(Color::White)),
+            ]));
+        }
+    }
+
     // Package list
     lines.push(Line::raw(""));
     lines.push(Line::from(vec![
@@ -311,7 +373,6 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(C_DIM),
         ),
     ]));
-    // Compute max name width for alignment (cap at 24 chars)
     let max_name = m.packages.iter().map(|p| p.name.len()).max().unwrap_or(0).min(24);
     for pkg in &m.packages {
         let name: String = pkg.name.chars().take(24).collect();
@@ -342,7 +403,11 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
         dim,
     )));
 
-    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    let total = lines.len();
+    let visible = inner.height as usize;
+    let clamped = app.detail_scroll.min(total.saturating_sub(visible));
+    f.render_widget(Paragraph::new(lines).scroll((clamped as u16, 0)), inner);
+    app.detail_scroll = clamped; // write back so up-scrolling is immediate
 }
 
 // ── Install tab ───────────────────────────────────────────────────────────────
@@ -369,7 +434,8 @@ fn draw_install(f: &mut Frame, app: &mut App, area: Rect) {
     let installed_names: std::collections::HashSet<&str> =
         app.installed.iter().map(|m| m.app.name.as_str()).collect();
 
-    let items: Vec<ListItem> = app.search_results.iter().map(|(pkg, repo)| {
+    let items: Vec<ListItem> = app.search_results.iter().enumerate().map(|(_i, (pkg, repo))| {
+        let is_marked = app.selected_pkgs.contains(pkg.as_str());
         let repo_span = repo.as_deref().map(|r| {
             Span::styled(format!(" [{}]", r), Style::default().fg(C_DIM))
         });
@@ -380,6 +446,14 @@ fn draw_install(f: &mut Frame, app: &mut App, area: Rect) {
             ];
             if let Some(rs) = repo_span { spans.push(rs); }
             spans.push(Span::styled(" [installed]", Style::default().fg(C_GREEN)));
+            ListItem::new(Line::from(spans))
+        } else if is_marked {
+            let mut spans = vec![
+                Span::styled("◉ ", Style::default().fg(C_ACCENT)),
+                Span::styled(pkg.as_str(), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            ];
+            if let Some(rs) = repo_span { spans.push(rs); }
+            spans.push(Span::styled(" [marked]", Style::default().fg(C_ACCENT)));
             ListItem::new(Line::from(spans))
         } else {
             let mut spans = vec![
@@ -393,8 +467,10 @@ fn draw_install(f: &mut Frame, app: &mut App, area: Rect) {
 
     let results_title = if app.search_results.is_empty() {
         " Results "
+    } else if !app.selected_pkgs.is_empty() {
+        " Results — [Space] Mark/Unmark  [Enter] Install all marked "
     } else {
-        " Results — [↓] Select  [Enter] Install / Uninstall "
+        " Results — [↓] Select  [Space] Mark  [Enter] Install "
     };
 
     let list = List::new(items)
@@ -404,8 +480,18 @@ fn draw_install(f: &mut Frame, app: &mut App, area: Rect) {
 
     f.render_stateful_widget(list, chunks[1], &mut app.avail_state);
 
-    // Hint for selected item
-    if let Some(i) = app.avail_state.selected() {
+    // Hint line: marked count takes priority
+    if !app.selected_pkgs.is_empty() {
+        let n = app.selected_pkgs.len();
+        let hint = Line::from(vec![
+            Span::styled(format!(" {n} marked — press "), Style::default().fg(C_ACCENT)),
+            Span::styled("Enter", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(" to install all, ", Style::default().fg(C_ACCENT)),
+            Span::styled("Space", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(" to toggle", Style::default().fg(C_ACCENT)),
+        ]);
+        f.render_widget(Paragraph::new(hint), chunks[2]);
+    } else if let Some(i) = app.avail_state.selected() {
         if let Some((pkg, _)) = app.search_results.get(i) {
             let hint = if installed_names.contains(pkg.as_str()) {
                 Line::from(vec![
@@ -417,7 +503,9 @@ fn draw_install(f: &mut Frame, app: &mut App, area: Rect) {
                 Line::from(vec![
                     Span::styled(" Press ", Style::default().fg(C_DIM)),
                     Span::styled("Enter", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-                    Span::styled(" to install", Style::default().fg(C_DIM)),
+                    Span::styled(" to install, ", Style::default().fg(C_DIM)),
+                    Span::styled("Space", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                    Span::styled(" to mark", Style::default().fg(C_DIM)),
                 ])
             };
             f.render_widget(Paragraph::new(hint), chunks[2]);
@@ -475,7 +563,8 @@ fn draw_import(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_statusbar(f: &mut Frame, app: &App, area: Rect) {
     let hint = match app.tab {
-        Tab::Installed => "[Tab] Switch  [r] Run  [d] Delete  [e] Export  [p] Snapshot  [o] Rollback  [c] Check  [u] Update  [s] Config  [n] Rename  [?] Help  [q] Quit",
+        Tab::Installed if app.detail_focused => "[↑↓] Scroll  [←/Esc] Back  [q] Quit",
+        Tab::Installed => "[Tab] Switch  [→] Details  [r] Run  [d] Delete  [e] Export  [p] Snapshot  [o] Rollback  [c] Check  [u] Update  [s] Config  [n] Rename  [?] Help  [q] Quit",
         Tab::Install   => "[Tab] Switch  Type to search  [↓] Select  [Enter] Install/Uninstall  [q] Quit",
         Tab::Import    => "[Tab] Switch  Type zip path  [Enter] Import  [Esc] Clear  [Shift+Q] Quit",
         Tab::Space     => "[Tab] Switch  [r] Run dedup  [q] Quit",
@@ -977,6 +1066,7 @@ fn draw_config(f: &mut Frame, area: Rect, app_name: &str, config: &AppConfig, se
             Some(mib) if mib % 1024 == 0 => format!(" {} GiB  ", mib / 1024),
             Some(mib) => format!(" {} MiB  ", mib),
         }),
+        ("Bg installs", if config.background_installs { "  on " } else { " off " }.to_string()),
     ];
 
     let row_h = 2u16;
@@ -1031,11 +1121,12 @@ fn draw_config(f: &mut Frame, area: Rect, app_name: &str, config: &AppConfig, se
         );
     }
     if save_y < inner.y + inner.height {
+        let save_label = if app_name.is_empty() { "[ Save ]" } else { "[ Save & Close ]" };
         let prefix = if is_sel_save { " ▶ " } else { "   " };
         f.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(prefix, Style::default().fg(C_ACCENT)),
-                Span::styled("[ Save & Close ]", btn_style),
+                Span::styled(save_label, btn_style),
             ])),
             Rect { x: inner.x, y: save_y, width: inner.width, height: 1 },
         );
@@ -1221,6 +1312,8 @@ fn draw_key_help(f: &mut Frame, area: Rect) {
         ("Tab",        "Switch between tabs"),
         ("↑ / k",      "Move selection up"),
         ("↓ / j",      "Move selection down"),
+        ("→ / l",      "Enter detail panel"),
+        ("← / h",      "Exit detail panel"),
         ("?",          "Show this help"),
         ("q / Esc",    "Quit"),
     ];
@@ -1825,6 +1918,100 @@ fn draw_duplicate_install(f: &mut Frame, area: Rect, pkg: &str, value: &str) {
             " [Enter] Install  [Esc] Cancel  [Backspace] Delete char",
             Style::default().fg(C_DIM),
         )),
+        chunks[2],
+    );
+}
+
+// ── Background op tray bar ────────────────────────────────────────────────────
+
+fn draw_bg_op_mini(f: &mut Frame, app: &App, idx: usize, area: Rect) {
+    let Some(op) = app.background_ops.get(idx) else { return };
+    let color = if op.done { if op.success { C_GREEN } else { C_RED } } else { C_ACCENT };
+    let icon = if op.done { if op.success { "✓" } else { "✗" } } else { "…" };
+    let elapsed = op.started.elapsed();
+    let elapsed_str = format!("{:.1}s", elapsed.as_secs_f32());
+    let max_title = (area.width as usize).saturating_sub(24).max(8);
+    let title: String = op.title.chars().take(max_title).collect();
+    let line = Line::from(vec![
+        Span::styled(format!(" [{}] ", idx + 1), Style::default().fg(C_YELLOW).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{icon} "), Style::default().fg(color)),
+        Span::styled(title, Style::default().fg(if op.done { C_DIM } else { Color::White })),
+        Span::styled(format!("  {elapsed_str}"), Style::default().fg(color)),
+        Span::styled(if op.done { "  [Enter] dismiss" } else { "  [Enter] view" }, Style::default().fg(C_DIM)),
+    ]);
+    f.render_widget(
+        Paragraph::new(line).style(Style::default().bg(Color::Rgb(20, 20, 30))),
+        area,
+    );
+}
+
+// ── Background op full log view ───────────────────────────────────────────────
+
+fn draw_bg_op_view(
+    f: &mut Frame,
+    area: Rect,
+    title: &str,
+    log: &[String],
+    done: bool,
+    success: bool,
+    _progress: Option<(u64, u64)>,
+    elapsed: std::time::Duration,
+    log_scroll: usize,
+) {
+    let border_color = if !done { C_ACCENT } else if success { C_GREEN } else { C_RED };
+    let popup = centered_rect(80, 70, area);
+    f.render_widget(Clear, popup);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(0), Constraint::Length(1)])
+        .split(popup);
+
+    let spin = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    let frame_idx = (elapsed.as_millis() / 100) as usize % spin.len();
+    let spinner = if done { if success { "✓" } else { "✗" } } else { spin[frame_idx] };
+    let status = if !done {
+        format!(" {spinner}  Running… {:.1}s", elapsed.as_secs_f32())
+    } else if success {
+        format!(" {spinner}  Done  ({:.1}s)", elapsed.as_secs_f32())
+    } else {
+        format!(" {spinner}  Failed  ({:.1}s)", elapsed.as_secs_f32())
+    };
+
+    let header_block = Block::default()
+        .borders(Borders::LEFT | Borders::RIGHT | Borders::TOP)
+        .title(format!(" {title} "))
+        .title_style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD))
+        .border_style(Style::default().fg(border_color));
+    f.render_widget(
+        Paragraph::new(status).block(header_block).style(Style::default().fg(border_color)),
+        chunks[0],
+    );
+
+    let log_block = Block::default()
+        .borders(Borders::LEFT | Borders::RIGHT)
+        .border_style(Style::default().fg(border_color));
+    let inner = log_block.inner(chunks[1]);
+    f.render_widget(log_block, chunks[1]);
+
+    let visible = inner.height as usize;
+    let scroll = log_scroll.min(log.len().saturating_sub(visible));
+    let lines: Vec<Line> = log.iter().skip(scroll).take(visible).map(|l| {
+        Line::from(Span::styled(format!(" {l}"), Style::default().fg(log_line_color(l))))
+    }).collect();
+    f.render_widget(Paragraph::new(lines), inner);
+
+    let footer = if done {
+        "  [↑↓] Scroll  [q/Esc/Enter] Close"
+    } else {
+        "  [↑↓] Scroll  [q/Esc] Close"
+    };
+    f.render_widget(
+        Paragraph::new(Span::styled(footer, Style::default().fg(border_color).add_modifier(Modifier::BOLD)))
+            .alignment(Alignment::Center)
+            .block(Block::default()
+                .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
+                .border_style(Style::default().fg(border_color))),
         chunks[2],
     );
 }

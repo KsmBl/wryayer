@@ -25,9 +25,9 @@ fn options_for_temp_delete_has_three_choices() {
 
 #[test]
 fn options_for_non_picker_rows_are_empty() {
-    // CFG_SHARES (6) and CFG_SAVE (14) are handled by their own screens.
+    // CFG_SHARES (6) and CFG_SAVE (15) are handled by their own screens.
     assert!(setting_options(6).is_empty());
-    assert!(setting_options(14).is_empty());
+    assert!(setting_options(15).is_empty());
     assert!(setting_options(999).is_empty());
 }
 
@@ -201,7 +201,7 @@ fn cycle_on_empty_options_is_noop() {
     let mut c = AppConfig::default();
     let before = c.clone();
     cycle_setting(&mut c, 6, 1);  // CFG_SHARES — no options
-    cycle_setting(&mut c, 14, -1); // CFG_SAVE — no options
+    cycle_setting(&mut c, 15, -1); // CFG_SAVE — no options
     assert_eq!(c.network, before.network);
     assert_eq!(c.temp_mode, before.temp_mode);
     assert_eq!(c.temp_delete, before.temp_delete);

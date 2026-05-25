@@ -173,20 +173,21 @@ fn round_trip_default_config() {
 #[test]
 fn round_trip_all_non_default_values() {
     let original = AppConfig {
-        temp_mode:        TempMode::Ramdisk,
-        temp_delete:      LocalDelete::OnClose,
-        network:          false,
-        camera:           false,
-        microphone:       false,
-        audio:            false,
-        shared_dirs:      vec!["/tmp/foo".to_string(), "/opt/bar".to_string()],
-        spoof_hostname:   None,
-        spoof_username:   None,
-        spoof_machine_id: None,
-        spoof_cpuinfo:    None,
-        spoof_os:         None,
-        spoof_terminal:   false,
-        ram_limit:        None,
+        temp_mode:           TempMode::Ramdisk,
+        temp_delete:         LocalDelete::OnClose,
+        network:             false,
+        camera:              false,
+        microphone:          false,
+        audio:               false,
+        shared_dirs:         vec!["/tmp/foo".to_string(), "/opt/bar".to_string()],
+        spoof_hostname:      None,
+        spoof_username:      None,
+        spoof_machine_id:    None,
+        spoof_cpuinfo:       None,
+        spoof_os:            None,
+        spoof_terminal:      false,
+        ram_limit:           None,
+        background_installs: true,
     };
     let parsed = parse_ini(&format_ini(&original)).unwrap();
     assert_eq!(parsed.temp_mode,   TempMode::Ramdisk);
@@ -196,6 +197,7 @@ fn round_trip_all_non_default_values() {
     assert!(!parsed.microphone);
     assert!(!parsed.audio);
     assert_eq!(parsed.shared_dirs, vec!["/tmp/foo", "/opt/bar"]);
+    assert!(parsed.background_installs);
 }
 
 // ── parse_ini — ram_limit — aliases that disable ──────────────────────────────

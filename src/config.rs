@@ -54,6 +54,8 @@ pub struct AppConfig {
     pub spoof_terminal: bool,
     /// Maximum RAM the app may use in MiB — enforced via systemd-run (None = no limit)
     pub ram_limit: Option<u64>,
+    /// Move install progress to the bottom tray bar instead of a modal overlay
+    pub background_installs: bool,
 }
 
 impl Default for AppConfig {
@@ -73,6 +75,7 @@ impl Default for AppConfig {
             spoof_os: None,
             spoof_terminal: false,
             ram_limit: None,
+            background_installs: false,
         }
     }
 }
@@ -206,6 +209,9 @@ pub fn parse_ini(content: &str) -> Result<AppConfig> {
                     v.parse::<u64>().ok().filter(|&n| n > 0)
                 };
             }
+            ("background_installs", v) => {
+                config.background_installs = matches!(v, "on" | "true" | "1");
+            }
             _ => {}
         }
     }
@@ -302,6 +308,11 @@ pub fn format_ini(config: &AppConfig) -> String {
         s.push_str("\n[resources]\n");
         s.push_str("; Maximum RAM in MiB (RAM + swap). Enforced via systemd-run MemoryMax+MemorySwapMax.\n");
         s.push_str(&format!("ram_limit = {mib}\n"));
+    }
+    if config.background_installs {
+        s.push_str("\n[behavior]\n");
+        s.push_str("; Move install progress to the bottom tray bar — allows searching while installing\n");
+        s.push_str("background_installs = on\n");
     }
     s
 }
