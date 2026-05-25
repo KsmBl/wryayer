@@ -106,11 +106,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             let config = config.clone();
             let setting_idx = *setting_idx;
             let selected = *selected;
-            // Draw the underlying Config screen so the picker looks like
-            // it expanded from the matching row.
-            if app_name.is_empty() {
-                draw_config(f, area, "", &config, setting_idx);
-            } else {
+            // For app configs draw the Config popup as backing; for the global
+            // Settings tab the 2-panel background is already rendered.
+            if !app_name.is_empty() {
                 draw_config(f, area, &app_name, &config, setting_idx);
             }
             draw_option_picker(f, area, setting_idx, selected, &config);
@@ -119,7 +117,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             let app_name = app_name.clone();
             let config = config.clone();
             let back_selected = *back_selected;
-            draw_config(f, area, &app_name, &config, back_selected);
+            if !app_name.is_empty() {
+                draw_config(f, area, &app_name, &config, back_selected);
+            }
             draw_setting_help(f, area, back_selected);
         }
         Screen::OptionHelp { app_name, config, setting_idx, picker_selected } => {
@@ -127,7 +127,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             let config = config.clone();
             let setting_idx = *setting_idx;
             let picker_selected = *picker_selected;
-            draw_config(f, area, &app_name, &config, setting_idx);
+            if !app_name.is_empty() {
+                draw_config(f, area, &app_name, &config, setting_idx);
+            }
             draw_option_picker(f, area, setting_idx, picker_selected, &config);
             draw_option_help(f, area, setting_idx, picker_selected);
         }
@@ -137,7 +139,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             let back_selected = *back_selected;
             let field_idx = *field_idx;
             let value = value.clone();
-            draw_config(f, area, &app_name, &config, back_selected);
+            if !app_name.is_empty() {
+                draw_config(f, area, &app_name, &config, back_selected);
+            }
             let title = super::setting_title(field_idx);
             draw_text_input(f, area, title, &value);
         }
@@ -1072,7 +1076,7 @@ fn draw_settings_tab(f: &mut Frame, app: &mut App, area: Rect) {
         let is_sel = idx == selected;
         let y = list_inner.y + idx as u16;
         let bg = if is_sel { C_SELECT } else { Color::Reset };
-        let val_color = match value.as_str() {
+        let val_color = match value.trim() {
             "on" => C_GREEN,
             "off" => C_RED,
             _ => C_YELLOW,
