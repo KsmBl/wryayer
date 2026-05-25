@@ -185,6 +185,8 @@ fn round_trip_all_non_default_values() {
         spoof_machine_id: None,
         spoof_cpuinfo:    None,
         spoof_os:         None,
+        spoof_terminal:   false,
+        keyboard_layout:  None,
         ram_limit:        None,
     };
     let parsed = parse_ini(&format_ini(&original)).unwrap();

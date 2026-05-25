@@ -35,10 +35,11 @@ wryayer solves all three by extracting packages into self-contained directory tr
                           └──────────────┬───────────────────────────┘
               ┌───────────────────────────┴──────────────────────────┐
               │  TUI (ratatui / crossterm)    CLI (clap)             │
-              │  ┌─────────────────────┐   install   remove  list   │
-              │  │ Installed │ Install │   run       update  repair  │
-              │  │ Import    │ Space   │   config    export  import  │
-              │  └─────────────────────┘   snapshot  rollback        │
+              │  ┌───────────────────────┐   install   remove  list  │
+              │  │ Installed │ Install   │   run       update  repair │
+              │  │ Import    │ Space     │   config    export  import │
+              │  │ Settings (global cfg) │   snapshot  rollback       │
+              │  └───────────────────────┘   snapshots dedup          │
               │                            snapshots dedup completions│
               └────────────────────────┬─────────────────────────────┘
                                        │
@@ -392,7 +393,7 @@ Key bindings:
 
 | Key | Action |
 |---|---|
-| `Tab` / `Shift+Tab` | Switch tabs (Installed / Install / Import / Space) |
+| `Tab` / `Shift+Tab` | Switch tabs (Installed / Install / Import / Space / **Settings**) |
 | `↑` / `↓` or `j` / `k` | Navigate lists |
 | `r` | Run selected app |
 | `d` / `Delete` | Remove selected app (double-confirm) |
@@ -402,9 +403,13 @@ Key bindings:
 | `u` | Update selected app |
 | `c` | Check for updates |
 | `s` | Open per-app config |
+| `n` | Rename app (set display name) |
 | `q` / `Esc` | Quit / close overlay |
 | `t` | Toggle debug log during install/remove operations |
+| `?` | Show key-bindings reference |
 | `Shift+Q` | Force-quit from anywhere |
+
+The **Settings** tab lets you edit global defaults applied to every newly installed app. Settings behave identically to per-app config but are stored in `~/.wryayer/defaults.ini`. Press `Enter` or `←`/`→` to change a value; press `Enter` on **Save & Close** to persist. Per-app overrides always take precedence over global defaults.
 
 ---
 
@@ -439,7 +444,8 @@ wryayer config firefox share list
 | `microphone` | `on` `off` | `on` | Mask ALSA capture devices (see caveat below) |
 | `audio` | `on` `off` | `on` | Mask ALSA + PipeWire/PulseAudio sockets |
 | `share add <path>` | Any existing directory | — | Bind-mount `<path>` read-write inside the sandbox |
-| `ramlimit <MiB\|none>` | Integer (MiB) or `none` | `none` | Hard cap on RAM **and** swap combined, enforced via `systemd-run --wait -p MemoryMax=NM -p MemorySwapMax=0` (requires systemd). Both limits are necessary — without `MemorySwapMax=0` the kernel silently offloads pages to swap (including zram), letting the app exceed the cap. |
+| `keyboard-layout` | `off` `us` `de` `colemak` `dvorak` | `off` (inherit host) | Inject `XKB_DEFAULT_LAYOUT` into the sandbox. `us` = QWERTY, `de` = QWERTZ, `colemak` and `dvorak` are ergonomic alternatives. `off` or `system` inherits the host compositor layout. |
+| `ramlimit <MiB\|none>` | Integer (MiB) or `none` | `none` | Hard cap on RAM **and** swap combined, enforced via `systemd-run --scope -p MemoryMax=NM -p MemorySwapMax=0` (requires systemd). Both limits are necessary — without `MemorySwapMax=0` the kernel silently offloads pages to swap (including zram), letting the app exceed the cap. |
 
 ### Identity spoofing
 
@@ -477,6 +483,13 @@ wryayer config firefox spoof-os system      # disable
 wryayer config fastfetch spoof-terminal on   # detect kitty/foot/alacritty/… and set TERM_PROGRAM
 wryayer config fastfetch spoof-terminal off  # disable (default)
 
+# Set keyboard layout inside the sandbox
+wryayer config firefox keyboard-layout de       # QWERTZ (German)
+wryayer config firefox keyboard-layout us       # QWERTY (US English)
+wryayer config firefox keyboard-layout colemak  # Colemak ergonomic
+wryayer config firefox keyboard-layout dvorak   # Dvorak simplified
+wryayer config firefox keyboard-layout off      # inherit from host compositor (default)
+
 # Disable any spoofing
 wryayer config firefox spoof-hostname system
 ```
@@ -493,6 +506,7 @@ Press `?` on the **installed** tab for a full key-bindings reference.
 | `spoof-cpuinfo <sample\|path\|system\|off>` | Path or `sample` | Binds the file over `/proc/cpuinfo` |
 | `spoof-os <ubuntu\|arch\|windows\|arduinoide\|name\|system\|off>` | Preset or any OS name | Writes `/etc/os-release` and `/usr/lib/os-release` |
 | `spoof-terminal <on\|off>` | `on` or `off` | Detects real terminal via process tree and sets `TERM_PROGRAM` inside sandbox |
+| `keyboard-layout <layout\|off>` | `us` `de` `colemak` `dvorak` or `off` | Sets `XKB_DEFAULT_LAYOUT` inside the sandbox (`off` or `system` = inherit from host) |
 
 **Sample values:**
 
@@ -560,6 +574,8 @@ The config is stored as a human-readable INI file at `~/.wryayer/<app>/config.in
 - [ ] **Export/import via SSH or SFTP** — `wryayer export --remote user@host:/path`
 - [x] **TUI package search from AUR** — Install tab searches both official repos and the AUR
 - [x] **Identity spoofing** — spoof hostname, username, machine-id, and cpuinfo per app
+- [x] **Keyboard layout override** — inject `XKB_DEFAULT_LAYOUT` per app via `config keyboard-layout`; presets for QWERTY (us), QWERTZ (de), Colemak, and Dvorak
+- [x] **Global default settings** — Settings tab in TUI and `~/.wryayer/defaults.ini` set defaults inherited by all new apps
 - [ ] **Per-app env var overrides** — let users set `LANG`, `QT_SCALE_FACTOR`, etc. in `config.ini`
 - [ ] **Dependency graph viewer** — TUI screen showing the full package tree for an installed app
 - [ ] **Auto-snapshot on update** — capture a snapshot automatically before each update so failures can be undone with one keystroke
@@ -592,17 +608,19 @@ RUST_TEST_THREADS=1 cargo test
 
 The test suite targets **≥ 90 % branch coverage** on all pure and filesystem-dependent logic. Coverage is achieved through **equivalence class partitioning** — one representative value per class rather than exhaustive enumeration — combined with explicit boundary and error-path tests.
 
-| Module | What is covered |
+| Module / test file | What is covered |
 |---|---|
-| `config.rs` | `parse_ini` (all keys, all enum variants, error paths, `ram_limit` disable aliases / integers / absent), `format_ini` (`[resources]` section presence/absence), `parse_bool` (3 EC), round-trip (including `ram_limit` Some and None) |
+| `config.rs` (`config_tests.rs`) | `parse_ini` (all keys, all enum variants, error paths, `ram_limit` disable aliases / integers / absent, `keyboard_layout` all values), `format_ini` (`[resources]` + `[keyboard]` sections presence/absence), `parse_bool` (3 EC), round-trip (including `ram_limit` and `keyboard_layout`) |
+| `config.rs` (`global_config_tests.rs`) | `read_global_config` fallback when file absent, `write_global_config` + `read_global_config` round-trip, `keyboard_layout` all values through format+parse, `off`/`system`/empty disable aliases |
 | `manifest.rs` | `write_manifest`/`read_manifest` round-trip, `list_all_apps` (empty, sorted, skips bad dirs), atomicity |
 | `launcher.rs` | `create_launcher` (content, permissions), `remove_launcher` (missing, non-wryayer, valid) |
 | `commands/dedup.rs` | `format_bytes` (4 EC + 7 boundaries), `du_walk` (SKIP_DIRS, hard-link accounting) |
 | `package/deps.rs` | `strip_version_constraint` (7 operators), `is_soname_dep` (5 EC), `parse_pacman_field`, `parse_pacman_depends` (5 EC) |
-| `commands/run.rs` | Arg stripping (5 cases), `no_other_instance` (missing file, bad content, live PID, dead PID), `has_systemd_run` (filesystem consistency), `wrap_with_ram_limit` (outer program, `--user`/`--wait`/`--quiet`, `MemoryMax`, `MemorySwapMax=0`, `--` separator, inner args preserved, env transfer) |
+| `commands/run.rs` | Arg stripping (5 cases), `no_other_instance` (missing file, bad content, live PID, dead PID), `has_systemd_run` (filesystem consistency), `wrap_with_ram_limit` (outer program, `--user`/`--scope`/`--quiet`, `MemoryMax`, `MemorySwapMax=0`, `--` separator, inner args preserved, env transfer) |
 | `commands/install.rs` | `ensure_base_layout` (creates all symlinks, idempotent, preserves real dirs) |
 | `commands/snapshot.rs` | `create` / `labels` / `latest` round-trip, inode sharing, `.snapshots` recursion guard, `rollback` (restores modifications, errors on missing label, preserves snapshots dir) |
 | `commands/remove.rs` + alias model | `alias_of` serde round-trip, `skip_serializing_if` for `None`, legacy manifests without the field still parse, `list_all_apps` surfaces aliases as own entries, removing an alias leaves the target tree + manifest untouched, removing a target with dependent aliases is blocked with all blockers named, standalone removal unaffected |
+| `tui/mod.rs` (`option_picker_tests.rs`) | `setting_options` (shape per row incl. keyboard layout row 13 and RAM limit row 14), `setting_title`, `setting_description`, `option_description`, `setting_current`, `apply_setting`, `cycle_setting` — full forward/backward/wrap cycles for all non-empty rows |
 | `tui/mod.rs` | `parse_progress` (`PROGRESS n/total` parsing + garbage rejection), konami FSM (full sequence, wrong-key reset, case-insensitive BA) |
 
 External-tool-dependent code (`bwrap_cmd`, `reinstall`, distro backends) is covered by integration tests that require a live environment with `bwrap` and either `pacman` (Arch) or `apt` / `dpkg` (Debian/Ubuntu) present.

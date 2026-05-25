@@ -28,6 +28,8 @@ fn install_fake_app(root: &std::path::Path, app: &str) {
             installed_at: "2026-05-16T00:00:00Z".into(),
             launchers:    vec!["main".into()],
             alias_of:     None,
+            display_name: None,
+            pkg_name:     None,
         },
         packages: vec![PackageEntry {
             name:    app.to_string(),

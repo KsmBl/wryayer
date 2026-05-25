@@ -20,7 +20,7 @@ use ratatui::widgets::ListState;
 use ratatui::Terminal;
 
 use crate::commands::dedup::all_du;
-use crate::config::{read_config, write_config, AppConfig, LocalDelete, TempMode};
+use crate::config::{read_config, read_global_config, write_config, write_global_config, AppConfig, LocalDelete, TempMode};
 use crate::manifest::{list_all_apps, tree_order, Manifest};
 
 // ── Op messages ───────────────────────────────────────────────────────────────
@@ -185,6 +185,7 @@ pub enum Tab {
     Install,
     Import,
     Space,
+    Settings,
 }
 
 // ── App state ─────────────────────────────────────────────────────────────────
@@ -208,6 +209,9 @@ pub struct App {
     pub search_list_focused: bool,
     // Import tab
     pub import_input: String,
+    // Settings tab (global defaults)
+    pub global_config: AppConfig,
+    pub global_selected: usize,
     // Disk usage (computed once on load, refreshed on reload)
     pub app_sizes: HashMap<String, u64>,
     pub du_apparent: u64,
@@ -254,6 +258,8 @@ impl App {
             avail_state: ListState::default(),
             search_list_focused: false,
             import_input: String::new(),
+            global_config: read_global_config(),
+            global_selected: 0,
             app_sizes,
             du_apparent,
             du_actual,
@@ -619,19 +625,21 @@ fn on_main(app: &mut App, code: KeyCode) -> Result<()> {
         KeyCode::Tab => {
             app.tab = match app.tab {
                 Tab::Installed => Tab::Install,
-                Tab::Install  => Tab::Import,
-                Tab::Import   => Tab::Space,
-                Tab::Space    => Tab::Installed,
+                Tab::Install   => Tab::Import,
+                Tab::Import    => Tab::Space,
+                Tab::Space     => Tab::Settings,
+                Tab::Settings  => Tab::Installed,
             };
             app.status.clear();
             return Ok(());
         }
         KeyCode::BackTab => {
             app.tab = match app.tab {
-                Tab::Installed => Tab::Space,
+                Tab::Installed => Tab::Settings,
                 Tab::Install   => Tab::Installed,
                 Tab::Import    => Tab::Install,
                 Tab::Space     => Tab::Import,
+                Tab::Settings  => Tab::Space,
             };
             app.status.clear();
             return Ok(());
@@ -654,6 +662,7 @@ fn on_main(app: &mut App, code: KeyCode) -> Result<()> {
         Tab::Install   => on_install(app, code),
         Tab::Import    => on_import(app, code),
         Tab::Space     => on_space_tab(app, code),
+        Tab::Settings  => on_settings_tab(app, code),
     }
     Ok(())
 }
@@ -1372,8 +1381,8 @@ fn on_op_done(app: &mut App, code: KeyCode) -> Result<()> {
 
 // Rows: 0=network 1=camera 2=microphone 3=audio 4=temp_mode 5=temp_delete 6=shared_dirs
 //       7=spoof_hostname 8=spoof_username 9=spoof_machine_id 10=spoof_cpuinfo 11=spoof_os
-//       12=spoof_terminal 13=ram_limit 14=Save
-pub const CFG_LEN: usize = 15;
+//       12=spoof_terminal 13=keyboard_layout 14=ram_limit 15=Save
+pub const CFG_LEN: usize = 16;
 pub const CFG_SHARES: usize = 6;
 pub const CFG_SPOOF_HOSTNAME: usize = 7;
 pub const CFG_SPOOF_USERNAME: usize = 8;
@@ -1381,8 +1390,9 @@ pub const CFG_SPOOF_MACHINE_ID: usize = 9;
 pub const CFG_SPOOF_CPUINFO: usize = 10;
 pub const CFG_SPOOF_OS: usize = 11;
 pub const CFG_SPOOF_TERMINAL: usize = 12;
-pub const CFG_RAM_LIMIT: usize = 13;
-pub const CFG_SAVE: usize = 14;
+pub const CFG_KEYBOARD: usize = 13;
+pub const CFG_RAM_LIMIT: usize = 14;
+pub const CFG_SAVE: usize = 15;
 
 /// A fixed 32-char hex machine-id that apps can use as a plausible-looking ID.
 pub const MACHINE_ID_SAMPLE: &str = "cafebabe0011223344556677deadbeef";
@@ -1487,6 +1497,7 @@ pub fn setting_options(idx: usize) -> Vec<&'static str> {
         CFG_SPOOF_CPUINFO => vec!["system", "sample", "edit"],
         CFG_SPOOF_MACHINE_ID => vec!["system", "random", "sample", "input"],
         CFG_SPOOF_TERMINAL => vec!["off", "detect"],
+        CFG_KEYBOARD => vec!["system", "us (qwerty)", "de (qwertz)", "colemak", "dvorak"],
         CFG_RAM_LIMIT => vec!["none", "512 MiB", "1 GiB", "2 GiB", "4 GiB", "8 GiB"],
         _ => vec![],
     }
@@ -1508,7 +1519,8 @@ pub fn setting_title(idx: usize) -> &'static str {
         10 => "Spoof CPU info",
         11 => "Spoof OS release",
         12 => "Spoof terminal name",
-        13 => "RAM limit",
+        13 => "Keyboard layout",
+        14 => "RAM limit",
         _ => "Option",
     }
 }
@@ -1529,7 +1541,8 @@ pub fn setting_description(idx: usize) -> &'static str {
         10 => "Override /proc/cpuinfo inside the sandbox. 'system' exposes the real CPU; 'sample' shows a generic Intel i7; 'edit' opens a text editor so you can write a fully custom cpuinfo — pre-filled with your real CPU data.",
         11 => "Override /etc/os-release inside the sandbox. Choose a preset (Ubuntu, Arch, Windows 11, ArduinoIDE) or 'input' to type any custom OS name. 'system' exposes the real OS release.",
         12 => "'detect' walks the process tree to find your real terminal emulator (kitty, foot, alacritty, WezTerm, …) and sets the env var that identifies it inside the sandbox (KITTY_WINDOW_ID, $TERM, WEZTERM_PANE, …). Fixes fastfetch/neofetch showing 'bwrap' instead of your real terminal.",
-        13 => "Maximum RAM the app may use (RAM + swap both capped). Enforced via systemd-run MemoryMax + MemorySwapMax=0. 'none' disables the limit. Requires systemd.",
+        13 => "Set the keyboard layout inside the sandbox via XKB_DEFAULT_LAYOUT. 'system' inherits the layout from the host compositor. 'us' = QWERTY, 'de' = QWERTZ, 'colemak' and 'dvorak' are ergonomic alternatives.",
+        14 => "Maximum RAM the app may use (RAM + swap both capped). Enforced via systemd-run MemoryMax + MemorySwapMax=0. 'none' disables the limit. Requires systemd.",
         _ => "No description available.",
     }
 }
@@ -1585,13 +1598,19 @@ pub fn option_description(setting_idx: usize, choice_idx: usize) -> &'static str
         // Spoof terminal
         (12, 0) => "off — Do not override terminal identity. Tools like fastfetch may show 'bwrap' as the terminal.",
         (12, 1) => "detect — Walk the process tree to find the real terminal (kitty, foot, alacritty, WezTerm, …) and set the correct env var inside the sandbox. Fixes fastfetch showing 'bwrap'.",
+        // Keyboard layout
+        (13, 0) => "system — Inherit the keyboard layout from the host compositor. No override applied.",
+        (13, 1) => "us (qwerty) — QWERTY layout (US English). The standard Latin keyboard used worldwide.",
+        (13, 2) => "de (qwertz) — QWERTZ layout (German). Keys z and y are swapped; common in DACH countries.",
+        (13, 3) => "colemak — Colemak layout. An ergonomic alternative to QWERTY that keeps common shortcuts in place.",
+        (13, 4) => "dvorak — Dvorak Simplified layout. Designed to minimise finger travel on English text.",
         // RAM limit
-        (13, 0) => "none — No RAM limit. The app may use as much memory as the system allows.",
-        (13, 1) => "512 MiB — Hard cap at 512 MiB (RAM + swap). Processes are OOM-killed if they exceed this.",
-        (13, 2) => "1 GiB — Cap the app at 1 GiB (1024 MiB) of RAM.",
-        (13, 3) => "2 GiB — Cap the app at 2 GiB (2048 MiB) of RAM. Good default for everyday apps.",
-        (13, 4) => "4 GiB — Cap the app at 4 GiB (4096 MiB) of RAM.",
-        (13, 5) => "8 GiB — Cap the app at 8 GiB (8192 MiB) of RAM.",
+        (14, 0) => "none — No RAM limit. The app may use as much memory as the system allows.",
+        (14, 1) => "512 MiB — Hard cap at 512 MiB (RAM + swap). Processes are OOM-killed if they exceed this.",
+        (14, 2) => "1 GiB — Cap the app at 1 GiB (1024 MiB) of RAM.",
+        (14, 3) => "2 GiB — Cap the app at 2 GiB (2048 MiB) of RAM. Good default for everyday apps.",
+        (14, 4) => "4 GiB — Cap the app at 4 GiB (4096 MiB) of RAM.",
+        (14, 5) => "8 GiB — Cap the app at 8 GiB (8192 MiB) of RAM.",
         _ => "No description available.",
     }
 }
@@ -1645,6 +1664,14 @@ pub fn setting_current(config: &AppConfig, idx: usize) -> usize {
             _                  => 5,
         },
         CFG_SPOOF_TERMINAL => if config.spoof_terminal { 1 } else { 0 },
+        CFG_KEYBOARD => match config.keyboard_layout.as_deref() {
+            None           => 0,
+            Some("us")     => 1,
+            Some("de")     => 2,
+            Some("colemak") => 3,
+            Some("dvorak") => 4,
+            _              => 0,
+        },
         CFG_RAM_LIMIT => match config.ram_limit {
             None        => 0,
             Some(512)   => 1,
@@ -1702,12 +1729,17 @@ pub fn apply_setting(config: &mut AppConfig, idx: usize, choice: usize) {
         // (11, 5) = "input" — handled by on_option_picker which opens TextInput
         (12, 0) => config.spoof_terminal = false,
         (12, 1) => config.spoof_terminal = true,
-        (13, 0) => config.ram_limit = None,
-        (13, 1) => config.ram_limit = Some(512),
-        (13, 2) => config.ram_limit = Some(1024),
-        (13, 3) => config.ram_limit = Some(2048),
-        (13, 4) => config.ram_limit = Some(4096),
-        (13, 5) => config.ram_limit = Some(8192),
+        (13, 0) => config.keyboard_layout = None,
+        (13, 1) => config.keyboard_layout = Some("us".to_string()),
+        (13, 2) => config.keyboard_layout = Some("de".to_string()),
+        (13, 3) => config.keyboard_layout = Some("colemak".to_string()),
+        (13, 4) => config.keyboard_layout = Some("dvorak".to_string()),
+        (14, 0) => config.ram_limit = None,
+        (14, 1) => config.ram_limit = Some(512),
+        (14, 2) => config.ram_limit = Some(1024),
+        (14, 3) => config.ram_limit = Some(2048),
+        (14, 4) => config.ram_limit = Some(4096),
+        (14, 5) => config.ram_limit = Some(8192),
         _ => {}
     }
 }
@@ -1810,7 +1842,15 @@ fn on_option_picker(app: &mut App, code: KeyCode) {
                 return;
             }
             apply_setting(&mut cfg, idx, choice);
-            app.screen = Screen::Config { app_name: name, config: cfg, selected: idx };
+            if name.is_empty() {
+                // Global settings mode: update in-memory config and return to Settings tab
+                app.global_config = cfg;
+                app.global_selected = idx;
+                app.tab = Tab::Settings;
+                app.screen = Screen::Main;
+            } else {
+                app.screen = Screen::Config { app_name: name, config: cfg, selected: idx };
+            }
             app.needs_clear = true;
         }
         KeyCode::Char('?') => {
@@ -1854,7 +1894,15 @@ fn on_setting_help(app: &mut App, _code: KeyCode) {
     let name = app_name.clone();
     let cfg = config.clone();
     let sel = *back_selected;
-    app.screen = Screen::Config { app_name: name, config: cfg, selected: sel };
+    if name.is_empty() {
+        // Global settings mode
+        app.global_config = cfg;
+        app.global_selected = sel;
+        app.tab = Tab::Settings;
+        app.screen = Screen::Main;
+    } else {
+        app.screen = Screen::Config { app_name: name, config: cfg, selected: sel };
+    }
     app.needs_clear = true;
 }
 
@@ -1882,7 +1930,14 @@ fn on_text_input(app: &mut App, code: KeyCode) {
             let name = app_name.clone();
             let cfg = config.clone();
             let sel = *back_selected;
-            app.screen = Screen::Config { app_name: name, config: cfg, selected: sel };
+            if name.is_empty() {
+                app.global_config = cfg;
+                app.global_selected = sel;
+                app.tab = Tab::Settings;
+                app.screen = Screen::Main;
+            } else {
+                app.screen = Screen::Config { app_name: name, config: cfg, selected: sel };
+            }
             app.needs_clear = true;
         }
         KeyCode::Enter => {
@@ -1892,7 +1947,15 @@ fn on_text_input(app: &mut App, code: KeyCode) {
             let idx = *field_idx;
             let v = value.trim().to_string();
             set_spoof_field(&mut cfg, idx, v);
-            app.screen = Screen::Config { app_name: name, config: cfg, selected: sel };
+            if name.is_empty() {
+                // Global settings mode
+                app.global_config = cfg;
+                app.global_selected = sel;
+                app.tab = Tab::Settings;
+                app.screen = Screen::Main;
+            } else {
+                app.screen = Screen::Config { app_name: name, config: cfg, selected: sel };
+            }
             app.needs_clear = true;
         }
         KeyCode::Backspace => {
@@ -1910,6 +1973,75 @@ fn on_text_input(app: &mut App, code: KeyCode) {
 fn on_space_tab(app: &mut App, code: KeyCode) {
     if code == KeyCode::Char('r') {
         launch_op(app, "Dedup".to_string(), vec!["dedup".to_string()], None, true);
+    }
+}
+
+// ── Settings tab (global defaults) ───────────────────────────────────────────
+
+fn on_settings_tab(app: &mut App, code: KeyCode) {
+    match code {
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.global_selected = app.global_selected.saturating_sub(1);
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            app.global_selected = (app.global_selected + 1).min(CFG_LEN - 1);
+        }
+        KeyCode::Right | KeyCode::Char(' ') => {
+            if app.global_selected == CFG_SAVE {
+                let cfg = app.global_config.clone();
+                if write_global_config(&cfg).is_ok() {
+                    app.status = "Global defaults saved.".into();
+                } else {
+                    app.status = "error: failed to save global defaults".into();
+                }
+                return;
+            }
+            if app.global_selected == CFG_SHARES {
+                app.status = "Shared directories are per-app (configure via [s] Config on an installed app)".into();
+                return;
+            }
+            cycle_setting(&mut app.global_config, app.global_selected, 1);
+        }
+        KeyCode::Left => {
+            if app.global_selected != CFG_SAVE && app.global_selected != CFG_SHARES {
+                cycle_setting(&mut app.global_config, app.global_selected, -1);
+            }
+        }
+        KeyCode::Enter => {
+            if app.global_selected == CFG_SAVE {
+                let cfg = app.global_config.clone();
+                if write_global_config(&cfg).is_ok() {
+                    app.status = "Global defaults saved.".into();
+                } else {
+                    app.status = "error: failed to save global defaults".into();
+                }
+                return;
+            }
+            if app.global_selected == CFG_SHARES {
+                app.status = "Shared directories are per-app (configure via [s] Config on an installed app)".into();
+                return;
+            }
+            let idx = app.global_selected;
+            let cur = setting_current(&app.global_config, idx);
+            // Use empty app_name as sentinel for global settings mode
+            app.screen = Screen::OptionPicker {
+                app_name: String::new(),
+                config: app.global_config.clone(),
+                setting_idx: idx,
+                selected: cur,
+            };
+            app.needs_clear = true;
+        }
+        KeyCode::Char('?') => {
+            let idx = app.global_selected;
+            app.screen = Screen::SettingHelp {
+                app_name: String::new(),
+                config: app.global_config.clone(),
+                back_selected: idx,
+            };
+            app.needs_clear = true;
+        }
+        _ => {}
     }
 }
 

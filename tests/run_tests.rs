@@ -128,10 +128,10 @@ fn wrap_outer_program_is_systemd_run() {
 }
 
 #[test]
-fn wrap_contains_user_wait_quiet_flags() {
+fn wrap_contains_user_scope_quiet_flags() {
     let args = args_of(&wrap_with_ram_limit(inner_cmd("bwrap"), 512));
     assert!(args.contains(&"--user".to_string()),  "--user must be present");
-    assert!(args.contains(&"--wait".to_string()),  "--wait must be present (not --scope)");
+    assert!(args.contains(&"--scope".to_string()), "--scope must be present (not --wait)");
     assert!(args.contains(&"--quiet".to_string()), "--quiet must be present");
 }
 

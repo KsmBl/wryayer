@@ -159,6 +159,7 @@ complete -c wryayer -n '__fish_seen_subcommand_from completions' \
 #           config firefox spoof-cpuinfo <TAB>        → sample system off (+ files)
 #           config firefox spoof-os <TAB>             → system ubuntu arch windows arduinoide off
 #           config firefox spoof-terminal <TAB>       → on off
+#           config firefox keyboard-layout <TAB>      → off us de colemak dvorak
 #           config firefox ram-limit <TAB>            → none 512 1024 2048 4096 8192
 
 set -l cfg_settings \
@@ -166,6 +167,7 @@ set -l cfg_settings \
     network camera microphone audio \
     share \
     spoof-hostname spoof-username spoof-machine-id spoof-cpuinfo spoof-os spoof-terminal \
+    keyboard-layout \
     ram-limit
 
 # ── Level 1 — app name ────────────────────────────────────────────────────────
@@ -213,6 +215,9 @@ complete -c wryayer \
 complete -c wryayer \
     -n "__fish_seen_subcommand_from config; and __wryayer_config_has_app; and not __fish_seen_subcommand_from $cfg_settings" \
     -a spoof-terminal  -d 'Detect real terminal and pass it into sandbox (fixes fastfetch showing bwrap)'
+complete -c wryayer \
+    -n "__fish_seen_subcommand_from config; and __wryayer_config_has_app; and not __fish_seen_subcommand_from $cfg_settings" \
+    -a keyboard-layout -d 'Set keyboard layout inside sandbox (us=QWERTY, de=QWERTZ, colemak, dvorak)'
 complete -c wryayer \
     -n "__fish_seen_subcommand_from config; and __wryayer_config_has_app; and not __fish_seen_subcommand_from $cfg_settings" \
     -a ram-limit       -d 'Limit maximum RAM usage in MiB (requires systemd)'
@@ -278,6 +283,14 @@ complete -c wryayer -n '__fish_seen_subcommand_from spoof-os' -a off        -d '
 # ── Level 3i2 — spoof-terminal values ────────────────────────────────────────
 complete -c wryayer -n '__fish_seen_subcommand_from spoof-terminal' -a on  -d 'Detect real terminal and set TERM_PROGRAM inside the sandbox'
 complete -c wryayer -n '__fish_seen_subcommand_from spoof-terminal' -a off -d 'Disable terminal spoofing (default)'
+
+# ── Level 3k — keyboard-layout values ────────────────────────────────────────
+complete -c wryayer -n '__fish_seen_subcommand_from keyboard-layout' -a off     -d 'Inherit layout from host compositor (default)'
+complete -c wryayer -n '__fish_seen_subcommand_from keyboard-layout' -a system  -d 'Alias for off — inherit from host'
+complete -c wryayer -n '__fish_seen_subcommand_from keyboard-layout' -a us      -d 'QWERTY (US English)'
+complete -c wryayer -n '__fish_seen_subcommand_from keyboard-layout' -a de      -d 'QWERTZ (German / DACH)'
+complete -c wryayer -n '__fish_seen_subcommand_from keyboard-layout' -a colemak -d 'Colemak ergonomic layout'
+complete -c wryayer -n '__fish_seen_subcommand_from keyboard-layout' -a dvorak  -d 'Dvorak Simplified layout'
 
 # ── Level 3j — ram-limit values ──────────────────────────────────────────────
 complete -c wryayer -n '__fish_seen_subcommand_from ram-limit' -a none -d 'No RAM limit (default)'

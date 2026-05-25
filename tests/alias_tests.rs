@@ -40,6 +40,8 @@ fn write_app(root: &std::path::Path, name: &str, alias_of: Option<&str>) {
             installed_at: "2026-05-17T00:00:00Z".to_string(),
             launchers:    vec![name.to_string()],
             alias_of:     alias_of.map(str::to_string),
+            display_name: None,
+            pkg_name:     None,
         },
         packages: vec![PackageEntry {
             name:    name.to_string(),

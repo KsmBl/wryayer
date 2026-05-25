@@ -552,6 +552,12 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
         cmd.args(["--setenv", "XDG_RUNTIME_DIR", &isolated_rt]);
     }
 
+    // Keyboard layout: inject XKB_DEFAULT_LAYOUT so XKB-aware toolkits use the
+    // configured layout instead of inheriting the host compositor's setting.
+    if let Some(ref layout) = config.keyboard_layout {
+        cmd.args(["--setenv", "XKB_DEFAULT_LAYOUT", layout.as_str()]);
+    }
+
     cmd.args(["--", binary]);
     cmd.args(args);
     (cmd, term_spoof_dir)

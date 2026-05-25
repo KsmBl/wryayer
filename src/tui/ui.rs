@@ -32,6 +32,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Tab::Install   => draw_install(f, app, chunks[1]),
         Tab::Import    => draw_import(f, app, chunks[1]),
         Tab::Space     => draw_space(f, app, chunks[1]),
+        Tab::Settings  => draw_settings_tab(f, app, chunks[1]),
     }
 
     draw_statusbar(f, app, chunks[2]);
@@ -92,7 +93,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             let selected = *selected;
             // Draw the underlying Config screen so the picker looks like
             // it expanded from the matching row.
-            draw_config(f, area, &app_name, &config, setting_idx);
+            if app_name.is_empty() {
+                draw_config(f, area, "", &config, setting_idx);
+            } else {
+                draw_config(f, area, &app_name, &config, setting_idx);
+            }
             draw_option_picker(f, area, setting_idx, selected, &config);
         }
         Screen::SettingHelp { app_name, config, back_selected } => {
@@ -161,8 +166,8 @@ fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
         Span::styled(label.to_string(), Style::default().fg(C_ACCENT)),
         Span::raw(" "),
     ]);
-    let titles = vec![mk("Installed"), mk("Install"), mk("Import"), mk("Space")];
-    let sel = match app.tab { Tab::Installed => 0, Tab::Install => 1, Tab::Import => 2, Tab::Space => 3 };
+    let titles = vec![mk("Installed"), mk("Install"), mk("Import"), mk("Space"), mk("Settings")];
+    let sel = match app.tab { Tab::Installed => 0, Tab::Install => 1, Tab::Import => 2, Tab::Space => 3, Tab::Settings => 4 };
     let tabs = Tabs::new(titles)
         .select(sel)
         .block(Block::default().borders(Borders::ALL)
@@ -474,6 +479,7 @@ fn draw_statusbar(f: &mut Frame, app: &App, area: Rect) {
         Tab::Install   => "[Tab] Switch  Type to search  [↓] Select  [Enter] Install/Uninstall  [q] Quit",
         Tab::Import    => "[Tab] Switch  Type zip path  [Enter] Import  [Esc] Clear  [Shift+Q] Quit",
         Tab::Space     => "[Tab] Switch  [r] Run dedup  [q] Quit",
+        Tab::Settings  => "[Tab] Switch  [↑↓] Navigate  [←/→] Cycle  [Enter] Edit  [?] Help  [q] Quit",
     };
     let mut spans: Vec<Span> = vec![];
     if app.konami_mode {
@@ -887,14 +893,27 @@ fn fractional_bar(width: usize, fraction: f64) -> String {
     s
 }
 
+// ── Settings tab (global defaults) ───────────────────────────────────────────
+
+fn draw_settings_tab(f: &mut Frame, app: &mut App, _area: Rect) {
+    let config = app.global_config.clone();
+    let selected = app.global_selected;
+    draw_config(f, f.area(), "", &config, selected);
+}
+
 // ── Config overlay ────────────────────────────────────────────────────────────
 
 fn draw_config(f: &mut Frame, area: Rect, app_name: &str, config: &AppConfig, selected: usize) {
     let popup = centered_rect(54, 92, area);
     f.render_widget(Clear, popup);
 
+    let title = if app_name.is_empty() {
+        " Default Settings ".to_string()
+    } else {
+        format!(" Config — {app_name} ")
+    };
     let block = Block::default().borders(Borders::ALL)
-        .title(format!(" Config — {app_name} "))
+        .title(title)
         .title_style(Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD))
         .border_style(Style::default().fg(C_ACCENT));
     let inner = block.inner(popup);
@@ -953,6 +972,14 @@ fn draw_config(f: &mut Frame, area: Rect, app_name: &str, config: &AppConfig, se
             Some(s)            => { let t: String = s.chars().take(12).collect(); format!(" {t} ") }
         }),
         ("Spoof term.", if config.spoof_terminal { " detect".to_string() } else { "  off  ".to_string() }),
+        ("Keyboard   ", match config.keyboard_layout.as_deref() {
+            None            => " system  ".to_string(),
+            Some("us")      => " qwerty  ".to_string(),
+            Some("de")      => " qwertz  ".to_string(),
+            Some("colemak") => " colemak ".to_string(),
+            Some("dvorak")  => " dvorak  ".to_string(),
+            Some(s)         => { let t: String = s.chars().take(10).collect(); format!(" {t} ") }
+        }),
         ("RAM limit  ", match config.ram_limit {
             None      => " none    ".to_string(),
             Some(mib) if mib % 1024 == 0 => format!(" {} GiB  ", mib / 1024),

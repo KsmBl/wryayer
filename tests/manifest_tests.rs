@@ -23,6 +23,8 @@ fn sample_manifest(name: &str) -> Manifest {
             installed_at: "2026-01-01T00:00:00Z".to_string(),
             launchers:    vec![name.to_string()],
             alias_of:     None,
+            display_name: None,
+            pkg_name:     None,
         },
         packages: vec![PackageEntry {
             name:    name.to_string(),

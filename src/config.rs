@@ -1,4 +1,4 @@
-use crate::manifest::app_dir;
+use crate::manifest::{app_dir, wryayer_root};
 use anyhow::{bail, Context, Result};
 use std::fs;
 use std::path::PathBuf;
@@ -52,6 +52,8 @@ pub struct AppConfig {
     /// Detect the real terminal emulator and pass it into the sandbox via TERM_PROGRAM
     /// so tools like fastfetch report the correct terminal instead of "bwrap".
     pub spoof_terminal: bool,
+    /// XKB keyboard layout to inject via XKB_DEFAULT_LAYOUT (None = inherit from host)
+    pub keyboard_layout: Option<String>,
     /// Maximum RAM the app may use in MiB — enforced via systemd-run (None = no limit)
     pub ram_limit: Option<u64>,
 }
@@ -72,9 +74,41 @@ impl Default for AppConfig {
             spoof_cpuinfo: None,
             spoof_os: None,
             spoof_terminal: false,
+            keyboard_layout: None,
             ram_limit: None,
         }
     }
+}
+
+pub fn global_config_path() -> Result<PathBuf> {
+    Ok(wryayer_root()?.join("defaults.ini"))
+}
+
+/// Read global default settings from ~/.wryayer/defaults.ini.
+/// Falls back to AppConfig::default() if the file is absent or unreadable.
+pub fn read_global_config() -> AppConfig {
+    let path = match global_config_path() {
+        Ok(p) => p,
+        Err(_) => return AppConfig::default(),
+    };
+    if !path.exists() {
+        return AppConfig::default();
+    }
+    let content = match fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return AppConfig::default(),
+    };
+    parse_ini(&content).unwrap_or_default()
+}
+
+pub fn write_global_config(config: &AppConfig) -> Result<()> {
+    let path = global_config_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    fs::write(&path, format_ini(config))
+        .with_context(|| format!("failed to write {}", path.display()))
 }
 
 pub fn config_path(app_name: &str) -> Result<PathBuf> {
@@ -84,7 +118,7 @@ pub fn config_path(app_name: &str) -> Result<PathBuf> {
 pub fn read_config(app_name: &str) -> Result<AppConfig> {
     let path = config_path(app_name)?;
     if !path.exists() {
-        return Ok(AppConfig::default());
+        return Ok(read_global_config());
     }
     let content = fs::read_to_string(&path)
         .with_context(|| format!("failed to read {}", path.display()))?;
@@ -167,6 +201,13 @@ pub fn parse_ini(content: &str) -> Result<AppConfig> {
             }
             ("spoof_terminal", v) => {
                 config.spoof_terminal = matches!(v, "on" | "true" | "1");
+            }
+            ("keyboard_layout", v) => {
+                config.keyboard_layout = if v.is_empty() || v == "off" || v == "system" {
+                    None
+                } else {
+                    Some(v.to_owned())
+                };
             }
             ("ram_limit", v) => {
                 config.ram_limit = if v.is_empty() || v == "0" || v == "off" || v == "none" {
@@ -266,6 +307,12 @@ pub fn format_ini(config: &AppConfig) -> String {
         if config.spoof_terminal {
             s.push_str("spoof_terminal = on\n");
         }
+    }
+    if let Some(ref layout) = config.keyboard_layout {
+        s.push_str("\n[keyboard]\n");
+        s.push_str("; Keyboard layout injected via XKB_DEFAULT_LAYOUT inside the sandbox\n");
+        s.push_str("; valid: us, de, colemak, dvorak (or any XKB layout name)\n");
+        s.push_str(&format!("keyboard_layout = {layout}\n"));
     }
     if let Some(mib) = config.ram_limit {
         s.push_str("\n[resources]\n");
