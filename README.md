@@ -114,9 +114,11 @@ bwrap sandbox at runtime:
 /etc/resolv.conf    ──► /etc/...            (read-only host network/identity files)
 /etc/hosts               ...
 /etc/ssl/certs           ...
+/etc/ca-certificates ──► /etc/ca-certificates  (CA bundle target; symlinks in ssl/certs point here)
 /usr/share/fonts    ──► /usr/share/fonts    (read-only; required by Chromium/Electron/NW.js)
 /etc/fonts          ──► /etc/fonts          (fontconfig configuration)
 /usr/share/fontconfig ──► /usr/share/fontconfig
+/usr/lib/qt6/plugins ──► /usr/lib/qt6/plugins  (Qt platform plugins from host)
 <shared_dirs>       ──► <same>              (user-configured, read-write)
 ```
 
@@ -158,6 +160,7 @@ wryayer auto-detects your distro from `/etc/os-release` and uses the appropriate
 | `vercmp` | Bundled with `pacman` | Version comparison |
 | `ldconfig` | Bundled with `glibc` | Library cache rebuild after install |
 | `glib-compile-schemas` | `sudo pacman -S glib2` | Optional — GLib apps only |
+| `xorg-server-xvfb` | `sudo pacman -S xorg-server-xvfb` | Optional — required for browser screen resolution spoofing |
 
 ### Debian / Ubuntu
 
@@ -169,8 +172,21 @@ wryayer auto-detects your distro from `/etc/os-release` and uses the appropriate
 | **dpkg** | Pre-installed | Package extraction (`dpkg-deb`) |
 | **apt** | Pre-installed | Dep resolution and download |
 | `ldconfig` | `sudo apt install libc-bin` | Library cache rebuild after install |
+| `xvfb` | `sudo apt install xvfb` | Optional — required for browser screen resolution spoofing |
 
 > **AUR packages are Arch-only.** On Debian/Ubuntu, only packages from `apt` repos are available. Attempting to install an AUR-only package will print a warning and skip that dep.
+
+### Fedora / RHEL
+
+| Requirement | How to install | Notes |
+|---|---|---|
+| **bubblewrap** | `sudo dnf install bubblewrap` | Required at runtime |
+| **Rust toolchain** | `curl https://sh.rustup.rs -sSf \| sh` | For building |
+| **binutils** | `sudo dnf install binutils` | Provides `readelf` — used by soname scanner |
+| **dnf** | Pre-installed | Dep resolution and download |
+| **rpm2cpio** | `sudo dnf install rpm` | Package extraction |
+| `ldconfig` | Pre-installed | Library cache rebuild after install |
+| `xorg-x11-server-Xvfb` | `sudo dnf install xorg-x11-server-Xvfb` | Optional — required for browser screen resolution spoofing |
 
 ---
 
@@ -415,6 +431,8 @@ Key bindings:
 
 The **Settings** tab uses a native two-panel layout: the left panel lists all settings with their current values colour-coded (green = on, red = off, yellow = other); the right panel shows a description and the available choices for the selected row. Press `Enter` or `←`/`→` to change a value; press `Enter` on **Save** to persist. Settings are stored in `~/.wryayer/defaults.ini` and apply as defaults to every newly installed app. Per-app overrides always take precedence.
 
+The **Create shortcut** setting in the Settings tab controls whether the shortcut prompt defaults to "Yes" or "No" for every install. Set it to "No" to suppress shortcut creation by default while still being asked each time.
+
 ---
 
 ## Per-app configuration
@@ -486,6 +504,12 @@ wryayer config firefox spoof-os system      # disable
 wryayer config fastfetch spoof-terminal on   # detect kitty/foot/alacritty/… and set TERM_PROGRAM
 wryayer config fastfetch spoof-terminal off  # disable (default)
 
+# Spoof screen resolution — makes window.screen.width/height in browsers report the target size
+# Requires xorg-server-xvfb; without it only xrandr and env vars are spoofed (not browsers)
+wryayer config vivaldi spoof-resolution 1920x1080
+wryayer config vivaldi spoof-resolution 2560x1440
+wryayer config vivaldi spoof-resolution system   # disable
+
 # Disable any spoofing
 wryayer config firefox spoof-hostname system
 ```
@@ -502,6 +526,7 @@ Press `?` on the **installed** tab for a full key-bindings reference.
 | `spoof-cpuinfo <sample\|path\|system\|off>` | Path or `sample` | Binds the file over `/proc/cpuinfo` |
 | `spoof-os <ubuntu\|arch\|windows\|arduinoide\|name\|system\|off>` | Preset or any OS name | Writes `/etc/os-release` and `/usr/lib/os-release` |
 | `spoof-terminal <on\|off>` | `on` or `off` | Detects real terminal via process tree and sets `TERM_PROGRAM` inside sandbox |
+| `spoof-resolution <WxH\|system\|off>` | Resolution string or `system` | Runs app inside Xvfb virtual display at target resolution; also spoofs xrandr and `RESOLUTION`/`SCREEN_RESOLUTION` env vars. Requires `xorg-server-xvfb` for full browser support. |
 
 **Sample values:**
 
@@ -528,7 +553,7 @@ The config is stored as a human-readable INI file at `~/.wryayer/<app>/config.in
 
 ## Caveats
 
-**AUR is Arch-only.** On Debian/Ubuntu the AUR code path is never reached; deps are resolved via `apt-cache` only. Fedora and other distros are not currently supported.
+**AUR is Arch-only.** On Debian/Ubuntu and Fedora/RHEL the AUR code path is never reached; deps are resolved via the native package manager only. Attempting to install an AUR-only package on a non-Arch distro will print a warning and skip that dep.
 
 **glibc version pinning.** glibc is resolved and extracted as a normal dependency. The `ld-linux-x86-64.so.2` loader that executes inside the sandbox is therefore the one from the app's own extracted glibc, not the host's. If the app's packages were built against a glibc version that differs significantly from the host kernel's syscall ABI, it may crash with `version GLIBC_X.XX not found` or `Illegal instruction`.
 
@@ -571,6 +596,7 @@ The config is stored as a human-readable INI file at `~/.wryayer/<app>/config.in
 - [x] **Identity spoofing** — spoof hostname, username, machine-id, and cpuinfo per app
 - [x] **Global default settings** — Settings tab in TUI and `~/.wryayer/defaults.ini` set defaults inherited by all new apps
 - [x] **Multi-select install** — mark multiple search results with `Space`, install them all sequentially with `Enter`; marks persist across searches
+- [x] **Screen resolution spoofing** — run the app inside an Xvfb virtual display at the target resolution so `window.screen.width/height` reports the spoofed value in browsers
 - [ ] **Per-app env var overrides** — let users set `LANG`, `QT_SCALE_FACTOR`, etc. in `config.ini`
 - [ ] **Dependency graph viewer** — TUI screen showing the full package tree for an installed app
 - [ ] **Auto-snapshot on update** — capture a snapshot automatically before each update so failures can be undone with one keystroke
