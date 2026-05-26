@@ -224,7 +224,7 @@ pub fn run(
             // (e.g. visual-studio-code-bin → code, google-chrome-stable → google-chrome)
             // install under a name that differs from the AUR package name.
             if !bin_names_explicit_for_closure {
-                if let Some(detected) = auto_detect_binary(&target_dir) {
+                if let Some(detected) = auto_detect_binary(&target_dir, pkg_name) {
                     eprintln!(
                         "  auto-detected binary '{detected}' \
                          (package does not install a binary named '{bin}')"
@@ -537,7 +537,11 @@ fn prompt_keep_without_launcher(pkg_name: &str, available: &[String]) -> bool {
 /// Scan the app's .desktop files for an Exec= entry whose basename exists in
 /// the binary dirs. Used when the package name doesn't match the installed
 /// binary name (e.g. visual-studio-code-bin installs as `code`).
-fn auto_detect_binary(target_dir: &Path) -> Option<String> {
+///
+/// `pkg_name` is used to sort matching desktop files first, so that in a
+/// merged app dir (which may contain many desktop files from other packages)
+/// we prefer the one that belongs to the package being installed.
+fn auto_detect_binary(target_dir: &Path, pkg_name: &str) -> Option<String> {
     let bin_dirs = ["usr/bin", "usr/sbin", "bin", "sbin"];
     let exists_in_bins = |name: &str| {
         bin_dirs.iter().any(|sub| target_dir.join(sub).join(name).symlink_metadata().is_ok())
@@ -546,12 +550,42 @@ fn auto_detect_binary(target_dir: &Path) -> Option<String> {
     let apps_dir = target_dir.join("usr/share/applications");
     let Ok(entries) = std::fs::read_dir(&apps_dir) else { return None };
 
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("desktop") {
+    // Collect all desktop files so we can sort them before scanning.
+    let mut desktop_files: Vec<(std::path::PathBuf, String)> = entries
+        .flatten()
+        .filter_map(|e| {
+            let path = e.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("desktop") {
+                return None;
+            }
+            let content = std::fs::read_to_string(&path).ok()?;
+            Some((path, content))
+        })
+        .collect();
+
+    // Sort: desktop files whose stem matches the package name come first.
+    // Everything else is a fallback — important in merged dirs where many
+    // packages share the same usr/share/applications.
+    let norm = |s: &str| s.to_lowercase().replace(['-', '_', '.'], "");
+    let norm_pkg = norm(pkg_name);
+    desktop_files.sort_by_key(|(path, _)| {
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        let stem_norm = norm(stem);
+        if stem_norm.contains(&norm_pkg) || norm_pkg.contains(&stem_norm) { 0usize } else { 1usize }
+    });
+
+    for (_, content) in &desktop_files {
+        // Skip entries hidden from app menus — they are background utilities
+        // (zenity, avahi helpers, D-Bus activatable services, etc.) that should
+        // never become the primary launcher for a different package.
+        let hidden = content.lines().any(|l| {
+            let l = l.trim();
+            l == "NoDisplay=true" || l == "Hidden=true"
+        });
+        if hidden {
             continue;
         }
-        let Ok(content) = std::fs::read_to_string(&path) else { continue };
+
         for line in content.lines() {
             let line = line.trim();
             if !line.starts_with("Exec=") {
