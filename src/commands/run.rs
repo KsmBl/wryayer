@@ -109,7 +109,9 @@ pub fn run(app_name: &str, bin: Option<&str>, args: &[String]) -> Result<()> {
         // Replace this process with a fresh bwrap so the retry gets a clean
         // exec() hand-off (correct signal disposition, no extra wryayer in the
         // process tree).
-        let (mut cmd, _) = bwrap_cmd(&app_root_str, &binary, args, &temp, &config);
+        // xvfb dropped here; Xvfb launched with -terminate exits automatically
+        // when the sandboxed app (its last client) exits after exec().
+        let (mut cmd, _, _xvfb) = bwrap_cmd(&app_root_str, &binary, args, &temp, &config);
         set_bwrap_env(&mut cmd);
         if let Some(mib) = config.ram_limit {
             if has_systemd_run() {
@@ -130,7 +132,7 @@ fn launch_bwrap(
     temp: &TempBind,
     config: &AppConfig,
 ) -> Result<ExitStatus> {
-    let (mut cmd, spoof_dir) = bwrap_cmd(app_root_str, binary, args, temp, config);
+    let (mut cmd, spoof_dir, mut xvfb) = bwrap_cmd(app_root_str, binary, args, temp, config);
     set_bwrap_env(&mut cmd);
     if let Some(mib) = config.ram_limit {
         if has_systemd_run() {
@@ -140,6 +142,13 @@ fn launch_bwrap(
         }
     }
     let status = cmd.status().context("failed to run bwrap")?;
+    // Xvfb was launched with -terminate so it exits when its last client
+    // (the sandboxed app) disconnects.  Kill it explicitly as a safety net
+    // in case the app crashed without cleanly closing its X connection.
+    if let Some(ref mut child) = xvfb {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
     if let Some(dir) = spoof_dir {
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -270,7 +279,18 @@ pub fn wrap_with_ram_limit(inner: Command, mib: u64) -> Command {
 
 // ── bwrap command builder ─────────────────────────────────────────────────────
 
-fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, config: &AppConfig) -> (Command, Option<PathBuf>) {
+fn find_free_xdisplay() -> Option<u32> {
+    for n in 20..100u32 {
+        if !std::path::Path::new(&format!("/tmp/.X{n}-lock")).exists()
+            && !std::path::Path::new(&format!("/tmp/.X11-unix/X{n}")).exists()
+        {
+            return Some(n);
+        }
+    }
+    None
+}
+
+fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, config: &AppConfig) -> (Command, Option<PathBuf>, Option<std::process::Child>) {
     // Terminal spoofing: exec bwrap through a symlink named after the detected
     // terminal. Linux sets task->comm from the exec basename, so fastfetch's
     // process-tree walk sees the terminal name instead of "bwrap".
@@ -311,9 +331,23 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
         "/etc/resolv.conf", "/etc/hosts",      "/etc/localtime",
         "/etc/locale.conf", "/etc/machine-id", "/etc/nsswitch.conf",
         "/etc/passwd",      "/etc/group",       "/etc/ssl/certs",
+        // On Arch Linux every file in /etc/ssl/certs/ is a symlink into
+        // /etc/ca-certificates/extracted/ — bind the real tree so they resolve.
+        "/etc/ca-certificates",
     ] {
         cmd.args(["--ro-bind-try", p, p]);
     }
+
+    // Python's requests/certifi resolves its CA bundle through a symlink chain
+    // that may escape the sandbox root.  Point all SSL env vars at the system
+    // bundle; with /etc/ca-certificates bound above, the symlink resolves correctly.
+    cmd.args(["--setenv", "SSL_CERT_FILE",      "/etc/ssl/certs/ca-certificates.crt"]);
+    cmd.args(["--setenv", "REQUESTS_CA_BUNDLE", "/etc/ssl/certs/ca-certificates.crt"]);
+    cmd.args(["--setenv", "CURL_CA_BUNDLE",     "/etc/ssl/certs/ca-certificates.crt"]);
+
+    // Help Qt find its platform plugins when the sandbox root lacks the
+    // compiled-in prefix; the host's plugin tree is already bound above.
+    cmd.args(["--setenv", "QT_QPA_PLATFORM_PLUGIN_PATH", "/usr/lib/qt6/plugins/platforms"]);
 
     // Font directories — required by Chromium/NW.js/Electron/Qt renderers.
     // Without these, fontconfig finds no fonts and the renderer crashes with
@@ -329,6 +363,11 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
     for p in &["/usr/lib/locale", "/usr/share/locale"] {
         cmd.args(["--ro-bind-try", p, p]);
     }
+
+    // Qt platform plugins — the sandbox root may not contain qt6-wayland even
+    // when the host has it installed.  Bind the host plugin tree so Qt can find
+    // whichever platform backend QT_QPA_PLATFORM requests.
+    cmd.args(["--ro-bind-try", "/usr/lib/qt6/plugins", "/usr/lib/qt6/plugins"]);
 
     if !config.network {
         cmd.arg("--unshare-net");
@@ -496,11 +535,51 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
     }
 
     // ── Resolution spoofing ───────────────────────────────────────────────────
+    let mut xvfb_child: Option<std::process::Child> = None;
     if let Some(ref res) = config.spoof_resolution {
         if let Some((w, h)) = parse_resolution(res) {
-            // Bind a fake xrandr script so apps that shell out to xrandr see
-            // the target resolution. (Chromium/Electron query X11/Wayland
-            // directly via libxrandr and are not affected by this path.)
+            // Browsers query screen dimensions via the X server directly (libxrandr
+            // syscall), not by running /usr/bin/xrandr.  The only reliable way to
+            // make window.screen.width/height report a spoofed value is to run the
+            // app on a virtual X display (Xvfb) whose screen is sized accordingly.
+            if let Some(display_num) = find_free_xdisplay() {
+                let display_str = format!(":{display_num}");
+                if let Ok(child) = std::process::Command::new("Xvfb")
+                    .args([
+                        &display_str,
+                        "-screen", "0",
+                        &format!("{w}x{h}x24"),
+                        "-terminate",       // auto-exit when last client disconnects
+                        "-nolisten", "tcp", // no TCP listener needed
+                    ])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                {
+                    // Poll for the socket (up to 1 s) before bwrap binds it.
+                    let sock = format!("/tmp/.X11-unix/X{display_num}");
+                    for _ in 0..20 {
+                        if std::path::Path::new(&sock).exists() { break; }
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                    cmd.args(["--bind-try", &sock, &sock]);
+                    cmd.args(["--setenv", "DISPLAY", &display_str]);
+                    // Unset WAYLAND_DISPLAY so the app routes through Xvfb, not
+                    // the compositor; --setenv overrides any cmd.env() set later.
+                    cmd.args(["--unsetenv", "WAYLAND_DISPLAY"]);
+                    xvfb_child = Some(child);
+                }
+            }
+
+            if xvfb_child.is_none() {
+                eprintln!(
+                    "warning: Xvfb not found — resolution spoofing will not affect browsers.\n\
+                     Install xorg-server-xvfb for full browser resolution spoofing."
+                );
+            }
+
+            // Fake xrandr binary covers apps that exec xrandr as a subprocess.
             let xrandr_script = format!(
                 "#!/bin/sh\n\
                  echo 'Screen 0: minimum 320 x 200, current {w} x {h}, maximum 16384 x 16384'\n\
@@ -515,7 +594,6 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
                     cmd.args(["--ro-bind", s, "/usr/bin/xrandr"]);
                 }
             }
-            // Env vars used by some native apps and toolkits to detect resolution
             let res_str = format!("{w}x{h}");
             cmd.args(["--setenv", "RESOLUTION", &res_str]);
             cmd.args(["--setenv", "SCREEN_RESOLUTION", &res_str]);
@@ -581,7 +659,7 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
 
     cmd.args(["--", binary]);
     cmd.args(args);
-    (cmd, term_spoof_dir)
+    (cmd, term_spoof_dir, xvfb_child)
 }
 
 /// Scan the sandbox's `home/` subtree for ELF files with missing soname
