@@ -38,9 +38,9 @@ wryayer solves all three by extracting packages into self-contained directory tr
               │  ┌───────────────────────┐   install   remove  list  │
               │  │ Installed │ Install   │   run       update  repair │
               │  │ Import    │ Space     │   config    export  import │
-              │  │ Settings (global cfg) │   snapshot  rollback       │
-              │  └───────────────────────┘   snapshots dedup          │
-              │                            snapshots dedup completions│
+              │  │ Settings (global cfg) │   snapshot  rollback  tui  │
+              │  └───────────────────────┘   snapshots  snapshot-prune│
+              │                              dedup      completions   │
               └────────────────────────┬─────────────────────────────┘
                                        │
           ┌────────────────────────────┼──────────────────────────────┐
@@ -68,11 +68,13 @@ wryayer solves all three by extracting packages into self-contained directory tr
           │                                                           │
           │  distro.rs  (auto-detected from /etc/os-release)          │
           │  ┌──────────────────────────────────────────────────┐     │
-          │  │  Arch: pacman -Si, pacman -Sp, tar --zstd, vercmp│     │
-          │  │         AUR RPC + git clone + makepkg            │     │
-          │  │  Debian: apt-cache show, apt-get download,        │     │
-          │  │          dpkg-deb -x, dpkg -S, dpkg --compare-   │     │
-          │  │          versions                                 │     │
+          │  │  Arch:   pacman -Si, pacman -Sp, tar --zstd,     │     │
+          │  │          vercmp, AUR RPC + git clone + makepkg   │     │
+          │  │  Debian: apt-cache show, apt-get download,       │     │
+          │  │          dpkg-deb -x, dpkg -S,                   │     │
+          │  │          dpkg --compare-versions                 │     │
+          │  │  Fedora: dnf repoquery, dnf download,            │     │
+          │  │          rpm2cpio | cpio, rpm -qf, rpm --eval    │     │
           │  └──────────────────────────────────────────────────┘     │
           └───────────────────────────────────────────────────────────┘
 
@@ -140,7 +142,7 @@ bwrap sandbox at runtime:
 | **Void Linux** | ❌ Not supported | Uses xbps — no supported backend |
 | **openSUSE** | ❌ Not supported | Uses zypper — no supported backend |
 
-Distro detection reads `/etc/os-release`. Distributions not listed above may work if they are closely derived from Arch or Debian and carry a matching `ID_LIKE` value, but are untested.
+Distro detection reads `/etc/os-release`. Distributions not listed above may work if they are closely derived from Arch, Debian, or Fedora and carry a matching `ID_LIKE` value, but are untested.
 
 ---
 
@@ -376,6 +378,10 @@ wryayer rollback firefox
 
 # Roll back to a specific labelled snapshot
 wryayer rollback firefox 20260516-141022
+
+# Prune old snapshots, keeping the N most recent (default: 3)
+wryayer snapshot-prune firefox
+wryayer snapshot-prune firefox --keep 5
 ```
 
 Snapshots survive updates because wryayer unlinks any existing file before overwriting it during extraction — a re-extracted file always gets a fresh inode, while the snapshot's hard link continues pointing at the old content. The cross-app dedup pass at the end of every install re-establishes shared-library hard links.
@@ -504,12 +510,6 @@ wryayer config firefox spoof-os system      # disable
 wryayer config fastfetch spoof-terminal on   # detect kitty/foot/alacritty/… and set TERM_PROGRAM
 wryayer config fastfetch spoof-terminal off  # disable (default)
 
-# Spoof screen resolution — makes window.screen.width/height in browsers report the target size
-# Requires xorg-server-xvfb; without it only xrandr and env vars are spoofed (not browsers)
-wryayer config vivaldi spoof-resolution 1920x1080
-wryayer config vivaldi spoof-resolution 2560x1440
-wryayer config vivaldi spoof-resolution system   # disable
-
 # Disable any spoofing
 wryayer config firefox spoof-hostname system
 ```
@@ -526,7 +526,15 @@ Press `?` on the **installed** tab for a full key-bindings reference.
 | `spoof-cpuinfo <sample\|path\|system\|off>` | Path or `sample` | Binds the file over `/proc/cpuinfo` |
 | `spoof-os <ubuntu\|arch\|windows\|arduinoide\|name\|system\|off>` | Preset or any OS name | Writes `/etc/os-release` and `/usr/lib/os-release` |
 | `spoof-terminal <on\|off>` | `on` or `off` | Detects real terminal via process tree and sets `TERM_PROGRAM` inside sandbox |
-| `spoof-resolution <WxH\|system\|off>` | Resolution string or `system` | Runs app inside Xvfb virtual display at target resolution; also spoofs xrandr and `RESOLUTION`/`SCREEN_RESOLUTION` env vars. Requires `xorg-server-xvfb` for full browser support. |
+
+**Screen resolution spoofing** (`spoof_resolution`) has no CLI subcommand yet — set it from the TUI Settings tab / per-app config screen (`s`), or by editing `~/.wryayer/<app>/config.ini` directly:
+
+```ini
+[spoof]
+spoof_resolution = 1920x1080   ; or 1280x720, 2560x1440, 3840x2160, off
+```
+
+It runs the app inside an Xvfb virtual display at the target resolution and spoofs `xrandr` plus the `RESOLUTION` / `SCREEN_RESOLUTION` env vars. `xorg-server-xvfb` is required for the Xvfb-backed browser path; without it only the xrandr/env-var spoofing applies.
 
 **Sample values:**
 
@@ -641,7 +649,7 @@ The test suite targets **≥ 90 % branch coverage** on all pure and filesystem-d
 | `commands/install.rs` | `ensure_base_layout` (creates all symlinks, idempotent, preserves real dirs) |
 | `commands/snapshot.rs` | `create` / `labels` / `latest` round-trip, inode sharing, `.snapshots` recursion guard, `rollback` (restores modifications, errors on missing label, preserves snapshots dir) |
 | `commands/remove.rs` + alias model | `alias_of` serde round-trip, `skip_serializing_if` for `None`, legacy manifests without the field still parse, `list_all_apps` surfaces aliases as own entries, removing an alias leaves the target tree + manifest untouched, removing a target with dependent aliases is blocked with all blockers named, standalone removal unaffected |
-| `tui/mod.rs` (`option_picker_tests.rs`) | `setting_options` (shape per row incl. RAM limit row 13), `setting_title`, `setting_description`, `option_description`, `setting_current`, `apply_setting`, `cycle_setting` — full forward/backward/wrap cycles for all non-empty rows |
+| `tui/mod.rs` (`option_picker_tests.rs`) | `setting_options` (shape per row incl. RAM limit row 13, spoof_resolution row 14, create_shortcut row 15), `setting_title`, `setting_description`, `option_description`, `setting_current`, `apply_setting`, `cycle_setting` — full forward/backward/wrap cycles for all non-empty rows |
 | `tui/mod.rs` | `parse_progress` (`PROGRESS n/total` parsing + garbage rejection), konami FSM (full sequence, wrong-key reset, case-insensitive BA) |
 
 External-tool-dependent code (`bwrap_cmd`, `reinstall`, distro backends) is covered by integration tests that require a live environment with `bwrap` and either `pacman` (Arch) or `apt` / `dpkg` (Debian/Ubuntu) present.
