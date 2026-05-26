@@ -139,6 +139,8 @@ pub enum Screen {
     DuplicateInstall {
         pkg: String,
         value: String,
+        /// None = fresh container; Some(target) = merge into target app.
+        into: Option<String>,
     },
     /// Choice between uninstalling an existing app or installing a second copy.
     AlreadyInstalled {
@@ -943,7 +945,7 @@ fn on_rename_app(app: &mut App, code: KeyCode) {
 // ── Duplicate install overlay ─────────────────────────────────────────────────
 
 fn on_duplicate_install(app: &mut App, code: KeyCode) {
-    let Screen::DuplicateInstall { pkg, value } = &mut app.screen else { return };
+    let Screen::DuplicateInstall { pkg, value, into } = &mut app.screen else { return };
     match code {
         KeyCode::Esc | KeyCode::Char('q') => {
             app.screen = Screen::Main;
@@ -959,14 +961,23 @@ fn on_duplicate_install(app: &mut App, code: KeyCode) {
                 return;
             }
             let pkg = pkg.clone();
-            app.screen = Screen::Confirm {
-                title: format!("Install '{pkg}' as '{new_name}'?"),
-                body: vec![
+            let into = into.clone();
+            let body = match &into {
+                None => vec![
                     format!("Creates ~/.wryayer/{new_name}/ alongside the existing '{pkg}'."),
                     String::new(),
                     "Press y to confirm, n or Esc to cancel.".into(),
                 ],
-                action: PendingAction::Install { pkg, app_name: Some(new_name), into: None },
+                Some(target) => vec![
+                    format!("Merges '{pkg}' into ~/.wryayer/{target}/ as alias '{new_name}'."),
+                    String::new(),
+                    "Press y to confirm, n or Esc to cancel.".into(),
+                ],
+            };
+            app.screen = Screen::Confirm {
+                title: format!("Install '{pkg}' as '{new_name}'?"),
+                body,
+                action: PendingAction::Install { pkg, app_name: Some(new_name), into },
                 danger: false,
             };
         }
@@ -995,8 +1006,14 @@ fn on_already_installed(app: &mut App, code: KeyCode) {
             let pkg = pkg.clone();
             match *selected {
                 0 => {
-                    // Install a second copy — ask for a new app name.
-                    app.screen = Screen::DuplicateInstall { pkg, value: String::new() };
+                    // Install a second copy — show the same target picker as a
+                    // first-time install so the user can choose fresh vs merge.
+                    let targets: Vec<String> = app.installed
+                        .iter()
+                        .filter(|m| m.app.alias_of.is_none())
+                        .map(|m| m.app.name.clone())
+                        .collect();
+                    app.screen = Screen::InstallTarget { pkg, targets, selected: 0 };
                     app.needs_clear = true;
                 }
                 _ => {
@@ -1258,6 +1275,18 @@ fn on_install_target(app: &mut App, code: KeyCode) {
             } else {
                 Some(targets[*selected - 1].clone())
             };
+            // If the default name (pkg) is already taken as an installed app,
+            // the user must pick a unique alias name before we can confirm.
+            let name_taken = app.installed.iter().any(|m| m.app.name == pkg);
+            if name_taken {
+                app.screen = Screen::DuplicateInstall {
+                    pkg,
+                    value: String::new(),
+                    into,
+                };
+                app.needs_clear = true;
+                return;
+            }
             let (title, body) = match &into {
                 None => (
                     format!("Install '{pkg}'?"),

@@ -143,10 +143,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             let value = value.clone();
             draw_rename_app(f, area, &app_name, &value);
         }
-        Screen::DuplicateInstall { pkg, value } => {
+        Screen::DuplicateInstall { pkg, value, into } => {
             let pkg = pkg.clone();
             let value = value.clone();
-            draw_duplicate_install(f, area, &pkg, &value);
+            let into = into.clone();
+            draw_duplicate_install(f, area, &pkg, &value, into.as_deref());
         }
         Screen::AlreadyInstalled { pkg, selected } => {
             let pkg = pkg.clone();
@@ -1914,7 +1915,7 @@ fn draw_already_installed(f: &mut Frame, area: Rect, pkg: &str, selected: usize)
     );
 
     let choices: &[(&str, &str, Color)] = &[
-        ("✚", "Install a second copy   →  give it a unique name", C_GREEN),
+        ("✚", "Install a second copy   →  pick container, then name", C_GREEN),
         ("✕", "Uninstall               →  delete the existing install", C_RED),
     ];
 
@@ -2142,7 +2143,7 @@ fn draw_no_launcher_choice(f: &mut Frame, area: Rect, pkg: &str, available_bins:
 
 // ── Duplicate install overlay ─────────────────────────────────────────────────
 
-fn draw_duplicate_install(f: &mut Frame, area: Rect, pkg: &str, value: &str) {
+fn draw_duplicate_install(f: &mut Frame, area: Rect, pkg: &str, value: &str, into: Option<&str>) {
     let popup = centered_rect(54, 30, area);
     f.render_widget(Clear, popup);
 
@@ -2158,8 +2159,12 @@ fn draw_duplicate_install(f: &mut Frame, area: Rect, pkg: &str, value: &str) {
         .constraints([Constraint::Length(2), Constraint::Length(3), Constraint::Length(1)])
         .split(inner);
 
+    let desc = match into {
+        None => format!("  '{pkg}' already exists. Choose a name for the new container:"),
+        Some(target) => format!("  '{pkg}' already exists. Choose an alias name for the merge into '{target}':"),
+    };
     f.render_widget(
-        Paragraph::new(format!("  '{pkg}' is already installed. Give this copy a unique name:"))
+        Paragraph::new(desc)
             .style(Style::default().fg(C_DIM))
             .wrap(ratatui::widgets::Wrap { trim: false }),
         chunks[0],
