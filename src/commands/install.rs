@@ -586,6 +586,21 @@ fn auto_detect_binary(target_dir: &Path, pkg_name: &str) -> Option<String> {
             continue;
         }
 
+        // TryExec is the desktop-spec canonical hint for the real binary.
+        // Prefer it over Exec when present and resolvable, because Exec often
+        // wraps the real program in `env`, `sh -c`, etc.
+        for line in content.lines() {
+            let line = line.trim();
+            let Some(val) = line.strip_prefix("TryExec=") else { continue };
+            let bin_name = std::path::Path::new(val.trim())
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
+            if !bin_name.is_empty() && exists_in_bins(bin_name) {
+                return Some(bin_name.to_string());
+            }
+        }
+
         for line in content.lines() {
             let line = line.trim();
             if !line.starts_with("Exec=") {
@@ -593,18 +608,51 @@ fn auto_detect_binary(target_dir: &Path, pkg_name: &str) -> Option<String> {
             }
             // Exec=/usr/share/code/code --unity-launch %F  →  basename = "code"
             let exec_val = line.trim_start_matches("Exec=");
-            let cmd = exec_val.split_whitespace().next().unwrap_or("");
-            let bin_name = std::path::Path::new(cmd)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("");
-            if bin_name.is_empty() || bin_name.starts_with('%') {
-                continue;
-            }
-            if exists_in_bins(bin_name) {
-                return Some(bin_name.to_string());
+            if let Some(bin_name) = parse_exec_binary(exec_val, &exists_in_bins) {
+                return Some(bin_name);
             }
         }
     }
     None
+}
+
+/// Pull the real program name out of an `Exec=` value, skipping any
+/// `env [VAR=value]*` prefix that wraps the actual binary.
+/// Returns None when the line has no resolvable program.
+fn parse_exec_binary<F: Fn(&str) -> bool>(exec_val: &str, exists_in_bins: &F) -> Option<String> {
+    let mut tokens = exec_val.split_whitespace().peekable();
+
+    // Unwrap `env` and any leading VAR=value assignments.
+    if let Some(&first) = tokens.peek() {
+        let first_base = std::path::Path::new(first)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(first);
+        if first_base == "env" {
+            tokens.next();
+            while let Some(&tok) = tokens.peek() {
+                // VAR=value assignments come before the program. Stop at the
+                // first non-assignment token.
+                if tok.contains('=') && !tok.starts_with('=') {
+                    tokens.next();
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+
+    let cmd = tokens.next().unwrap_or("");
+    let bin_name = std::path::Path::new(cmd)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
+    if bin_name.is_empty() || bin_name.starts_with('%') {
+        return None;
+    }
+    if exists_in_bins(bin_name) {
+        Some(bin_name.to_string())
+    } else {
+        None
+    }
 }
