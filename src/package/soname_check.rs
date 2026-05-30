@@ -10,16 +10,54 @@ use std::process::Command;
 /// transitive deps of newly added packages are also satisfied.
 /// Returns the list of package names that were installed.
 pub fn satisfy_missing_sonames(app_dir: &Path, cache_dir: &Path) -> Result<Vec<String>> {
+    satisfy_missing_sonames_impl(app_dir, cache_dir, None)
+}
+
+/// Like `satisfy_missing_sonames` but on the first iteration only scans the
+/// given `seed_paths` (e.g. files just extracted by this install) instead of
+/// the whole tree. Subsequent iterations widen to the full tree so transitive
+/// deps of any auto-installed packages still get resolved.
+///
+/// Used after a merge install: only newly-extracted files can introduce
+/// new soname requirements, so re-scanning a 400-package container tree is
+/// wasted work for every install.
+pub fn satisfy_missing_sonames_for(
+    app_dir: &Path,
+    cache_dir: &Path,
+    seed_paths: &[PathBuf],
+) -> Result<Vec<String>> {
+    satisfy_missing_sonames_impl(app_dir, cache_dir, Some(seed_paths))
+}
+
+fn satisfy_missing_sonames_impl(
+    app_dir: &Path,
+    cache_dir: &Path,
+    seed_paths: Option<&[PathBuf]>,
+) -> Result<Vec<String>> {
     let mut installed: Vec<String> = Vec::new();
     let mut visited: HashSet<String> = HashSet::new();
+    let mut already_missing: HashSet<String> = HashSet::new();
+    // Files to scan on the next iteration. Starts as the caller-supplied seed
+    // (when None, the full tree is scanned), then narrows to only files added
+    // by satisfy-loop installs so we never re-walk the full container.
+    let mut next_scan: Option<Vec<PathBuf>> = seed_paths.map(|s| s.to_vec());
 
     loop {
-        let missing = find_missing_sonames(app_dir)?;
+        let missing = match &next_scan {
+            Some(paths) => find_missing_sonames_in_paths(paths, app_dir)?,
+            None => find_missing_sonames(app_dir)?,
+        };
+        // Drop sonames we already reported as unresolved last iteration — they
+        // are still unresolvable and re-querying costs 8 pacman/apt forks each.
+        let missing: Vec<String> = missing.into_iter()
+            .filter(|s| !already_missing.contains(s))
+            .collect();
         if missing.is_empty() {
             break;
         }
 
         let mut progress = false;
+        let mut iter_new_paths: Vec<PathBuf> = Vec::new();
         for soname in &missing {
             match crate::distro::soname_owner(soname) {
                 Ok(Some(pkg)) if !visited.contains(&pkg) => {
@@ -28,9 +66,15 @@ pub fn satisfy_missing_sonames(app_dir: &Path, cache_dir: &Path) -> Result<Vec<S
                         .with_context(|| format!("failed to download {pkg}"))?;
                     extract_package(&path, app_dir)
                         .with_context(|| format!("failed to extract {pkg}"))?;
+                    for rel in crate::distro::list_pkg_files(&path) {
+                        iter_new_paths.push(app_dir.join(rel));
+                    }
                     visited.insert(pkg.clone());
                     installed.push(pkg);
                     progress = true;
+                }
+                Ok(None) => {
+                    already_missing.insert(soname.clone());
                 }
                 Ok(_) => {}
                 Err(e) => eprintln!("  warning: soname lookup for {soname}: {e:#}"),
@@ -43,6 +87,7 @@ pub fn satisfy_missing_sonames(app_dir: &Path, cache_dir: &Path) -> Result<Vec<S
             }
             break;
         }
+        next_scan = Some(iter_new_paths);
     }
 
     Ok(installed)
@@ -50,6 +95,31 @@ pub fn satisfy_missing_sonames(app_dir: &Path, cache_dir: &Path) -> Result<Vec<S
 
 pub fn find_missing_sonames(app_dir: &Path) -> Result<Vec<String>> {
     let needed = collect_needed(app_dir)?;
+    Ok(needed
+        .into_iter()
+        .filter(|s| !soname_in_app(app_dir, s))
+        .collect())
+}
+
+/// Like `find_missing_sonames` but only scans the given file paths instead
+/// of walking the full `app_dir`. Useful right after a merge install when we
+/// have the exact list of files written by the new packages. Soname presence
+/// is still checked against the full `app_dir` lib tree — a NEEDED soname is
+/// satisfied as long as it exists anywhere under usr/lib, even if it came
+/// from an earlier install.
+pub fn find_missing_sonames_in_paths(paths: &[PathBuf], app_dir: &Path) -> Result<Vec<String>> {
+    let mut needed: HashSet<String> = HashSet::new();
+    for path in paths {
+        if !path.is_file() {
+            continue;
+        }
+        if let Ok(libs) = elf_needed(path) {
+            needed.extend(libs);
+        }
+        if is_plugin_host(path) {
+            needed.extend(collect_dlopen_sonames(path));
+        }
+    }
     Ok(needed
         .into_iter()
         .filter(|s| !soname_in_app(app_dir, s))
@@ -110,6 +180,7 @@ fn collect_needed_impl(start_dir: &Path, skip_hidden: bool) -> Result<HashSet<St
 
     Ok(needed)
 }
+
 
 fn elf_needed(path: &Path) -> Result<Vec<String>> {
     let mut f = std::fs::File::open(path)?;

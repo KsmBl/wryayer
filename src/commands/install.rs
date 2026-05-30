@@ -5,7 +5,7 @@ use crate::manifest::{
 };
 use crate::package::{
     build_aur, download_official, extract_package, resolve_full_dep_tree,
-    satisfy_missing_sonames,
+    satisfy_missing_sonames_for,
 };
 use anyhow::{bail, Context, Result};
 use std::fs;
@@ -164,39 +164,58 @@ pub fn run(
     let target_manifest_for_closure = target_manifest.clone();
 
     let result: Result<()> = (|| {
+        // Collect the set of files written by this install so the post-extract
+        // scans can be scoped to just the new files. Walking a 400-package
+        // container tree for every install is wasted work when most of the
+        // tree is unchanged.
+        let mut new_paths: Vec<PathBuf> = Vec::new();
         for pkg in &resolved {
             let pkg_path = pkg.pkg_path.as_ref().unwrap();
             eprintln!("Extracting {}...", pkg.name);
             extract_package(pkg_path, &target_dir)
                 .with_context(|| format!("failed to extract {}", pkg.name))?;
+            for rel in crate::distro::list_pkg_files(pkg_path) {
+                new_paths.push(target_dir.join(rel));
+            }
         }
 
-        let schemas_dir = target_dir.join("usr/share/glib-2.0/schemas");
-        if schemas_dir.exists() {
-            let _ = std::process::Command::new("glib-compile-schemas")
-                .arg(&schemas_dir)
-                .status();
+        // Nothing was extracted (e.g. merging an already-present package into
+        // a container just to add an alias): the full-tree cleanups below are
+        // pure waste — no files changed, so no new sonames could be missing,
+        // no caches need rebuilding, no permissions could have regressed.
+        if !resolved.is_empty() {
+            let schemas_dir = target_dir.join("usr/share/glib-2.0/schemas");
+            if schemas_dir.exists() {
+                let _ = std::process::Command::new("glib-compile-schemas")
+                    .arg(&schemas_dir)
+                    .status();
+            }
+            regenerate_runtime_caches(&target_dir);
+
+            eprintln!("Checking for missing shared library dependencies...");
+            let scan = satisfy_missing_sonames_for(&target_dir, &cache_dir, &new_paths);
+            match scan {
+                Ok(extra) if !extra.is_empty() => eprintln!("  Added: {}", extra.join(", ")),
+                Ok(_) => {}
+                Err(e) => eprintln!("  Warning: soname check failed: {e:#}"),
+            }
+
+            ensure_base_layout(&target_dir)
+                .with_context(|| "failed to create base filesystem symlinks")?;
+
+            // Scope the permission-fix to files this install actually wrote.
+            // The full-tree walk is harmless but slow on big containers and
+            // adds zero value once previously-extracted files are already
+            // u+r — pacman extractions only set restrictive modes on new files.
+            let fixed = ensure_owner_readable_paths(&new_paths)
+                .with_context(|| "failed to fix file permissions")?;
+            if fixed > 0 {
+                eprintln!("Made {fixed} file(s) owner-readable (setuid helpers lose the suid bit during user-mode extract).");
+            }
+
+            eprintln!("Building library cache...");
+            run_ldconfig(&target_dir);
         }
-        regenerate_runtime_caches(&target_dir);
-
-        eprintln!("Checking for missing shared library dependencies...");
-        match satisfy_missing_sonames(&target_dir, &cache_dir) {
-            Ok(extra) if !extra.is_empty() => eprintln!("  Added: {}", extra.join(", ")),
-            Ok(_) => {}
-            Err(e) => eprintln!("  Warning: soname check failed: {e:#}"),
-        }
-
-        ensure_base_layout(&target_dir)
-            .with_context(|| "failed to create base filesystem symlinks")?;
-
-        let fixed = ensure_owner_readable(&target_dir)
-            .with_context(|| "failed to fix file permissions")?;
-        if fixed > 0 {
-            eprintln!("Made {fixed} file(s) owner-readable (setuid helpers lose the suid bit during user-mode extract).");
-        }
-
-        eprintln!("Building library cache...");
-        run_ldconfig(&target_dir);
 
         // Verify each requested launcher actually maps to a real binary in the
         // target's tree (file location is the same for fresh and merge modes).
@@ -400,8 +419,12 @@ pub fn run(
         );
     }
 
-    if let Err(e) = super::dedup::run(false) {
-        eprintln!("warning: dedup failed: {e:#}");
+    // Skip the cross-app dedup pass when this install added zero files —
+    // no new inodes can have been created, so there's nothing to link.
+    if !resolved.is_empty() {
+        if let Err(e) = super::dedup::run(false) {
+            eprintln!("warning: dedup failed: {e:#}");
+        }
     }
 
     Ok(())
@@ -499,6 +522,44 @@ pub fn ensure_owner_readable(app_dir: &Path) -> Result<u64> {
                 if fs::set_permissions(&path, perms).is_ok() {
                     fixed += 1;
                 }
+            }
+        }
+    }
+    Ok(fixed)
+}
+
+/// Like `ensure_owner_readable` but only checks the given paths instead of
+/// walking the whole tree. Used right after a merge install: only files
+/// this install just wrote can have unreadable modes — every previously
+/// extracted file was already fixed when its own install ran.
+pub fn ensure_owner_readable_paths(paths: &[PathBuf]) -> Result<u64> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let my_uid = unsafe { libc::geteuid() };
+    let mut fixed = 0u64;
+
+    for path in paths {
+        let Ok(meta) = fs::symlink_metadata(path) else { continue };
+        let ft = meta.file_type();
+        if ft.is_symlink() {
+            continue;
+        }
+        if ft.is_dir() {
+            if meta.uid() == my_uid && (meta.mode() & 0o500) != 0o500 {
+                let mut perms = meta.permissions();
+                perms.set_mode(meta.mode() | 0o500);
+                let _ = fs::set_permissions(path, perms);
+            }
+            continue;
+        }
+        if !ft.is_file() { continue; }
+        if meta.uid() != my_uid { continue; }
+        let mode = meta.mode();
+        if mode & 0o400 == 0 {
+            let mut perms = meta.permissions();
+            perms.set_mode(mode | 0o400);
+            if fs::set_permissions(path, perms).is_ok() {
+                fixed += 1;
             }
         }
     }

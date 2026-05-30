@@ -94,12 +94,38 @@ pub fn resolve_virtual(dep: &str) -> Result<Option<String>> {
 
 /// Find which package installed on the *host* system provides the given soname.
 /// Strips any `=VERSION` suffix before searching (e.g. "libreadline.so=8" → "libreadline.so").
+///
+/// Results are cached for the lifetime of the process. soname_owner is the
+/// hot path during install — both positive and negative results spawn up to
+/// 8 pacman/apt/dnf subprocesses each, and a single wine install would
+/// otherwise repeat the same lookups across satisfy-loop iterations.
 pub fn soname_owner(soname: &str) -> Result<Option<String>> {
-    let filename = soname.split('=').next().unwrap_or(soname);
-    match current() {
-        Distro::Arch   => arch::soname_owner(filename),
-        Distro::Debian => debian::soname_owner(filename),
-        Distro::Fedora => fedora::soname_owner(filename),
+    let filename = soname.split('=').next().unwrap_or(soname).to_string();
+    if let Some(cached) = soname_cache_get(&filename) {
+        return Ok(cached);
+    }
+    let result = match current() {
+        Distro::Arch   => arch::soname_owner(&filename),
+        Distro::Debian => debian::soname_owner(&filename),
+        Distro::Fedora => fedora::soname_owner(&filename),
+    }?;
+    soname_cache_put(filename, result.clone());
+    Ok(result)
+}
+
+fn soname_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, Option<String>>> {
+    static C: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, Option<String>>>> =
+        std::sync::OnceLock::new();
+    C.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn soname_cache_get(name: &str) -> Option<Option<String>> {
+    soname_cache().lock().ok()?.get(name).cloned()
+}
+
+fn soname_cache_put(name: String, value: Option<String>) {
+    if let Ok(mut g) = soname_cache().lock() {
+        g.insert(name, value);
     }
 }
 
