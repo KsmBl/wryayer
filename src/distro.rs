@@ -290,12 +290,13 @@ mod arch {
             }
             let text = String::from_utf8_lossy(&out.stdout);
             for line in text.lines() {
-                // Output format: "repo/pkgname version"
-                if let Some(after_slash) = line.trim().split_once('/').map(|(_, r)| r) {
-                    let pkg = after_slash.split_whitespace().next().unwrap_or("").to_string();
-                    if !pkg.is_empty() {
-                        return Ok(Some(pkg));
-                    }
+                // pacman -F output: "<file> is owned by <repo>/<pkg> <version>"
+                let line = line.trim();
+                let Some((_, after_owned)) = line.split_once(" is owned by ") else { continue };
+                let Some((_, pkg_part)) = after_owned.split_once('/') else { continue };
+                let pkg = pkg_part.split_whitespace().next().unwrap_or("").to_string();
+                if !pkg.is_empty() {
+                    return Ok(Some(pkg));
                 }
             }
         }
