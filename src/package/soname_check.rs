@@ -101,6 +101,9 @@ fn collect_needed_impl(start_dir: &Path, skip_hidden: bool) -> Result<HashSet<St
                 if let Ok(libs) = elf_needed(&path) {
                     needed.extend(libs);
                 }
+                if is_plugin_host(&path) {
+                    needed.extend(collect_dlopen_sonames(&path));
+                }
             }
         }
     }
@@ -131,6 +134,82 @@ fn elf_needed(path: &Path) -> Result<Vec<String>> {
         }
     }
     Ok(libs)
+}
+
+/// True for files likely to dlopen other libraries at runtime: shared
+/// libraries (.so / .so.N) and Node native modules (.node). Executables
+/// occasionally do this too but the false-positive cost outweighs the
+/// benefit, so we scope to plugin-loading hosts.
+fn is_plugin_host(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else { return false };
+    name.ends_with(".node") || name.contains(".so")
+}
+
+/// Scan an ELF file's string sections for `libfoo.so.N` patterns that look
+/// like dlopen targets. These bypass ELF NEEDED entries because dlopen takes
+/// its argument as a runtime string, so the linker can't record them.
+/// Returns sonames found (no path prefix, version-suffixed only).
+fn collect_dlopen_sonames(path: &Path) -> Vec<String> {
+    let Ok(mut f) = std::fs::File::open(path) else { return vec![] };
+    let mut magic = [0u8; 4];
+    if f.read_exact(&mut magic).is_err() || &magic != b"\x7fELF" {
+        return vec![];
+    }
+    drop(f);
+    let Ok(out) = Command::new("strings").args(["-a"]).arg(path).output() else { return vec![] };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut sonames: HashSet<String> = HashSet::new();
+    for line in text.lines() {
+        if is_versioned_soname(line) {
+            sonames.insert(line.to_string());
+        }
+    }
+    sonames.into_iter().collect()
+}
+
+/// True if `s` looks like a dlopen-style versioned soname such as
+/// "libsndfile.so.1" or "libQt6Core.so.6". The version suffix is required
+/// because plain "libfoo.so" strings are usually symlinks or messages, while
+/// versioned forms are what apps actually pass to dlopen.
+fn is_versioned_soname(s: &str) -> bool {
+    if s.len() < 7 || s.len() > 64 || !s.starts_with("lib") {
+        return false;
+    }
+    let Some(idx) = s.find(".so.") else { return false };
+    let name = &s[3..idx];
+    if name.is_empty()
+        || !name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '+' | '-' | '.'))
+    {
+        return false;
+    }
+    let version = &s[idx + 4..];
+    !version.is_empty()
+        && version
+            .split('.')
+            .all(|seg| !seg.is_empty() && seg.chars().all(|c| c.is_ascii_digit()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_versioned_soname;
+    #[test]
+    fn accepts_typical_sonames() {
+        assert!(is_versioned_soname("libsndfile.so.1"));
+        assert!(is_versioned_soname("libQt6Core.so.6"));
+        assert!(is_versioned_soname("libssl.so.3"));
+        assert!(is_versioned_soname("libsndfile.so.1.0.37"));
+        assert!(is_versioned_soname("libgcc_s.so.1"));
+    }
+    #[test]
+    fn rejects_non_sonames() {
+        assert!(!is_versioned_soname("libsndfile.so"));
+        assert!(!is_versioned_soname("libsndfile"));
+        assert!(!is_versioned_soname("libsndfile.so.x"));
+        assert!(!is_versioned_soname("/usr/lib/libsndfile.so.1"));
+        assert!(!is_versioned_soname("libsndfile.so.1 not found"));
+        assert!(!is_versioned_soname("foo.so.1"));
+        assert!(!is_versioned_soname(""));
+    }
 }
 
 pub(crate) fn soname_in_app(app_dir: &Path, soname: &str) -> bool {
