@@ -10,7 +10,7 @@ use crate::commands::dedup::format_bytes;
 use crate::config::{AppConfig, LocalDelete, TempMode};
 
 use super::{
-    App, Screen, Tab, CFG_SAVE, CFG_SHARES, APP_CFG_SAVE,
+    App, GameSettingsField, Screen, Tab, CFG_SAVE, CFG_SHARES, APP_CFG_SAVE,
     setting_description, setting_options, setting_current, setting_title,
     HOSTNAME_SAMPLE, MACHINE_ID_SAMPLE, USERNAME_SAMPLE,
 };
@@ -105,6 +105,27 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             let delete_source = *delete_source;
             let selected = *selected;
             draw_game_confirm(f, area, &game_dir, &exe, &app_name, delete_source, selected);
+        }
+        Screen::GameSettings { app_name, exe, prefix, selected } => {
+            let app_name = app_name.clone();
+            let exe = exe.clone();
+            let prefix = prefix.clone();
+            let selected = *selected;
+            draw_game_settings(f, area, &app_name, &exe, &prefix, selected);
+        }
+        Screen::GameSettingsInput { app_name, exe, prefix, field, value } => {
+            let app_name = app_name.clone();
+            let exe = exe.clone();
+            let prefix = prefix.clone();
+            let field = *field;
+            let value = value.clone();
+            // Draw the GameSettings popup behind the input as visual context.
+            let back_sel = match field {
+                super::GameSettingsField::Exe => 0,
+                super::GameSettingsField::Prefix => 1,
+            };
+            draw_game_settings(f, area, &app_name, &exe, &prefix, back_sel);
+            draw_game_settings_input(f, area, field, &value);
         }
         Screen::InstallTarget { pkg, targets, selected } => {
             let pkg = pkg.clone();
@@ -580,7 +601,7 @@ fn draw_import(f: &mut Frame, app: &App, area: Rect) {
 fn draw_statusbar(f: &mut Frame, app: &App, area: Rect) {
     let hint = match app.tab {
         Tab::Installed if app.detail_focused => "[↑↓] Scroll  [←/Esc] Back  [q] Quit",
-        Tab::Installed => "[Tab] Switch  [→] Details  [r] Run  [d] Delete  [e] Export  [p] Snapshot  [o] Rollback  [c] Check  [u] Update  [s] Config  [n] Rename  [?] Help  [q] Quit",
+        Tab::Installed => "[Tab] Switch  [→] Details  [r] Run  [d] Delete  [e] Export  [p] Snapshot  [o] Rollback  [c] Check  [u] Update  [s] Config  [g] Game  [n] Rename  [?] Help  [q] Quit",
         Tab::Install   => "[Tab] Switch  Type to search  [↓] Select  [Enter] Install/Uninstall  [q] Quit",
         Tab::Import    => "[Tab] Switch  Type zip path  [Enter] Import  [Esc] Clear  [Shift+Q] Quit",
         Tab::Games     => "[Tab] Switch  [i/Enter] Import a game folder  [q] Quit",
@@ -1541,6 +1562,7 @@ fn draw_key_help(f: &mut Frame, area: Rect) {
         ("c",          "Check for updates (no install)"),
         ("u",          "Update the selected app"),
         ("s",          "Open per-app settings"),
+        ("g",          "Edit wine-game settings (exe path, prefix)"),
         ("n",          "Rename app (set display name)"),
         ("Tab",        "Switch between tabs"),
         ("↑ / k",      "Move selection up"),
@@ -2477,6 +2499,142 @@ fn draw_game_confirm(
     f.render_widget(
         Paragraph::new(Span::styled(
             " [↑↓] Navigate  [Space] Toggle delete  [Enter] Confirm  [Esc] Cancel",
+            Style::default().fg(C_DIM),
+        )),
+        chunks[2],
+    );
+}
+
+// ── Game settings overlay (edit wine_game fields) ────────────────────────────
+
+fn draw_game_settings(f: &mut Frame, area: Rect, app_name: &str, exe: &str, prefix: &str, selected: usize) {
+    let popup = centered_rect(70, 50, area);
+    f.render_widget(Clear, popup);
+
+    let block = Block::default().borders(Borders::ALL)
+        .title(format!(" Game Settings — {app_name} "))
+        .title_style(Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD))
+        .border_style(Style::default().fg(C_ACCENT));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Length(2),
+            Constraint::Length(2),
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            "  Paths are evaluated inside the sandbox; both should start with /",
+            Style::default().fg(C_DIM),
+        )),
+        chunks[0],
+    );
+
+    let mk_row = |sel: bool, label: &str, value: &str| -> Paragraph<'static> {
+        let bg = if sel { C_SELECT } else { Color::Reset };
+        let label_color = if sel { Color::White } else { C_DIM };
+        let value_color = if sel { Color::White } else { C_ACCENT };
+        Paragraph::new(Line::from(vec![
+            Span::styled(if sel { " ▶ " } else { "   " }, Style::default().fg(C_ACCENT).bg(bg)),
+            Span::styled(format!("{label:<10}  "), Style::default().fg(label_color).bg(bg)),
+            Span::styled(value.to_string(),
+                Style::default().fg(value_color).bg(bg)
+                    .add_modifier(if sel { Modifier::BOLD } else { Modifier::empty() })),
+        ]))
+    };
+    f.render_widget(
+        mk_row(selected == 0, "Exe", exe),
+        Rect { x: inner.x, y: chunks[1].y, width: inner.width, height: 1 },
+    );
+    f.render_widget(
+        mk_row(selected == 1, "Prefix", prefix),
+        Rect { x: inner.x, y: chunks[2].y, width: inner.width, height: 1 },
+    );
+
+    f.render_widget(
+        Paragraph::new(Span::styled("─".repeat(inner.width as usize),
+            Style::default().fg(Color::Rgb(50, 50, 60)))),
+        chunks[3],
+    );
+
+    // Save button
+    let is_save = selected == 2;
+    let btn_style = if is_save {
+        Style::default().fg(Color::Black).bg(C_GREEN).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(C_GREEN)
+    };
+    let save_y = inner.y + inner.height.saturating_sub(2);
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(if is_save { " ▶ " } else { "   " }, Style::default().fg(C_ACCENT)),
+            Span::styled("[ Save & Close ]", btn_style),
+        ])),
+        Rect { x: inner.x, y: save_y, width: inner.width, height: 1 },
+    );
+
+    let footer_y = inner.y + inner.height.saturating_sub(1);
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            " [↑↓] Navigate  [Enter] Edit / Save  [Esc/q] Discard",
+            Style::default().fg(C_DIM),
+        )),
+        Rect { x: inner.x, y: footer_y, width: inner.width, height: 1 },
+    );
+}
+
+fn draw_game_settings_input(f: &mut Frame, area: Rect, field: GameSettingsField, value: &str) {
+    let title = match field {
+        GameSettingsField::Exe    => " Exe path ",
+        GameSettingsField::Prefix => " WINEPREFIX path ",
+    };
+    let hint = match field {
+        GameSettingsField::Exe    => "  Absolute path inside the sandbox, e.g. /games/nfsu2/Speed2.exe",
+        GameSettingsField::Prefix => "  Absolute path inside the sandbox, e.g. /games/nfsu2/.wineprefix",
+    };
+    draw_text_input_with_hint(f, area, title, hint, value);
+}
+
+fn draw_text_input_with_hint(f: &mut Frame, area: Rect, title: &str, hint: &str, value: &str) {
+    let popup = centered_rect(70, 30, area);
+    f.render_widget(Clear, popup);
+
+    let block = Block::default().borders(Borders::ALL)
+        .title(title.to_string())
+        .title_style(Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD))
+        .border_style(Style::default().fg(C_ACCENT));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Length(3), Constraint::Length(1)])
+        .split(inner);
+
+    f.render_widget(
+        Paragraph::new(Span::styled(hint, Style::default().fg(C_DIM))),
+        chunks[0],
+    );
+
+    f.render_widget(
+        Paragraph::new(format!(" {}█", value))
+            .block(Block::default().borders(Borders::ALL)
+                .border_style(Style::default().fg(C_ACCENT)))
+            .style(Style::default().fg(Color::White)),
+        chunks[1],
+    );
+
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            " [Enter] Confirm  [Esc] Cancel  [Backspace] Delete char",
             Style::default().fg(C_DIM),
         )),
         chunks[2],

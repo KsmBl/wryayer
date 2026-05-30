@@ -109,6 +109,23 @@ pub enum Screen {
         delete_source: bool,
         selected: usize, // 0 = install, 1 = toggle delete, 2 = cancel
     },
+    /// Edit a wine game's manifest fields (.exe path, WINEPREFIX) for an
+    /// already-imported game. Opened with [g] on the Installed tab.
+    /// Rows: 0 = exe, 1 = prefix, 2 = save.
+    GameSettings {
+        app_name: String,
+        exe: String,
+        prefix: String,
+        selected: usize,
+    },
+    /// Free-text edit for the exe path or WINEPREFIX from GameSettings.
+    GameSettingsInput {
+        app_name: String,
+        exe: String,
+        prefix: String,
+        field: GameSettingsField,
+        value: String,
+    },
     /// Choose between a fresh install and merging into an existing app.
     /// Row 0 = fresh install; rows 1..=targets.len() = merge into targets[row-1].
     InstallTarget {
@@ -229,6 +246,12 @@ pub enum BrowserMode {
     PickShareDir(String),
     /// Pick a directory to import as a wine game.
     PickGameDir,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum GameSettingsField {
+    Exe,
+    Prefix,
 }
 
 // ── App state ─────────────────────────────────────────────────────────────────
@@ -660,6 +683,8 @@ fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
         Screen::GameExePick { .. } => 19,
         Screen::GameNameInput { .. } => 20,
         Screen::GameConfirm { .. } => 21,
+        Screen::GameSettings { .. } => 22,
+        Screen::GameSettingsInput { .. } => 23,
     };
 
     match tag {
@@ -685,6 +710,8 @@ fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
         19 => on_game_exe_pick(app, code),
         20 => on_game_name_input(app, code),
         21 => on_game_confirm(app, code),
+        22 => on_game_settings(app, code),
+        23 => on_game_settings_input(app, code),
         _ => {}
     }
     Ok(())
@@ -938,6 +965,24 @@ fn on_installed(app: &mut App, code: KeyCode) {
                 let value = m.app.display_name.clone().unwrap_or_default();
                 app.screen = Screen::RenameApp { app_name: name, value };
                 app.needs_clear = true;
+            }
+        }
+        KeyCode::Char('g') => {
+            if let Some(m) = app.selected_installed() {
+                match &m.app.wine_game {
+                    Some(wg) => {
+                        app.screen = Screen::GameSettings {
+                            app_name: m.app.name.clone(),
+                            exe: wg.exe.clone(),
+                            prefix: wg.prefix.clone(),
+                            selected: 0,
+                        };
+                        app.needs_clear = true;
+                    }
+                    None => {
+                        app.status = format!("'{}' is not a wine game", m.app.name);
+                    }
+                }
             }
         }
         KeyCode::Char('?') => {
@@ -2758,6 +2803,103 @@ fn on_game_name_input(app: &mut App, code: KeyCode) {
                 delete_source: false,
                 selected: 0,
             };
+            app.needs_clear = true;
+        }
+        KeyCode::Backspace => { value.pop(); }
+        KeyCode::Char(c) => { value.push(c); }
+        _ => {}
+    }
+}
+
+fn on_game_settings(app: &mut App, code: KeyCode) {
+    let Screen::GameSettings { app_name, exe, prefix, selected } = &mut app.screen else { return };
+    match code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            app.screen = Screen::Main;
+            app.needs_clear = true;
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            *selected = if *selected == 0 { 2 } else { *selected - 1 };
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            *selected = (*selected + 1) % 3;
+        }
+        KeyCode::Enter | KeyCode::Char(' ') => {
+            let s = *selected;
+            let name = app_name.clone();
+            let exe = exe.clone();
+            let prefix = prefix.clone();
+            match s {
+                0 => {
+                    let value = exe.clone();
+                    app.screen = Screen::GameSettingsInput {
+                        app_name: name,
+                        exe,
+                        prefix,
+                        field: GameSettingsField::Exe,
+                        value,
+                    };
+                    app.needs_clear = true;
+                }
+                1 => {
+                    let value = prefix.clone();
+                    app.screen = Screen::GameSettingsInput {
+                        app_name: name,
+                        exe,
+                        prefix,
+                        field: GameSettingsField::Prefix,
+                        value,
+                    };
+                    app.needs_clear = true;
+                }
+                _ => {
+                    // Save & Close — write the updated wine_game back to the manifest.
+                    if let Ok(mut m) = crate::manifest::read_manifest(&name) {
+                        if let Some(wg) = m.app.wine_game.as_mut() {
+                            wg.exe = exe;
+                            wg.prefix = prefix;
+                            match crate::manifest::write_manifest(&name, &m) {
+                                Ok(()) => app.status = format!("Saved game settings for '{name}'"),
+                                Err(e) => app.status = format!("error: failed to save manifest: {e:#}"),
+                            }
+                            app.reload_installed();
+                        } else {
+                            app.status = format!("'{name}' is no longer a wine game");
+                        }
+                    } else {
+                        app.status = format!("error: cannot read manifest for '{name}'");
+                    }
+                    app.screen = Screen::Main;
+                    app.needs_clear = true;
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn on_game_settings_input(app: &mut App, code: KeyCode) {
+    let Screen::GameSettingsInput { app_name, exe, prefix, field, value } = &mut app.screen else { return };
+    match code {
+        KeyCode::Esc => {
+            // Discard the edit
+            let name = app_name.clone();
+            let exe = exe.clone();
+            let prefix = prefix.clone();
+            let sel = match *field { GameSettingsField::Exe => 0, GameSettingsField::Prefix => 1 };
+            app.screen = Screen::GameSettings { app_name: name, exe, prefix, selected: sel };
+            app.needs_clear = true;
+        }
+        KeyCode::Enter => {
+            let name = app_name.clone();
+            let mut exe = exe.clone();
+            let mut prefix = prefix.clone();
+            let new_value = value.trim().to_string();
+            let sel = match *field {
+                GameSettingsField::Exe => { exe = new_value; 0 }
+                GameSettingsField::Prefix => { prefix = new_value; 1 }
+            };
+            app.screen = Screen::GameSettings { app_name: name, exe, prefix, selected: sel };
             app.needs_clear = true;
         }
         KeyCode::Backspace => { value.pop(); }
