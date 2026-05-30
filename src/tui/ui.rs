@@ -245,11 +245,14 @@ fn draw_installed(f: &mut Frame, app: &mut App, area: Rect) {
                 .map(|next| next.app.alias_of.as_deref() != Some(target.as_str()))
                 .unwrap_or(true);
             let connector = if is_last { "  └── " } else { "  ├── " };
-            ListItem::new(Line::from(vec![
-                dot,
-                Span::styled(connector, Style::default().fg(C_DIM)),
-                Span::styled(&m.app.name, Style::default().fg(C_DIM)),
-            ]))
+            let mut spans = vec![dot, Span::styled(connector, Style::default().fg(C_DIM))];
+            if let Some(ref dn) = m.app.display_name {
+                spans.push(Span::styled(dn.clone(), Style::default().fg(list_fg)));
+                spans.push(Span::styled(format!(" [{}]", m.app.name), Style::default().fg(C_DIM)));
+            } else {
+                spans.push(Span::styled(&m.app.name, Style::default().fg(C_DIM)));
+            }
+            ListItem::new(Line::from(spans))
         } else if let Some(ref dn) = m.app.display_name {
             ListItem::new(Line::from(vec![
                 dot,
