@@ -86,8 +86,36 @@ pub enum Screen {
         current_dir: PathBuf,
         entries: Vec<FbEntry>,
         fb_state: ListState,
-        /// Some(app_name) = dir-pick mode for shared dirs; None = zip import mode
-        pick_dir_for: Option<String>,
+        mode: BrowserMode,
+    },
+    /// Wine-game wizard: pick the main .exe inside the selected folder.
+    GameExePick {
+        game_dir: PathBuf,
+        exes: Vec<(String, u64)>,
+        selected: usize,
+    },
+    /// Wine-game wizard: pick the wine container (must contain a wine binary).
+    GameContainerPick {
+        game_dir: PathBuf,
+        exe: String,
+        containers: Vec<String>,
+        selected: usize,
+    },
+    /// Wine-game wizard: type an app name (defaults to sanitized folder name).
+    GameNameInput {
+        game_dir: PathBuf,
+        exe: String,
+        container: String,
+        value: String,
+    },
+    /// Wine-game wizard: confirm install + ask whether to delete the source folder.
+    GameConfirm {
+        game_dir: PathBuf,
+        exe: String,
+        container: String,
+        app_name: String,
+        delete_source: bool,
+        selected: usize, // 0 = install, 1 = toggle delete, 2 = cancel
     },
     /// Choose between a fresh install and merging into an existing app.
     /// Row 0 = fresh install; rows 1..=targets.len() = merge into targets[row-1].
@@ -194,8 +222,21 @@ pub enum Tab {
     Installed,
     Install,
     Import,
+    Games,
     Space,
     Settings,
+}
+
+/// Where the file browser hands its picked path. Lets one browser handle
+/// .zip imports, shared-dir picking, and wine-game folder picking.
+#[derive(Clone)]
+pub enum BrowserMode {
+    /// Pick a .zip file for `wryayer import`.
+    ImportZip,
+    /// Pick a directory and add it to `app_name`'s shared_dirs.
+    PickShareDir(String),
+    /// Pick a directory to import as a wine game.
+    PickGameDir,
 }
 
 // ── App state ─────────────────────────────────────────────────────────────────
@@ -624,6 +665,10 @@ fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
         Screen::NoLauncherChoice { .. } => 16,
         Screen::OutdatedPackages { .. } => 17,
         Screen::AskShortcut { .. } => 18,
+        Screen::GameExePick { .. } => 19,
+        Screen::GameContainerPick { .. } => 20,
+        Screen::GameNameInput { .. } => 21,
+        Screen::GameConfirm { .. } => 22,
     };
 
     match tag {
@@ -646,6 +691,10 @@ fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
         16 => on_no_launcher_choice(app, code),
         17 => on_outdated_packages(app, code),
         18 => on_ask_shortcut(app, code),
+        19 => on_game_exe_pick(app, code),
+        20 => on_game_container_pick(app, code),
+        21 => on_game_name_input(app, code),
+        22 => on_game_confirm(app, code),
         _ => {}
     }
     Ok(())
@@ -660,7 +709,8 @@ fn on_main(app: &mut App, code: KeyCode) -> Result<()> {
             app.tab = match app.tab {
                 Tab::Installed => Tab::Install,
                 Tab::Install   => Tab::Import,
-                Tab::Import    => Tab::Space,
+                Tab::Import    => Tab::Games,
+                Tab::Games     => Tab::Space,
                 Tab::Space     => Tab::Settings,
                 Tab::Settings  => Tab::Installed,
             };
@@ -672,7 +722,8 @@ fn on_main(app: &mut App, code: KeyCode) -> Result<()> {
                 Tab::Installed => Tab::Settings,
                 Tab::Install   => Tab::Installed,
                 Tab::Import    => Tab::Install,
-                Tab::Space     => Tab::Import,
+                Tab::Games     => Tab::Import,
+                Tab::Space     => Tab::Games,
                 Tab::Settings  => Tab::Space,
             };
             app.status.clear();
@@ -702,6 +753,7 @@ fn on_main(app: &mut App, code: KeyCode) -> Result<()> {
         Tab::Installed => on_installed(app, code),
         Tab::Install   => on_install(app, code),
         Tab::Import    => on_import(app, code),
+        Tab::Games     => on_games(app, code),
         Tab::Space     => on_space_tab(app, code),
         Tab::Settings  => on_settings_tab(app, code),
     }
@@ -1338,7 +1390,7 @@ fn on_import(app: &mut App, code: KeyCode) {
         KeyCode::Backspace => { app.import_input.pop(); }
         KeyCode::Tab | KeyCode::BackTab => {} // handled by on_main already
         KeyCode::F(1) | KeyCode::F(2) => {
-            open_file_browser(app, None);
+            open_file_browser(app, BrowserMode::ImportZip);
         }
         KeyCode::Enter => {
             let raw = app.import_input.trim().to_string();
@@ -2222,7 +2274,7 @@ fn on_shared_dirs(app: &mut App, code: KeyCode) {
         }
         KeyCode::Char('a') => {
             let name = app_name.clone();
-            open_file_browser(app, Some(name));
+            open_file_browser(app, BrowserMode::PickShareDir(name));
         }
         _ => {}
     }
@@ -2230,7 +2282,7 @@ fn on_shared_dirs(app: &mut App, code: KeyCode) {
 
 // ── File browser ──────────────────────────────────────────────────────────────
 
-fn open_file_browser(app: &mut App, pick_dir_for: Option<String>) {
+fn open_file_browser(app: &mut App, mode: BrowserMode) {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
     let dir = PathBuf::from(home);
     let entries = load_dir_entries(&dir);
@@ -2238,7 +2290,7 @@ fn open_file_browser(app: &mut App, pick_dir_for: Option<String>) {
     if !entries.is_empty() {
         fb_state.select(Some(0));
     }
-    app.screen = Screen::FileBrowser { current_dir: dir, entries, fb_state, pick_dir_for };
+    app.screen = Screen::FileBrowser { current_dir: dir, entries, fb_state, mode };
 }
 
 fn load_dir_entries(dir: &PathBuf) -> Vec<FbEntry> {
@@ -2263,22 +2315,30 @@ enum FbAction {
     Nothing,
     EnterDir(PathBuf),
     SelectFile(String),
-    /// Pick-dir mode: user selected `path` for `app_name`
-    SelectDir { path: PathBuf, app_name: String },
+    SelectShareDir { path: PathBuf, app_name: String },
+    SelectGameDir(PathBuf),
     GoUp,
-    /// None = return to Import tab; Some(app_name) = return to SharedDirs
-    Close(Option<String>),
+    Close(BrowserMode),
 }
 
 fn on_file_browser(app: &mut App, code: KeyCode) {
     let action = {
-        let Screen::FileBrowser { current_dir, entries, fb_state, pick_dir_for } = &mut app.screen else { return };
-        let pick = pick_dir_for.clone();
+        let Screen::FileBrowser { current_dir, entries, fb_state, mode } = &mut app.screen else { return };
+        let mode_clone = mode.clone();
+        let pick_dir = !matches!(mode_clone, BrowserMode::ImportZip);
         match code {
-            KeyCode::Esc | KeyCode::Char('q') => FbAction::Close(pick),
-            // Space / s selects the current directory in pick-dir mode
-            KeyCode::Char(' ') | KeyCode::Char('s') if pick.is_some() => {
-                FbAction::SelectDir { path: current_dir.clone(), app_name: pick.unwrap() }
+            KeyCode::Esc | KeyCode::Char('q') => FbAction::Close(mode_clone),
+            // Space / s selects the current directory in pick-dir modes
+            KeyCode::Char(' ') | KeyCode::Char('s') if pick_dir => {
+                match mode_clone {
+                    BrowserMode::PickShareDir(app_name) => {
+                        FbAction::SelectShareDir { path: current_dir.clone(), app_name }
+                    }
+                    BrowserMode::PickGameDir => {
+                        FbAction::SelectGameDir(current_dir.clone())
+                    }
+                    BrowserMode::ImportZip => FbAction::Nothing,
+                }
             }
             KeyCode::Up | KeyCode::Char('k') => {
                 let i = fb_state.selected().unwrap_or(0);
@@ -2298,7 +2358,7 @@ fn on_file_browser(app: &mut App, code: KeyCode) {
                 if let Some(entry) = entries.get(i) {
                     if entry.is_dir {
                         FbAction::EnterDir(current_dir.join(&entry.name))
-                    } else if entry.is_zip && pick.is_none() {
+                    } else if entry.is_zip && matches!(mode_clone, BrowserMode::ImportZip) {
                         FbAction::SelectFile(
                             current_dir.join(&entry.name).to_string_lossy().into_owned(),
                         )
@@ -2315,12 +2375,17 @@ fn on_file_browser(app: &mut App, code: KeyCode) {
 
     match action {
         FbAction::Nothing => {}
-        FbAction::Close(None) => {
+        FbAction::Close(BrowserMode::ImportZip) => {
             app.screen = Screen::Main;
             app.tab = Tab::Import;
             app.needs_clear = true;
         }
-        FbAction::Close(Some(app_name)) => {
+        FbAction::Close(BrowserMode::PickGameDir) => {
+            app.screen = Screen::Main;
+            app.tab = Tab::Games;
+            app.needs_clear = true;
+        }
+        FbAction::Close(BrowserMode::PickShareDir(app_name)) => {
             let config = read_config(&app_name).unwrap_or_default();
             let dirs = config.shared_dirs;
             let selected = dirs.len().saturating_sub(1);
@@ -2349,7 +2414,7 @@ fn on_file_browser(app: &mut App, code: KeyCode) {
             app.screen = Screen::Main;
             app.tab = Tab::Import;
         }
-        FbAction::SelectDir { path, app_name } => {
+        FbAction::SelectShareDir { path, app_name } => {
             let path_str = path.to_string_lossy().into_owned();
             let mut config = read_config(&app_name).unwrap_or_default();
             if !config.shared_dirs.contains(&path_str) {
@@ -2360,6 +2425,9 @@ fn on_file_browser(app: &mut App, code: KeyCode) {
             let selected = dirs.len().saturating_sub(1);
             app.screen = Screen::SharedDirs { app_name, dirs, selected };
             app.needs_clear = true;
+        }
+        FbAction::SelectGameDir(path) => {
+            enter_game_wizard(app, path);
         }
     }
 }
@@ -2576,4 +2644,255 @@ fn dir_bytes(path: &str) -> Option<u64> {
     let out = Command::new("du").args(["-sb", path]).output().ok()?;
     let s = String::from_utf8_lossy(&out.stdout);
     s.split_whitespace().next()?.parse().ok()
+}
+
+// ── Games tab ─────────────────────────────────────────────────────────────────
+
+fn on_games(app: &mut App, code: KeyCode) {
+    match code {
+        KeyCode::Char('i') | KeyCode::Char('a') | KeyCode::Enter => {
+            open_file_browser(app, BrowserMode::PickGameDir);
+        }
+        _ => {}
+    }
+}
+
+/// Apps whose tree contains a wine binary; eligible as game containers.
+pub fn wine_containers(apps: &[Manifest]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let Ok(home) = std::env::var("HOME") else { return out };
+    let root = std::path::Path::new(&home).join(".wryayer");
+    for m in apps {
+        if m.app.alias_of.is_some() {
+            continue;
+        }
+        let dir = root.join(&m.app.name);
+        if ["usr/bin/wine", "bin/wine"]
+            .iter()
+            .any(|sub| dir.join(sub).symlink_metadata().is_ok())
+        {
+            out.push(m.app.name.clone());
+        }
+    }
+    out
+}
+
+/// Walk the picked folder for .exe files, return Vec<(relative_path, size_bytes)>.
+fn scan_exes(root: &std::path::Path) -> Vec<(String, u64)> {
+    let mut out: Vec<(String, u64)> = Vec::new();
+    let mut stack: Vec<(PathBuf, usize)> = vec![(root.to_path_buf(), 0)];
+    while let Some((dir, depth)) = stack.pop() {
+        if depth > 6 { continue; }
+        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        for entry in rd.flatten() {
+            let Ok(ft) = entry.file_type() else { continue };
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if ft.is_dir() {
+                if name_str.starts_with('.') || name_str.eq_ignore_ascii_case("drive_c") {
+                    continue;
+                }
+                stack.push((entry.path(), depth + 1));
+            } else if ft.is_file() && name_str.to_lowercase().ends_with(".exe") {
+                let sz = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                let rel = entry.path().strip_prefix(root).unwrap_or(&entry.path())
+                    .to_string_lossy().into_owned();
+                out.push((rel, sz));
+            }
+        }
+    }
+    // Sort: prefer top-level, then by size desc
+    out.sort_by(|a, b| {
+        let da = a.0.matches('/').count();
+        let db = b.0.matches('/').count();
+        da.cmp(&db).then(b.1.cmp(&a.1))
+    });
+    out
+}
+
+fn sanitize_game_name(raw: &str) -> String {
+    raw.chars()
+        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') { c.to_ascii_lowercase() } else { '-' })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string()
+}
+
+fn enter_game_wizard(app: &mut App, game_dir: PathBuf) {
+    let exes = scan_exes(&game_dir);
+    if exes.is_empty() {
+        app.status = format!("No .exe files found under {}", game_dir.display());
+        app.screen = Screen::Main;
+        app.tab = Tab::Games;
+        app.needs_clear = true;
+        return;
+    }
+    app.screen = Screen::GameExePick { game_dir, exes, selected: 0 };
+    app.needs_clear = true;
+}
+
+fn on_game_exe_pick(app: &mut App, code: KeyCode) {
+    let Screen::GameExePick { game_dir, exes, selected } = &mut app.screen else { return };
+    let len = exes.len();
+    match code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            app.screen = Screen::Main;
+            app.tab = Tab::Games;
+            app.needs_clear = true;
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            *selected = if *selected == 0 { len - 1 } else { *selected - 1 };
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            *selected = (*selected + 1) % len;
+        }
+        KeyCode::Enter | KeyCode::Char(' ') => {
+            let gd = game_dir.clone();
+            let exe = exes[*selected].0.clone();
+            let containers = wine_containers(&app.installed);
+            if containers.is_empty() {
+                app.status = "No wine container found. Run 'wryayer install wine' first.".into();
+                app.screen = Screen::Main;
+                app.tab = Tab::Games;
+                app.needs_clear = true;
+                return;
+            }
+            app.screen = Screen::GameContainerPick {
+                game_dir: gd,
+                exe,
+                containers,
+                selected: 0,
+            };
+            app.needs_clear = true;
+        }
+        _ => {}
+    }
+}
+
+fn on_game_container_pick(app: &mut App, code: KeyCode) {
+    let Screen::GameContainerPick { game_dir, exe, containers, selected } = &mut app.screen else { return };
+    let len = containers.len();
+    match code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            let gd = game_dir.clone();
+            let exes = scan_exes(&gd);
+            app.screen = Screen::GameExePick { game_dir: gd, exes, selected: 0 };
+            app.needs_clear = true;
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            *selected = if *selected == 0 { len - 1 } else { *selected - 1 };
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            *selected = (*selected + 1) % len;
+        }
+        KeyCode::Enter | KeyCode::Char(' ') => {
+            let gd = game_dir.clone();
+            let exe = exe.clone();
+            let container = containers[*selected].clone();
+            let default_name = sanitize_game_name(
+                gd.file_name().and_then(|n| n.to_str()).unwrap_or("game"),
+            );
+            app.screen = Screen::GameNameInput {
+                game_dir: gd,
+                exe,
+                container,
+                value: default_name,
+            };
+            app.needs_clear = true;
+        }
+        _ => {}
+    }
+}
+
+fn on_game_name_input(app: &mut App, code: KeyCode) {
+    let Screen::GameNameInput { game_dir, exe, container, value } = &mut app.screen else { return };
+    match code {
+        KeyCode::Esc => {
+            let gd = game_dir.clone();
+            let exe = exe.clone();
+            let containers = wine_containers(&app.installed);
+            let cur = containers.iter().position(|c| c == container).unwrap_or(0);
+            app.screen = Screen::GameContainerPick {
+                game_dir: gd,
+                exe,
+                containers,
+                selected: cur,
+            };
+            app.needs_clear = true;
+        }
+        KeyCode::Enter => {
+            let name = value.trim().to_string();
+            if name.is_empty() { return; }
+            if app.installed.iter().any(|m| m.app.name == name) {
+                app.status = format!("'{name}' is already taken — pick a different name");
+                return;
+            }
+            let gd = game_dir.clone();
+            let exe = exe.clone();
+            let container = container.clone();
+            app.screen = Screen::GameConfirm {
+                game_dir: gd,
+                exe,
+                container,
+                app_name: name,
+                delete_source: false,
+                selected: 0,
+            };
+            app.needs_clear = true;
+        }
+        KeyCode::Backspace => { value.pop(); }
+        KeyCode::Char(c) => { value.push(c); }
+        _ => {}
+    }
+}
+
+fn on_game_confirm(app: &mut App, code: KeyCode) {
+    let Screen::GameConfirm { game_dir, exe, container, app_name, delete_source, selected } = &mut app.screen else { return };
+    match code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            app.screen = Screen::Main;
+            app.tab = Tab::Games;
+            app.needs_clear = true;
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            *selected = if *selected == 0 { 2 } else { *selected - 1 };
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            *selected = (*selected + 1) % 3;
+        }
+        KeyCode::Char(' ') if *selected == 1 => {
+            *delete_source = !*delete_source;
+        }
+        KeyCode::Enter => {
+            let s = *selected;
+            let gd = game_dir.clone();
+            let exe = exe.clone();
+            let container = container.clone();
+            let app_name = app_name.clone();
+            let delete = *delete_source;
+            match s {
+                0 => {
+                    let mut args = vec![
+                        "install-game".to_string(),
+                        gd.to_string_lossy().into_owned(),
+                        "--container".to_string(), container,
+                        "--exe".to_string(), exe,
+                        "--app-name".to_string(), app_name.clone(),
+                    ];
+                    if delete {
+                        args.push("--delete-source".into());
+                    }
+                    let total = dir_bytes(&gd.to_string_lossy());
+                    launch_op(app, format!("Import game — {app_name}"), args, total, true);
+                }
+                1 => { *delete_source = !*delete_source; }
+                _ => {
+                    app.screen = Screen::Main;
+                    app.tab = Tab::Games;
+                    app.needs_clear = true;
+                }
+            }
+        }
+        _ => {}
+    }
 }

@@ -42,6 +42,7 @@ fn write_app(root: &std::path::Path, name: &str, alias_of: Option<&str>) {
             alias_of:     alias_of.map(str::to_string),
             display_name: None,
             pkg_name:     None,
+            wine_game:    None,
         },
         packages: vec![PackageEntry {
             name:    name.to_string(),

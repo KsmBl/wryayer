@@ -55,18 +55,39 @@ pub fn run(app_name: &str, bin: Option<&str>, args: &[String]) -> Result<()> {
     }
     let config = read_config(app_name)?;
 
+    // Wine games override the normal binary lookup: they always launch
+    // /usr/bin/wine with the .exe path prepended to the user's args, and
+    // they need WINEPREFIX + chdir set on the bwrap command.
+    let wine_ctx: Option<WineCtx> = manifest.app.wine_game.as_ref().map(|wg| {
+        let chdir = std::path::Path::new(&wg.exe)
+            .parent()
+            .and_then(|p| p.to_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+        WineCtx {
+            exe: wg.exe.clone(),
+            prefix: wg.prefix.clone(),
+            chdir,
+        }
+    });
+
     // bin override: must be one of the app's registered launchers, otherwise
     // anyone could trick `wryayer run` into invoking arbitrary binaries.
-    let bin_name = match bin {
-        None => manifest.app.main_binary.clone(),
-        Some(b) => {
-            if !manifest.app.launchers.iter().any(|l| l == b) {
-                bail!(
-                    "binary '{b}' is not registered for {app_name} (launchers: {})",
-                    manifest.app.launchers.join(", ")
-                );
+    // Wine games skip this — they have a fixed entry point (wine).
+    let bin_name = if wine_ctx.is_some() {
+        "wine".to_string()
+    } else {
+        match bin {
+            None => manifest.app.main_binary.clone(),
+            Some(b) => {
+                if !manifest.app.launchers.iter().any(|l| l == b) {
+                    bail!(
+                        "binary '{b}' is not registered for {app_name} (launchers: {})",
+                        manifest.app.launchers.join(", ")
+                    );
+                }
+                b.to_string()
             }
-            b.to_string()
         }
     };
     const BIN_DIRS: &[&str] = &["usr/bin", "usr/sbin", "bin", "sbin"];
@@ -75,10 +96,19 @@ pub fn run(app_name: &str, bin: Option<&str>, args: &[String]) -> Result<()> {
         .find(|sub| app_root.join(sub).join(&bin_name).symlink_metadata().is_ok())
         .map(|sub| format!("/{sub}/{bin_name}"))
         .with_context(|| {
-            format!(
-                "binary '{bin_name}' not found in usr/bin, usr/sbin, bin, or sbin inside {}",
-                app_root.display()
-            )
+            if wine_ctx.is_some() {
+                format!(
+                    "wine binary not found in {} — install wine into the container first \
+                     (wryayer install wine --into {})",
+                    app_root.display(),
+                    manifest.app.alias_of.as_deref().unwrap_or(app_name),
+                )
+            } else {
+                format!(
+                    "binary '{bin_name}' not found in usr/bin, usr/sbin, bin, or sbin inside {}",
+                    app_root.display()
+                )
+            }
         })?;
     let app_root_str = app_root.to_string_lossy().into_owned();
 
@@ -90,7 +120,19 @@ pub fn run(app_name: &str, bin: Option<&str>, args: &[String]) -> Result<()> {
 
     let (temp, cleanup) = prepare_temp(&config, &app_root)?;
 
-    let status = launch_bwrap(&app_root_str, &binary, args, &temp, &config)?;
+    // For wine games, prepend the .exe path to the user-supplied args. The
+    // user-supplied args become trailing wine args (typically empty, but the
+    // /run subcommand accepts them).
+    let effective_args: Vec<String> = match &wine_ctx {
+        Some(w) => {
+            let mut v = vec![w.exe.clone()];
+            v.extend(args.iter().cloned());
+            v
+        }
+        None => args.to_vec(),
+    };
+
+    let status = launch_bwrap(&app_root_str, &binary, &effective_args, &temp, &config, wine_ctx.as_ref())?;
 
     // Post-launch: if bwrap exited abnormally, the app may have written a new
     // self-updated ELF binary (e.g. Discord bootstrapping app-X.Y.Z/Discord)
@@ -101,7 +143,7 @@ pub fn run(app_name: &str, bin: Option<&str>, args: &[String]) -> Result<()> {
 
     if let Some(cleanup_path) = cleanup {
         if repaired {
-            let _ = launch_bwrap(&app_root_str, &binary, args, &temp, &config);
+            let _ = launch_bwrap(&app_root_str, &binary, &effective_args, &temp, &config, wine_ctx.as_ref());
         }
         let _ = std::fs::remove_dir_all(&cleanup_path);
         std::process::exit(status.code().unwrap_or(1));
@@ -111,7 +153,7 @@ pub fn run(app_name: &str, bin: Option<&str>, args: &[String]) -> Result<()> {
         // process tree).
         // xvfb dropped here; Xvfb launched with -terminate exits automatically
         // when the sandboxed app (its last client) exits after exec().
-        let (mut cmd, _, _xvfb) = bwrap_cmd(&app_root_str, &binary, args, &temp, &config);
+        let (mut cmd, _, _xvfb) = bwrap_cmd(&app_root_str, &binary, &effective_args, &temp, &config, wine_ctx.as_ref());
         set_bwrap_env(&mut cmd);
         if let Some(mib) = config.ram_limit {
             if has_systemd_run() {
@@ -125,14 +167,24 @@ pub fn run(app_name: &str, bin: Option<&str>, args: &[String]) -> Result<()> {
     }
 }
 
+struct WineCtx {
+    /// Absolute path inside the sandbox to the .exe wine should launch.
+    exe: String,
+    /// Absolute path inside the sandbox where WINEPREFIX should be set.
+    prefix: String,
+    /// Optional --chdir target inside the sandbox (usually the .exe's dir).
+    chdir: Option<String>,
+}
+
 fn launch_bwrap(
     app_root_str: &str,
     binary: &str,
     args: &[String],
     temp: &TempBind,
     config: &AppConfig,
+    wine: Option<&WineCtx>,
 ) -> Result<ExitStatus> {
-    let (mut cmd, spoof_dir, mut xvfb) = bwrap_cmd(app_root_str, binary, args, temp, config);
+    let (mut cmd, spoof_dir, mut xvfb) = bwrap_cmd(app_root_str, binary, args, temp, config, wine);
     set_bwrap_env(&mut cmd);
     if let Some(mib) = config.ram_limit {
         if has_systemd_run() {
@@ -290,7 +342,7 @@ fn find_free_xdisplay() -> Option<u32> {
     None
 }
 
-fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, config: &AppConfig) -> (Command, Option<PathBuf>, Option<std::process::Child>) {
+fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, config: &AppConfig, wine: Option<&WineCtx>) -> (Command, Option<PathBuf>, Option<std::process::Child>) {
     // Terminal spoofing: exec bwrap through a symlink named after the detected
     // terminal. Linux sets task->comm from the exec basename, so fastfetch's
     // process-tree walk sees the terminal name instead of "bwrap".
@@ -655,6 +707,21 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
         // inherits that env and then cannot find the user bus socket under the
         // isolated path, causing "Failed to connect to user scope bus".
         cmd.args(["--setenv", "XDG_RUNTIME_DIR", &isolated_rt]);
+    }
+
+    // ── Wine game ─────────────────────────────────────────────────────────────
+    if let Some(w) = wine {
+        cmd.args(["--setenv", "WINEPREFIX", &w.prefix]);
+        // Quiet wine's default debug spam — games don't need it and it can
+        // flood the terminal at hundreds of MB/sec on some titles.
+        cmd.args(["--setenv", "WINEDEBUG", "-all"]);
+        // Chromium-style sandbox flags don't apply here; clear them so wine
+        // children inherit a clean env.
+        cmd.args(["--unsetenv", "QTWEBENGINE_CHROMIUM_FLAGS"]);
+        cmd.args(["--unsetenv", "ELECTRON_DISABLE_SANDBOX"]);
+        if let Some(ref chdir) = w.chdir {
+            cmd.args(["--chdir", chdir]);
+        }
     }
 
     cmd.args(["--", binary]);

@@ -329,6 +329,7 @@ pub fn run(
                     alias_of: Some(target_name_owned.clone()),
                     display_name: None,
                     pkg_name: if alias_name_owned != pkg_name { Some(pkg_name.to_string()) } else { None },
+                    wine_game: None,
                 },
                 packages: new_packages,
             };
@@ -356,6 +357,7 @@ pub fn run(
                     alias_of: None,
                     display_name: None,
                     pkg_name: if alias_name_owned != pkg_name { Some(pkg_name.to_string()) } else { None },
+                    wine_game: None,
                 },
                 packages: new_packages,
             };

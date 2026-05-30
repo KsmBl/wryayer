@@ -408,6 +408,38 @@ If an app crashes with a missing `.so` error, this command finds and installs th
 wryayer repair firefox
 ```
 
+### Import a Windows game (wine)
+
+wryayer can host Windows games inside a regular wine container. Each game
+becomes a thin alias whose manifest carries a `wine_game` block (the main
+`.exe` path and its `WINEPREFIX`); at launch time `wryayer run` invokes
+`/usr/bin/wine` inside the container's sandbox instead of a Linux binary.
+
+```fish
+# 1. Install wine into its own container (one-time)
+wryayer install wine
+
+# 2. Import a game folder (it gets copied into the container)
+wryayer install-game ~/Games/NFSU2 --container wine
+
+# Override the auto-detected main .exe
+wryayer install-game ~/Games/Skyrim --container wine --exe SkyrimSE.exe
+
+# Pick a different name; delete the source after a successful copy
+wryayer install-game ~/Games/NFSU2 --container wine --app-name nfsu2 --delete-source
+
+# Run it like any other app
+nfsu2
+# or
+wryayer run nfsu2
+```
+
+The game folder ends up at `~/.wryayer/<container>/games/<name>/`, and the
+per-game `WINEPREFIX` lives at `~/.wryayer/<container>/games/<name>/.wineprefix/`
+— Bottles-style, so install conflicts between games are impossible. The TUI's
+**Games** tab wraps the same flow in a 4-step wizard (folder picker →
+.exe picker → container picker → name + delete-source confirm).
+
 ### Interactive TUI
 
 ```fish
@@ -418,7 +450,7 @@ Key bindings:
 
 | Key | Action |
 |---|---|
-| `Tab` / `Shift+Tab` | Switch tabs (Installed / Install / Import / Space / **Settings**) |
+| `Tab` / `Shift+Tab` | Switch tabs (Installed / Install / Import / **Games** / Space / Settings) |
 | `↑` / `↓` or `j` / `k` | Navigate lists |
 | `r` | Run selected app |
 | `d` / `Delete` | Remove selected app (double-confirm) |

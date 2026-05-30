@@ -98,6 +98,27 @@ enum Commands {
         /// Path to the zip file created by `wryayer export`
         path: PathBuf,
     },
+    /// Import a Windows game folder into a wine container
+    InstallGame {
+        /// Path to the game folder on the host (will be copied into the container)
+        path: PathBuf,
+        /// Wine container to install into (must already contain a `wine` binary)
+        #[arg(long)]
+        container: String,
+        /// Relative path (inside the game folder) of the main .exe to launch.
+        /// If omitted, wryayer scores all .exe files and picks the most likely one.
+        #[arg(long)]
+        exe: Option<String>,
+        /// Override the app name under ~/.wryayer/ (default: sanitized folder name)
+        #[arg(long)]
+        app_name: Option<String>,
+        /// Delete the source folder after a successful copy
+        #[arg(long)]
+        delete_source: bool,
+        /// Skip the disk-space precheck (use if statvfs is unreliable)
+        #[arg(long)]
+        skip_size_check: bool,
+    },
     /// Create a hard-linked snapshot of an installed app (cheap, instant)
     Snapshot {
         /// The app name as shown by `wryayer list`
@@ -311,6 +332,16 @@ fn main() {
             commands::export::run(&app_name, output.as_ref())
         }
         Commands::Import { path } => commands::import::run(&path),
+        Commands::InstallGame { path, container, exe, app_name, delete_source, skip_size_check } => {
+            commands::install_game::run(
+                &path,
+                &container,
+                exe.as_deref(),
+                app_name.as_deref(),
+                delete_source,
+                skip_size_check,
+            )
+        }
         Commands::Snapshot { app_name } => commands::snapshot::create(&app_name).map(|_| ()),
         Commands::Rollback { app_name, snapshot } => {
             commands::snapshot::rollback(&app_name, snapshot.as_deref())

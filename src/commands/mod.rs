@@ -4,6 +4,7 @@ pub mod config;
 pub mod dedup;
 pub mod import;
 pub mod install;
+pub mod install_game;
 pub mod list;
 pub mod remove;
 pub mod repair;

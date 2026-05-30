@@ -141,6 +141,7 @@ fn reinstall(manifest: &crate::manifest::Manifest) -> Result<()> {
             alias_of: manifest.app.alias_of.clone(),
             display_name: manifest.app.display_name.clone(),
             pkg_name: manifest.app.pkg_name.clone(),
+            wine_game: manifest.app.wine_game.clone(),
         },
         packages,
     };

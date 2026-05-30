@@ -30,6 +30,7 @@ fn install_fake_app(root: &std::path::Path, app: &str) {
             alias_of:     None,
             display_name: None,
             pkg_name:     None,
+            wine_game:    None,
         },
         packages: vec![PackageEntry {
             name:    app.to_string(),

@@ -25,6 +25,7 @@ fn sample_manifest(name: &str) -> Manifest {
             alias_of:     None,
             display_name: None,
             pkg_name:     None,
+            wine_game:    None,
         },
         packages: vec![PackageEntry {
             name:    name.to_string(),
@@ -48,6 +49,35 @@ fn write_then_read_preserves_all_fields() {
         assert_eq!(loaded.app.launchers,        vec!["testapp"]);
         assert_eq!(loaded.packages[0].version,  "1.0-1");
         assert_eq!(loaded.packages[0].source,   PackageSource::Official);
+    });
+}
+
+#[test]
+fn write_then_read_preserves_wine_game_field() {
+    with_temp_home(|root| {
+        std::fs::create_dir_all(root.join(".wryayer/nfsu2")).unwrap();
+        let mut m = sample_manifest("nfsu2");
+        m.app.alias_of = Some("wine".into());
+        m.app.wine_game = Some(WineGame {
+            exe: "/games/nfsu2/Speed2.exe".into(),
+            prefix: "/games/nfsu2/.wineprefix".into(),
+        });
+        write_manifest("nfsu2", &m).unwrap();
+        let loaded = read_manifest("nfsu2").unwrap();
+        let wg = loaded.app.wine_game.expect("wine_game survives round-trip");
+        assert_eq!(wg.exe, "/games/nfsu2/Speed2.exe");
+        assert_eq!(wg.prefix, "/games/nfsu2/.wineprefix");
+        assert_eq!(loaded.app.alias_of.as_deref(), Some("wine"));
+    });
+}
+
+#[test]
+fn manifest_without_wine_game_omits_field_from_toml() {
+    with_temp_home(|root| {
+        std::fs::create_dir_all(root.join(".wryayer/plainapp")).unwrap();
+        write_manifest("plainapp", &sample_manifest("plainapp")).unwrap();
+        let toml = std::fs::read_to_string(manifest_path("plainapp").unwrap()).unwrap();
+        assert!(!toml.contains("wine_game"), "wine_game must not serialize when None");
     });
 }
 

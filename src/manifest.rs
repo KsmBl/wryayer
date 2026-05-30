@@ -30,6 +30,23 @@ pub struct AppMeta {
     /// bracket display ("appname [pkgname]").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pkg_name: Option<String>,
+    /// Set when this app is a Windows game imported into a wine container.
+    /// The `alias_of` field still points at the wine container (which owns
+    /// the wine binary and shared library tree); `wine_game` adds the
+    /// game-specific bits the launcher needs (.exe to launch, WINEPREFIX dir).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wine_game: Option<WineGame>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct WineGame {
+    /// Path inside the wine container's filesystem tree to the .exe to launch
+    /// (e.g. "/games/nfsu2/Speed2.exe"). Resolved by wine at runtime.
+    pub exe: String,
+    /// Path inside the wine container's filesystem tree where the per-game
+    /// WINEPREFIX lives (e.g. "/games/nfsu2/.wineprefix"). Created on first
+    /// launch by wine itself.
+    pub prefix: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
