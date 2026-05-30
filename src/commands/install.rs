@@ -332,6 +332,18 @@ pub fn run(
                 packages: new_packages,
             };
             write_manifest(&alias_name_owned, &alias_manifest)?;
+
+            // Seed the new alias's config.ini from the container root so it
+            // inherits shared_dirs, spoofs, network/device toggles, etc.
+            // Only when the target already has an explicit config.ini —
+            // otherwise both fall back to global defaults at runtime anyway.
+            if let Ok(target_cfg_path) = crate::config::config_path(&target_name_owned) {
+                if target_cfg_path.exists() {
+                    if let Ok(target_cfg) = crate::config::read_config(&target_name_owned) {
+                        let _ = crate::config::write_config(&alias_name_owned, &target_cfg);
+                    }
+                }
+            }
         } else {
             // Fresh install: single manifest at alias_name (= target_name).
             let manifest = Manifest {

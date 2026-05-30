@@ -1,4 +1,4 @@
-use crate::manifest::{app_dir, wryayer_root};
+use crate::manifest::{app_dir, list_all_apps, wryayer_root};
 use anyhow::{bail, Context, Result};
 use std::fs;
 use std::path::PathBuf;
@@ -131,7 +131,59 @@ pub fn read_config(app_name: &str) -> Result<AppConfig> {
 pub fn write_config(app_name: &str, config: &AppConfig) -> Result<()> {
     let path = config_path(app_name)?;
     fs::write(&path, format_ini(config))
-        .with_context(|| format!("failed to write {}", path.display()))
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    sync_container_aliases(app_name, config)?;
+    Ok(())
+}
+
+/// If `root_name` is a container root (an installed app with one or more
+/// aliases pointing at it), copy the container-shared subset of `root_config`
+/// into each alias's config.ini.
+///
+/// Container-shared = everything in AppConfig except per-install behavior
+/// flags (currently just `create_shortcut`, which is only used at install
+/// time from the global config anyway). Per-alias config files are preserved
+/// for any non-shared fields.
+///
+/// Silently no-ops if `root_name` is itself an alias, has no aliases, or the
+/// manifest list can't be read — there's nothing to propagate in those cases.
+fn sync_container_aliases(root_name: &str, root_config: &AppConfig) -> Result<()> {
+    let manifests = match list_all_apps() {
+        Ok(m) => m,
+        Err(_) => return Ok(()),
+    };
+    let is_root = manifests
+        .iter()
+        .any(|m| m.app.name == root_name && m.app.alias_of.is_none());
+    if !is_root {
+        return Ok(());
+    }
+    for m in &manifests {
+        if m.app.alias_of.as_deref() != Some(root_name) {
+            continue;
+        }
+        let alias = &m.app.name;
+        let mut alias_cfg = read_config(alias).unwrap_or_default();
+        alias_cfg.temp_mode        = root_config.temp_mode.clone();
+        alias_cfg.temp_delete      = root_config.temp_delete.clone();
+        alias_cfg.network          = root_config.network;
+        alias_cfg.camera           = root_config.camera;
+        alias_cfg.microphone       = root_config.microphone;
+        alias_cfg.audio            = root_config.audio;
+        alias_cfg.shared_dirs      = root_config.shared_dirs.clone();
+        alias_cfg.spoof_hostname   = root_config.spoof_hostname.clone();
+        alias_cfg.spoof_username   = root_config.spoof_username.clone();
+        alias_cfg.spoof_machine_id = root_config.spoof_machine_id.clone();
+        alias_cfg.spoof_cpuinfo    = root_config.spoof_cpuinfo.clone();
+        alias_cfg.spoof_os         = root_config.spoof_os.clone();
+        alias_cfg.spoof_terminal   = root_config.spoof_terminal;
+        alias_cfg.ram_limit        = root_config.ram_limit;
+        alias_cfg.spoof_resolution = root_config.spoof_resolution.clone();
+        let alias_path = config_path(alias)?;
+        fs::write(&alias_path, format_ini(&alias_cfg))
+            .with_context(|| format!("failed to write {}", alias_path.display()))?;
+    }
+    Ok(())
 }
 
 pub fn parse_ini(content: &str) -> Result<AppConfig> {
