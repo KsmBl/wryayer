@@ -162,6 +162,9 @@ wryayer auto-detects your distro from `/etc/os-release` and uses the appropriate
 | `vercmp` | Bundled with `pacman` | Version comparison |
 | `ldconfig` | Bundled with `glibc` | Library cache rebuild after install |
 | `glib-compile-schemas` | `sudo pacman -S glib2` | Optional — GLib apps only |
+| `update-mime-database` | `sudo pacman -S shared-mime-info` | Optional — needed for GTK MIME detection (color pickers, etc.) |
+| `gtk-update-icon-cache` | `sudo pacman -S gtk-update-icon-cache` | Optional — needed for icon themes (Adwaita, hicolor) |
+| `gdk-pixbuf-query-loaders` | `sudo pacman -S gdk-pixbuf2` | Optional — pixbuf loader cache |
 | `xorg-server-xvfb` | `sudo pacman -S xorg-server-xvfb` | Optional — required for browser screen resolution spoofing |
 
 ### Debian / Ubuntu

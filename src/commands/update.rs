@@ -2,7 +2,7 @@ use crate::manifest::{
     app_dir, list_all_apps, now_rfc3339, read_manifest, write_manifest, AppMeta, Manifest,
     PackageEntry, PackageSource,
 };
-use crate::commands::install::{ensure_base_layout, ensure_owner_readable, run_ldconfig};
+use crate::commands::install::{ensure_base_layout, ensure_owner_readable, regenerate_runtime_caches, run_ldconfig};
 use crate::package::{
     build_aur, download_official, extract_package, resolve_full_dep_tree,
     satisfy_missing_sonames,
@@ -164,6 +164,7 @@ fn reinstall(manifest: &crate::manifest::Manifest) -> Result<()> {
 
     eprintln!("Building library cache...");
     run_ldconfig(&app_dir);
+    regenerate_runtime_caches(&app_dir);
 
     eprintln!("Updated '{app_name}'.");
     Ok(())

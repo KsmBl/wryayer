@@ -1,4 +1,4 @@
-use crate::commands::install::{ensure_base_layout, ensure_owner_readable, run_ldconfig};
+use crate::commands::install::{ensure_base_layout, ensure_owner_readable, regenerate_runtime_caches, run_ldconfig};
 use crate::manifest::{app_dir, read_manifest};
 use crate::package::{find_missing_sonames, satisfy_missing_sonames};
 use anyhow::{Context, Result};
@@ -41,6 +41,8 @@ pub fn run(app_name: &str) -> Result<()> {
         eprintln!("Rebuilding library cache...");
         run_ldconfig(&app_dir);
     }
+
+    regenerate_runtime_caches(&app_dir);
 
     Ok(())
 }

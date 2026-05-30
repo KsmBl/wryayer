@@ -177,6 +177,7 @@ pub fn run(
                 .arg(&schemas_dir)
                 .status();
         }
+        regenerate_runtime_caches(&target_dir);
 
         eprintln!("Checking for missing shared library dependencies...");
         match satisfy_missing_sonames(&target_dir, &cache_dir) {
@@ -511,6 +512,53 @@ pub fn run_ldconfig(app_dir: &Path) {
         Ok(s) if !s.success() => eprintln!("  warning: ldconfig exited with {s}"),
         Err(_) => eprintln!("  warning: ldconfig not found, skipping cache build"),
         _ => {}
+    }
+}
+
+/// Regenerate the per-sandbox runtime caches that pacman normally builds via
+/// post-install hooks. Without these, GTK apps fail to detect MIME types, can't
+/// load icon themes, and can't render Adwaita SVG assets — which is enough to
+/// crash dialogs like Firefox's color picker even though the source files are
+/// all present in the sandbox tree.
+pub fn regenerate_runtime_caches(app_dir: &Path) {
+    // Shared MIME database — needed by gdk-pixbuf to detect SVG, by file
+    // managers to pick handlers, etc. Source XMLs are present; the .cache is not.
+    let mime_dir = app_dir.join("usr/share/mime");
+    if mime_dir.join("packages").is_dir() {
+        let _ = std::process::Command::new("update-mime-database")
+            .env("PKGSYSTEM_ENABLE_FSYNC", "0")
+            .arg(&mime_dir)
+            .status();
+    }
+
+    // Icon theme caches — one per theme dir that ships an index.theme.
+    let icons_root = app_dir.join("usr/share/icons");
+    if let Ok(entries) = std::fs::read_dir(&icons_root) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() && p.join("index.theme").exists() {
+                let _ = std::process::Command::new("gtk-update-icon-cache")
+                    .args(["-q", "-t", "-f"])
+                    .arg(&p)
+                    .status();
+            }
+        }
+    }
+
+    // gdk-pixbuf loader cache. Only relevant when external loader .so files
+    // exist in the sandbox; the cache must list in-sandbox paths (without the
+    // wryayer prefix) since the file is read from inside bwrap.
+    let loaders_dir = app_dir.join("usr/lib/gdk-pixbuf-2.0/2.10.0/loaders");
+    if loaders_dir.is_dir() {
+        if let Ok(out) = std::process::Command::new("gdk-pixbuf-query-loaders")
+            .env("GDK_PIXBUF_MODULEDIR", &loaders_dir)
+            .output()
+        {
+            let prefix = app_dir.to_string_lossy().into_owned();
+            let cache = String::from_utf8_lossy(&out.stdout).replace(&prefix, "");
+            let cache_path = app_dir.join("usr/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache");
+            let _ = std::fs::write(&cache_path, cache);
+        }
     }
 }
 
