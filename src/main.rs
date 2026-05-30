@@ -98,18 +98,17 @@ enum Commands {
         /// Path to the zip file created by `wryayer export`
         path: PathBuf,
     },
-    /// Import a Windows game folder into a wine container
+    /// Import a Windows game folder as a self-contained wine container.
+    /// Each game gets its own ~/.wryayer/<name>/ with a fresh wine install
+    /// and its own WINEPREFIX, so games can't interfere with each other.
     InstallGame {
         /// Path to the game folder on the host (will be copied into the container)
         path: PathBuf,
-        /// Wine container to install into (must already contain a `wine` binary)
-        #[arg(long)]
-        container: String,
         /// Relative path (inside the game folder) of the main .exe to launch.
         /// If omitted, wryayer scores all .exe files and picks the most likely one.
         #[arg(long)]
         exe: Option<String>,
-        /// Override the app name under ~/.wryayer/ (default: sanitized folder name)
+        /// Override the container name (default: sanitized folder name)
         #[arg(long)]
         app_name: Option<String>,
         /// Delete the source folder after a successful copy
@@ -332,10 +331,9 @@ fn main() {
             commands::export::run(&app_name, output.as_ref())
         }
         Commands::Import { path } => commands::import::run(&path),
-        Commands::InstallGame { path, container, exe, app_name, delete_source, skip_size_check } => {
+        Commands::InstallGame { path, exe, app_name, delete_source, skip_size_check } => {
             commands::install_game::run(
                 &path,
-                &container,
                 exe.as_deref(),
                 app_name.as_deref(),
                 delete_source,

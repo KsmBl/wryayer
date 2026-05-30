@@ -92,28 +92,19 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             let selected = *selected;
             draw_game_exe_pick(f, area, &game_dir, &exes, selected);
         }
-        Screen::GameContainerPick { game_dir, exe, containers, selected } => {
+        Screen::GameNameInput { game_dir, exe, value } => {
             let game_dir = game_dir.to_string_lossy().into_owned();
             let exe = exe.clone();
-            let containers = containers.clone();
-            let selected = *selected;
-            draw_game_container_pick(f, area, &game_dir, &exe, &containers, selected);
-        }
-        Screen::GameNameInput { game_dir, exe, container, value } => {
-            let game_dir = game_dir.to_string_lossy().into_owned();
-            let exe = exe.clone();
-            let container = container.clone();
             let value = value.clone();
-            draw_game_name_input(f, area, &game_dir, &exe, &container, &value);
+            draw_game_name_input(f, area, &game_dir, &exe, &value);
         }
-        Screen::GameConfirm { game_dir, exe, container, app_name, delete_source, selected } => {
+        Screen::GameConfirm { game_dir, exe, app_name, delete_source, selected } => {
             let game_dir = game_dir.to_string_lossy().into_owned();
             let exe = exe.clone();
-            let container = container.clone();
             let app_name = app_name.clone();
             let delete_source = *delete_source;
             let selected = *selected;
-            draw_game_confirm(f, area, &game_dir, &exe, &container, &app_name, delete_source, selected);
+            draw_game_confirm(f, area, &game_dir, &exe, &app_name, delete_source, selected);
         }
         Screen::InstallTarget { pkg, targets, selected } => {
             let pkg = pkg.clone();
@@ -2238,7 +2229,6 @@ fn draw_games(f: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let containers = super::wine_containers(&app.installed);
     let games: Vec<&crate::manifest::Manifest> = app.installed
         .iter()
         .filter(|m| m.app.wine_game.is_some())
@@ -2256,29 +2246,15 @@ fn draw_games(f: &mut Frame, app: &App, area: Rect) {
         .split(inner);
 
     f.render_widget(
-        Paragraph::new("  Drop in a Windows game folder and wryayer will copy it into a wine container,")
+        Paragraph::new("  Each game becomes its own ~/.wryayer/<name>/ container with a fresh wine install")
             .style(Style::default().fg(C_DIM)),
         chunks[0],
     );
     f.render_widget(
-        Paragraph::new("  pick the main .exe, and wire up a launcher so you can play it like any other app.")
+        Paragraph::new("  and its own WINEPREFIX, so games can't interfere with each other.")
             .style(Style::default().fg(C_DIM)),
         chunks[1],
     );
-
-    let containers_line = if containers.is_empty() {
-        Line::from(vec![
-            Span::styled("  Wine containers: ", Style::default().fg(C_DIM)),
-            Span::styled("none — install wine first ", Style::default().fg(C_RED)),
-            Span::styled("(wryayer install wine)", Style::default().fg(C_DIM)),
-        ])
-    } else {
-        Line::from(vec![
-            Span::styled("  Wine containers: ", Style::default().fg(C_DIM)),
-            Span::styled(containers.join(", "), Style::default().fg(C_GREEN)),
-        ])
-    };
-    f.render_widget(Paragraph::new(containers_line), chunks[2]);
 
     if games.is_empty() {
         f.render_widget(
@@ -2290,12 +2266,10 @@ fn draw_games(f: &mut Frame, app: &App, area: Rect) {
         );
     } else {
         let items: Vec<ListItem> = games.iter().map(|m| {
-            let container = m.app.alias_of.as_deref().unwrap_or("?");
             let exe = m.app.wine_game.as_ref().map(|w| w.exe.as_str()).unwrap_or("?");
             ListItem::new(Line::from(vec![
                 Span::styled("  🎮 ", Style::default().fg(C_YELLOW)),
                 Span::styled(&m.app.name, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-                Span::styled(format!("  → {container}"), Style::default().fg(C_DIM)),
                 Span::styled(format!("   {exe}"), Style::default().fg(C_ACCENT)),
             ]))
         }).collect();
@@ -2307,14 +2281,11 @@ fn draw_games(f: &mut Frame, app: &App, area: Rect) {
         f.render_widget(list, chunks[3]);
     }
 
-    let action_label = if containers.is_empty() {
-        "  Install wine first:  wryayer install wine"
-    } else {
-        "  [i] / [Enter]  Import a game folder"
-    };
-    let action_color = if containers.is_empty() { C_YELLOW } else { C_ACCENT };
     f.render_widget(
-        Paragraph::new(Span::styled(action_label, Style::default().fg(action_color))),
+        Paragraph::new(Span::styled(
+            "  [i] / [Enter]  Import a game folder",
+            Style::default().fg(C_ACCENT),
+        )),
         chunks[4],
     );
 }
@@ -2326,7 +2297,7 @@ fn draw_game_exe_pick(f: &mut Frame, area: Rect, game_dir: &str, exes: &[(String
     f.render_widget(Clear, popup);
 
     let block = Block::default().borders(Borders::ALL)
-        .title(" 1/4 — Pick main .exe ")
+        .title(" 1/3 — Pick main .exe ")
         .title_style(Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD))
         .border_style(Style::default().fg(C_ACCENT));
     let inner = block.inner(popup);
@@ -2370,65 +2341,12 @@ fn draw_game_exe_pick(f: &mut Frame, area: Rect, game_dir: &str, exes: &[(String
     );
 }
 
-fn draw_game_container_pick(f: &mut Frame, area: Rect, game_dir: &str, exe: &str, containers: &[String], selected: usize) {
-    let popup = centered_rect(60, 60, area);
-    f.render_widget(Clear, popup);
-
-    let block = Block::default().borders(Borders::ALL)
-        .title(" 2/4 — Pick wine container ")
-        .title_style(Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD))
-        .border_style(Style::default().fg(C_ACCENT));
-    let inner = block.inner(popup);
-    f.render_widget(block, popup);
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(0), Constraint::Length(1)])
-        .split(inner);
-
-    f.render_widget(
-        Paragraph::new(vec![
-            Line::from(vec![
-                Span::styled("  Folder: ", Style::default().fg(C_DIM)),
-                Span::styled(game_dir, Style::default().fg(Color::White)),
-            ]),
-            Line::from(vec![
-                Span::styled("  Exe:    ", Style::default().fg(C_DIM)),
-                Span::styled(exe, Style::default().fg(C_ACCENT)),
-            ]),
-        ]),
-        chunks[0],
-    );
-
-    let items: Vec<ListItem> = containers.iter().map(|c| {
-        ListItem::new(Line::from(vec![
-            Span::styled("  🍷 ", Style::default().fg(C_YELLOW)),
-            Span::styled(c.as_str(), Style::default().fg(Color::White)),
-        ]))
-    }).collect();
-
-    let mut list_state = ListState::default();
-    list_state.select(Some(selected));
-    let list = List::new(items)
-        .highlight_style(Style::default().bg(C_SELECT).fg(Color::White).add_modifier(Modifier::BOLD))
-        .highlight_symbol("▶ ");
-    f.render_stateful_widget(list, chunks[1], &mut list_state);
-
-    f.render_widget(
-        Paragraph::new(Span::styled(
-            " [↑↓/jk] Navigate  [Enter] Select  [Esc] Back",
-            Style::default().fg(C_DIM),
-        )),
-        chunks[2],
-    );
-}
-
-fn draw_game_name_input(f: &mut Frame, area: Rect, game_dir: &str, exe: &str, container: &str, value: &str) {
+fn draw_game_name_input(f: &mut Frame, area: Rect, game_dir: &str, exe: &str, value: &str) {
     let popup = centered_rect(60, 40, area);
     f.render_widget(Clear, popup);
 
     let block = Block::default().borders(Borders::ALL)
-        .title(" 3/4 — App name ")
+        .title(" 2/3 — Container name ")
         .title_style(Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD))
         .border_style(Style::default().fg(C_ACCENT));
     let inner = block.inner(popup);
@@ -2436,22 +2354,18 @@ fn draw_game_name_input(f: &mut Frame, area: Rect, game_dir: &str, exe: &str, co
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(4), Constraint::Length(3), Constraint::Min(0), Constraint::Length(1)])
+        .constraints([Constraint::Length(3), Constraint::Length(3), Constraint::Min(0), Constraint::Length(1)])
         .split(inner);
 
     f.render_widget(
         Paragraph::new(vec![
             Line::from(vec![
-                Span::styled("  Folder:    ", Style::default().fg(C_DIM)),
+                Span::styled("  Folder:  ", Style::default().fg(C_DIM)),
                 Span::styled(game_dir, Style::default().fg(Color::White)),
             ]),
             Line::from(vec![
-                Span::styled("  Exe:       ", Style::default().fg(C_DIM)),
+                Span::styled("  Exe:     ", Style::default().fg(C_DIM)),
                 Span::styled(exe, Style::default().fg(C_ACCENT)),
-            ]),
-            Line::from(vec![
-                Span::styled("  Container: ", Style::default().fg(C_DIM)),
-                Span::styled(container, Style::default().fg(C_GREEN)),
             ]),
         ]),
         chunks[0],
@@ -2460,7 +2374,7 @@ fn draw_game_name_input(f: &mut Frame, area: Rect, game_dir: &str, exe: &str, co
     f.render_widget(
         Paragraph::new(format!(" {value}█"))
             .block(Block::default().borders(Borders::ALL)
-                .title(" Name (used for ~/bin/<name> and app folder) ")
+                .title(" Name (~/.wryayer/<name>/ and ~/bin/<name>) ")
                 .title_style(Style::default().fg(Color::White))
                 .border_style(Style::default().fg(C_ACCENT)))
             .style(Style::default().fg(Color::White)),
@@ -2489,7 +2403,6 @@ fn draw_game_confirm(
     area: Rect,
     game_dir: &str,
     exe: &str,
-    container: &str,
     app_name: &str,
     delete_source: bool,
     selected: usize,
@@ -2498,7 +2411,7 @@ fn draw_game_confirm(
     f.render_widget(Clear, popup);
 
     let block = Block::default().borders(Borders::ALL)
-        .title(" 4/4 — Confirm import ")
+        .title(" 3/3 — Confirm import ")
         .title_style(Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD))
         .border_style(Style::default().fg(C_ACCENT));
     let inner = block.inner(popup);
@@ -2512,25 +2425,25 @@ fn draw_game_confirm(
     f.render_widget(
         Paragraph::new(vec![
             Line::from(vec![
-                Span::styled("  Name:      ", Style::default().fg(C_DIM)),
+                Span::styled("  Name:    ", Style::default().fg(C_DIM)),
                 Span::styled(app_name, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
             ]),
             Line::from(vec![
-                Span::styled("  Container: ", Style::default().fg(C_DIM)),
-                Span::styled(container, Style::default().fg(C_GREEN)),
-            ]),
-            Line::from(vec![
-                Span::styled("  Exe:       ", Style::default().fg(C_DIM)),
+                Span::styled("  Exe:     ", Style::default().fg(C_DIM)),
                 Span::styled(exe, Style::default().fg(C_ACCENT)),
             ]),
             Line::from(vec![
-                Span::styled("  Source:    ", Style::default().fg(C_DIM)),
+                Span::styled("  Source:  ", Style::default().fg(C_DIM)),
                 Span::styled(game_dir, Style::default().fg(Color::White)),
             ]),
             Line::raw(""),
             Line::from(vec![
-                Span::styled("  Dest:      ", Style::default().fg(C_DIM)),
-                Span::styled(format!("~/.wryayer/{container}/games/{app_name}/"), Style::default().fg(Color::White)),
+                Span::styled("  Dest:    ", Style::default().fg(C_DIM)),
+                Span::styled(format!("~/.wryayer/{app_name}/games/{app_name}/"), Style::default().fg(Color::White)),
+            ]),
+            Line::from(vec![
+                Span::styled("  Wine:    ", Style::default().fg(C_DIM)),
+                Span::styled("installed fresh into the container", Style::default().fg(C_GREEN)),
             ]),
         ]),
         chunks[0],

@@ -410,23 +410,21 @@ wryayer repair firefox
 
 ### Import a Windows game (wine)
 
-wryayer can host Windows games inside a regular wine container. Each game
-becomes a thin alias whose manifest carries a `wine_game` block (the main
-`.exe` path and its `WINEPREFIX`); at launch time `wryayer run` invokes
-`/usr/bin/wine` inside the container's sandbox instead of a Linux binary.
+Each game becomes its own self-contained container at `~/.wryayer/<name>/` with
+a fresh wine install and its own `WINEPREFIX`. Games can't interfere with each
+other, removing one is a single `rm -rf`, and the cross-app dedup pass that
+runs at the end of every import hard-links identical wine files between
+containers so disk usage stays in check.
 
 ```fish
-# 1. Install wine into its own container (one-time)
-wryayer install wine
-
-# 2. Import a game folder (it gets copied into the container)
-wryayer install-game ~/Games/NFSU2 --container wine
+# Import a game folder (wine is installed fresh into the new container)
+wryayer install-game ~/Games/NFSU2
 
 # Override the auto-detected main .exe
-wryayer install-game ~/Games/Skyrim --container wine --exe SkyrimSE.exe
+wryayer install-game ~/Games/Skyrim --exe SkyrimSE.exe
 
 # Pick a different name; delete the source after a successful copy
-wryayer install-game ~/Games/NFSU2 --container wine --app-name nfsu2 --delete-source
+wryayer install-game ~/Games/NFSU2 --app-name nfsu2 --delete-source
 
 # Run it like any other app
 nfsu2
@@ -434,11 +432,12 @@ nfsu2
 wryayer run nfsu2
 ```
 
-The game folder ends up at `~/.wryayer/<container>/games/<name>/`, and the
-per-game `WINEPREFIX` lives at `~/.wryayer/<container>/games/<name>/.wineprefix/`
-— Bottles-style, so install conflicts between games are impossible. The TUI's
-**Games** tab wraps the same flow in a 4-step wizard (folder picker →
-.exe picker → container picker → name + delete-source confirm).
+The game folder lands at `~/.wryayer/<name>/games/<name>/` and the
+`WINEPREFIX` at `~/.wryayer/<name>/games/<name>/.wineprefix/`. The container's
+manifest tracks wine and its deps as regular `[[packages]]` plus a `wine_game`
+block that tells `wryayer run` to launch `wine <exe>` instead of a Linux
+binary. The TUI's **Games** tab wraps the same flow in a 3-step wizard
+(folder picker → .exe picker → name + delete-source confirm).
 
 ### Interactive TUI
 

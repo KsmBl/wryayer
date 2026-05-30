@@ -94,25 +94,17 @@ pub enum Screen {
         exes: Vec<(String, u64)>,
         selected: usize,
     },
-    /// Wine-game wizard: pick the wine container (must contain a wine binary).
-    GameContainerPick {
-        game_dir: PathBuf,
-        exe: String,
-        containers: Vec<String>,
-        selected: usize,
-    },
     /// Wine-game wizard: type an app name (defaults to sanitized folder name).
+    /// The name doubles as the container directory under ~/.wryayer/.
     GameNameInput {
         game_dir: PathBuf,
         exe: String,
-        container: String,
         value: String,
     },
     /// Wine-game wizard: confirm install + ask whether to delete the source folder.
     GameConfirm {
         game_dir: PathBuf,
         exe: String,
-        container: String,
         app_name: String,
         delete_source: bool,
         selected: usize, // 0 = install, 1 = toggle delete, 2 = cancel
@@ -666,9 +658,8 @@ fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
         Screen::OutdatedPackages { .. } => 17,
         Screen::AskShortcut { .. } => 18,
         Screen::GameExePick { .. } => 19,
-        Screen::GameContainerPick { .. } => 20,
-        Screen::GameNameInput { .. } => 21,
-        Screen::GameConfirm { .. } => 22,
+        Screen::GameNameInput { .. } => 20,
+        Screen::GameConfirm { .. } => 21,
     };
 
     match tag {
@@ -692,9 +683,8 @@ fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
         17 => on_outdated_packages(app, code),
         18 => on_ask_shortcut(app, code),
         19 => on_game_exe_pick(app, code),
-        20 => on_game_container_pick(app, code),
-        21 => on_game_name_input(app, code),
-        22 => on_game_confirm(app, code),
+        20 => on_game_name_input(app, code),
+        21 => on_game_confirm(app, code),
         _ => {}
     }
     Ok(())
@@ -2657,26 +2647,6 @@ fn on_games(app: &mut App, code: KeyCode) {
     }
 }
 
-/// Apps whose tree contains a wine binary; eligible as game containers.
-pub fn wine_containers(apps: &[Manifest]) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    let Ok(home) = std::env::var("HOME") else { return out };
-    let root = std::path::Path::new(&home).join(".wryayer");
-    for m in apps {
-        if m.app.alias_of.is_some() {
-            continue;
-        }
-        let dir = root.join(&m.app.name);
-        if ["usr/bin/wine", "bin/wine"]
-            .iter()
-            .any(|sub| dir.join(sub).symlink_metadata().is_ok())
-        {
-            out.push(m.app.name.clone());
-        }
-    }
-    out
-}
-
 /// Walk the picked folder for .exe files, return Vec<(relative_path, size_bytes)>.
 fn scan_exes(root: &std::path::Path) -> Vec<(String, u64)> {
     let mut out: Vec<(String, u64)> = Vec::new();
@@ -2749,53 +2719,12 @@ fn on_game_exe_pick(app: &mut App, code: KeyCode) {
         KeyCode::Enter | KeyCode::Char(' ') => {
             let gd = game_dir.clone();
             let exe = exes[*selected].0.clone();
-            let containers = wine_containers(&app.installed);
-            if containers.is_empty() {
-                app.status = "No wine container found. Run 'wryayer install wine' first.".into();
-                app.screen = Screen::Main;
-                app.tab = Tab::Games;
-                app.needs_clear = true;
-                return;
-            }
-            app.screen = Screen::GameContainerPick {
-                game_dir: gd,
-                exe,
-                containers,
-                selected: 0,
-            };
-            app.needs_clear = true;
-        }
-        _ => {}
-    }
-}
-
-fn on_game_container_pick(app: &mut App, code: KeyCode) {
-    let Screen::GameContainerPick { game_dir, exe, containers, selected } = &mut app.screen else { return };
-    let len = containers.len();
-    match code {
-        KeyCode::Esc | KeyCode::Char('q') => {
-            let gd = game_dir.clone();
-            let exes = scan_exes(&gd);
-            app.screen = Screen::GameExePick { game_dir: gd, exes, selected: 0 };
-            app.needs_clear = true;
-        }
-        KeyCode::Up | KeyCode::Char('k') => {
-            *selected = if *selected == 0 { len - 1 } else { *selected - 1 };
-        }
-        KeyCode::Down | KeyCode::Char('j') => {
-            *selected = (*selected + 1) % len;
-        }
-        KeyCode::Enter | KeyCode::Char(' ') => {
-            let gd = game_dir.clone();
-            let exe = exe.clone();
-            let container = containers[*selected].clone();
             let default_name = sanitize_game_name(
                 gd.file_name().and_then(|n| n.to_str()).unwrap_or("game"),
             );
             app.screen = Screen::GameNameInput {
                 game_dir: gd,
                 exe,
-                container,
                 value: default_name,
             };
             app.needs_clear = true;
@@ -2805,19 +2734,12 @@ fn on_game_container_pick(app: &mut App, code: KeyCode) {
 }
 
 fn on_game_name_input(app: &mut App, code: KeyCode) {
-    let Screen::GameNameInput { game_dir, exe, container, value } = &mut app.screen else { return };
+    let Screen::GameNameInput { game_dir, exe, value } = &mut app.screen else { return };
     match code {
         KeyCode::Esc => {
             let gd = game_dir.clone();
-            let exe = exe.clone();
-            let containers = wine_containers(&app.installed);
-            let cur = containers.iter().position(|c| c == container).unwrap_or(0);
-            app.screen = Screen::GameContainerPick {
-                game_dir: gd,
-                exe,
-                containers,
-                selected: cur,
-            };
+            let exes = scan_exes(&gd);
+            app.screen = Screen::GameExePick { game_dir: gd, exes, selected: 0 };
             app.needs_clear = true;
         }
         KeyCode::Enter => {
@@ -2829,11 +2751,9 @@ fn on_game_name_input(app: &mut App, code: KeyCode) {
             }
             let gd = game_dir.clone();
             let exe = exe.clone();
-            let container = container.clone();
             app.screen = Screen::GameConfirm {
                 game_dir: gd,
                 exe,
-                container,
                 app_name: name,
                 delete_source: false,
                 selected: 0,
@@ -2847,7 +2767,7 @@ fn on_game_name_input(app: &mut App, code: KeyCode) {
 }
 
 fn on_game_confirm(app: &mut App, code: KeyCode) {
-    let Screen::GameConfirm { game_dir, exe, container, app_name, delete_source, selected } = &mut app.screen else { return };
+    let Screen::GameConfirm { game_dir, exe, app_name, delete_source, selected } = &mut app.screen else { return };
     match code {
         KeyCode::Esc | KeyCode::Char('q') => {
             app.screen = Screen::Main;
@@ -2867,7 +2787,6 @@ fn on_game_confirm(app: &mut App, code: KeyCode) {
             let s = *selected;
             let gd = game_dir.clone();
             let exe = exe.clone();
-            let container = container.clone();
             let app_name = app_name.clone();
             let delete = *delete_source;
             match s {
@@ -2875,7 +2794,6 @@ fn on_game_confirm(app: &mut App, code: KeyCode) {
                     let mut args = vec![
                         "install-game".to_string(),
                         gd.to_string_lossy().into_owned(),
-                        "--container".to_string(), container,
                         "--exe".to_string(), exe,
                         "--app-name".to_string(), app_name.clone(),
                     ];
