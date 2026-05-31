@@ -10,8 +10,8 @@ use crate::commands::dedup::format_bytes;
 use crate::config::{AppConfig, LocalDelete, TempMode};
 
 use super::{
-    App, GameSettingsField, Screen, Tab, CFG_SAVE, CFG_SHARES, APP_CFG_SAVE,
-    setting_description, setting_options, setting_current, setting_title,
+    App, Screen, Tab, CFG_SAVE, CFG_SHARES, CFG_GAME_EXE, CFG_GAME_PREFIX,
+    app_cfg_save_idx, setting_description, setting_options, setting_current, setting_title,
     HOSTNAME_SAMPLE, MACHINE_ID_SAMPLE, USERNAME_SAMPLE,
 };
 
@@ -68,7 +68,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             let app_name = app_name.clone();
             let config = config.clone();
             let selected = *selected;
-            draw_config(f, area, &app_name, &config, selected);
+            let wine_game = app.editing_wine_game.clone();
+            draw_config(f, area, &app_name, &config, selected, wine_game.as_ref());
         }
         Screen::SharedDirs { app_name, dirs, selected } => {
             let app_name = app_name.clone();
@@ -106,27 +107,6 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             let selected = *selected;
             draw_game_confirm(f, area, &game_dir, &exe, &app_name, delete_source, selected);
         }
-        Screen::GameSettings { app_name, exe, prefix, selected } => {
-            let app_name = app_name.clone();
-            let exe = exe.clone();
-            let prefix = prefix.clone();
-            let selected = *selected;
-            draw_game_settings(f, area, &app_name, &exe, &prefix, selected);
-        }
-        Screen::GameSettingsInput { app_name, exe, prefix, field, value } => {
-            let app_name = app_name.clone();
-            let exe = exe.clone();
-            let prefix = prefix.clone();
-            let field = *field;
-            let value = value.clone();
-            // Draw the GameSettings popup behind the input as visual context.
-            let back_sel = match field {
-                super::GameSettingsField::Exe => 0,
-                super::GameSettingsField::Prefix => 1,
-            };
-            draw_game_settings(f, area, &app_name, &exe, &prefix, back_sel);
-            draw_game_settings_input(f, area, field, &value);
-        }
         Screen::InstallTarget { pkg, targets, selected } => {
             let pkg = pkg.clone();
             let targets = targets.clone();
@@ -138,10 +118,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             let config = config.clone();
             let setting_idx = *setting_idx;
             let selected = *selected;
+            let wine_game = app.editing_wine_game.clone();
             // For app configs draw the Config popup as backing; for the global
             // Settings tab the 2-panel background is already rendered.
             if !app_name.is_empty() {
-                draw_config(f, area, &app_name, &config, setting_idx);
+                draw_config(f, area, &app_name, &config, setting_idx, wine_game.as_ref());
             }
             draw_option_picker(f, area, setting_idx, selected, &config);
         }
@@ -149,8 +130,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             let app_name = app_name.clone();
             let config = config.clone();
             let back_selected = *back_selected;
+            let wine_game = app.editing_wine_game.clone();
             if !app_name.is_empty() {
-                draw_config(f, area, &app_name, &config, back_selected);
+                draw_config(f, area, &app_name, &config, back_selected, wine_game.as_ref());
             }
             draw_setting_help(f, area, back_selected);
         }
@@ -159,8 +141,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             let config = config.clone();
             let setting_idx = *setting_idx;
             let picker_selected = *picker_selected;
+            let wine_game = app.editing_wine_game.clone();
             if !app_name.is_empty() {
-                draw_config(f, area, &app_name, &config, setting_idx);
+                draw_config(f, area, &app_name, &config, setting_idx, wine_game.as_ref());
             }
             draw_option_picker(f, area, setting_idx, picker_selected, &config);
             draw_option_help(f, area, setting_idx, picker_selected);
@@ -171,10 +154,15 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             let back_selected = *back_selected;
             let field_idx = *field_idx;
             let value = value.clone();
+            let wine_game = app.editing_wine_game.clone();
             if !app_name.is_empty() {
-                draw_config(f, area, &app_name, &config, back_selected);
+                draw_config(f, area, &app_name, &config, back_selected, wine_game.as_ref());
             }
-            let title = super::setting_title(field_idx);
+            let title = match field_idx {
+                CFG_GAME_EXE    => "Game Exe path",
+                CFG_GAME_PREFIX => "WINEPREFIX path",
+                _ => super::setting_title(field_idx),
+            };
             draw_text_input(f, area, title, &value);
         }
         Screen::KeyHelp => {
@@ -601,10 +589,10 @@ fn draw_import(f: &mut Frame, app: &App, area: Rect) {
 fn draw_statusbar(f: &mut Frame, app: &App, area: Rect) {
     let hint = match app.tab {
         Tab::Installed if app.detail_focused => "[↑↓] Scroll  [←/Esc] Back  [q] Quit",
-        Tab::Installed => "[Tab] Switch  [→] Details  [r] Run  [d] Delete  [e] Export  [p] Snapshot  [o] Rollback  [c] Check  [u] Update  [s] Config  [g] Game  [n] Rename  [?] Help  [q] Quit",
+        Tab::Installed => "[Tab] Switch  [→] Details  [r] Run  [d] Delete  [e] Export  [p] Snapshot  [o] Rollback  [c] Check  [u] Update  [s] Config  [n] Rename  [?] Help  [q] Quit",
         Tab::Install   => "[Tab] Switch  Type to search  [↓] Select  [Enter] Install/Uninstall  [q] Quit",
         Tab::Import    => "[Tab] Switch  Type zip path  [Enter] Import  [Esc] Clear  [Shift+Q] Quit",
-        Tab::Games     => "[Tab] Switch  [i/Enter] Import a game folder  [q] Quit",
+        Tab::Games     => "[Tab] Switch  [↑↓] Navigate  [Enter/r] Run  [s] Settings  [d] Delete  [i/a] Import  [q] Quit",
         Tab::Space     => "[Tab] Switch  [r] Run dedup  [q] Quit",
         Tab::Settings  => "[Tab] Switch  [↑↓] Navigate  [←/→] Cycle  [Enter] Edit  [?] Help  [q] Quit",
     };
@@ -1240,7 +1228,14 @@ fn draw_settings_tab(f: &mut Frame, app: &mut App, area: Rect) {
 
 // ── Config overlay ────────────────────────────────────────────────────────────
 
-fn draw_config(f: &mut Frame, area: Rect, app_name: &str, config: &AppConfig, selected: usize) {
+fn draw_config(
+    f: &mut Frame,
+    area: Rect,
+    app_name: &str,
+    config: &AppConfig,
+    selected: usize,
+    wine_game: Option<&(String, String)>,
+) {
     let popup = centered_rect(54, 92, area);
     f.render_widget(Clear, popup);
 
@@ -1269,7 +1264,17 @@ fn draw_config(f: &mut Frame, area: Rect, app_name: &str, config: &AppConfig, se
             Some(s) => { let t: String = s.chars().take(12).collect(); format!(" {t} ") }
         }
     };
-    let rows: Vec<(&str, String)> = vec![
+    let trim_path = |s: &str| -> String {
+        let chars: Vec<char> = s.chars().collect();
+        if chars.len() <= 24 {
+            format!(" {s} →")
+        } else {
+            // Keep the tail so the filename stays visible.
+            let tail: String = chars[chars.len() - 22..].iter().collect();
+            format!(" …{tail} →")
+        }
+    };
+    let mut rows: Vec<(&str, String)> = vec![
         ("Network    ", b(config.network).to_string()),
         ("Camera     ", b(config.camera).to_string()),
         ("Microphone ", b(config.microphone).to_string()),
@@ -1323,16 +1328,24 @@ fn draw_config(f: &mut Frame, area: Rect, app_name: &str, config: &AppConfig, se
         }),
     ];
 
-    let row_h = 2u16;
+    // Wine-game rows are only shown when the Config was opened for a wine game.
+    if let Some((exe, prefix)) = wine_game {
+        rows.push(("Game Exe   ", trim_path(exe)));
+        rows.push(("Game Prefix", trim_path(prefix)));
+    }
+
+    let has_wg = wine_game.is_some();
+    let save_idx = app_cfg_save_idx(has_wg);
+
     // Save is pinned to the bottom so it's always reachable on small terminals.
     let save_y = inner.y + inner.height.saturating_sub(2);
     // Stop rendering rows before they collide with the separator + save button.
     let clip_y = save_y.saturating_sub(2);
 
+    let mut y = inner.y;
     for (idx, (label, value)) in rows.iter().enumerate() {
-        let is_sel = idx == selected;
-        let y = inner.y + idx as u16 * row_h;
         if y >= clip_y { break; }
+        let is_sel = idx == selected;
 
         let val_color = match value.trim() {
             "on"  => C_GREEN,
@@ -1351,17 +1364,22 @@ fn draw_config(f: &mut Frame, area: Rect, app_name: &str, config: &AppConfig, se
             ])),
             row,
         );
+        y += 1;
 
-        if y + 1 < clip_y {
+        // Game rows render compactly (no separator) so the extra two rows fit
+        // on the same popup height as the non-game Config screen.
+        let is_game_row = has_wg && (idx == CFG_GAME_EXE || idx == CFG_GAME_PREFIX);
+        if !is_game_row && y < clip_y {
             f.render_widget(
                 Paragraph::new(Span::styled("─".repeat(inner.width as usize), Style::default().fg(Color::Rgb(50, 50, 60)))),
-                Rect { x: inner.x, y: y + 1, width: inner.width, height: 1 },
+                Rect { x: inner.x, y, width: inner.width, height: 1 },
             );
+            y += 1;
         }
     }
 
     // Save button — always at the bottom
-    let is_sel_save = selected == APP_CFG_SAVE;
+    let is_sel_save = selected == save_idx;
     let btn_style = if is_sel_save {
         Style::default().fg(Color::Black).bg(C_GREEN).add_modifier(Modifier::BOLD)
     } else {
@@ -1561,8 +1579,7 @@ fn draw_key_help(f: &mut Frame, area: Rect) {
         ("o",          "Roll back to a snapshot"),
         ("c",          "Check for updates (no install)"),
         ("u",          "Update the selected app"),
-        ("s",          "Open per-app settings"),
-        ("g",          "Edit wine-game settings (exe path, prefix)"),
+        ("s",          "Open per-app settings (incl. game exe/prefix for wine games)"),
         ("n",          "Rename app (set display name)"),
         ("Tab",        "Switch between tabs"),
         ("↑ / k",      "Move selection up"),
@@ -2245,7 +2262,7 @@ fn eta_seconds(done: u64, total: u64, elapsed: std::time::Duration) -> f64 {
 
 // ── Games tab ─────────────────────────────────────────────────────────────────
 
-fn draw_games(f: &mut Frame, app: &App, area: Rect) {
+fn draw_games(f: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default().borders(Borders::ALL)
         .title(" Wine Games ").title_style(Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD));
     let inner = block.inner(area);
@@ -2289,9 +2306,10 @@ fn draw_games(f: &mut Frame, app: &App, area: Rect) {
     } else {
         let items: Vec<ListItem> = games.iter().map(|m| {
             let exe = m.app.wine_game.as_ref().map(|w| w.exe.as_str()).unwrap_or("?");
+            let display = m.app.display_name.as_deref().unwrap_or(m.app.name.as_str());
             ListItem::new(Line::from(vec![
                 Span::styled("  🎮 ", Style::default().fg(C_YELLOW)),
-                Span::styled(&m.app.name, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                Span::styled(display.to_string(), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
                 Span::styled(format!("   {exe}"), Style::default().fg(C_ACCENT)),
             ]))
         }).collect();
@@ -2299,13 +2317,15 @@ fn draw_games(f: &mut Frame, app: &App, area: Rect) {
             .block(Block::default().borders(Borders::TOP)
                 .title(format!(" Imported games ({}) ", games.len()))
                 .title_style(Style::default().fg(C_ACCENT))
-                .border_style(Style::default().fg(C_DIM)));
-        f.render_widget(list, chunks[3]);
+                .border_style(Style::default().fg(C_DIM)))
+            .highlight_style(Style::default().bg(C_SELECT).fg(Color::White).add_modifier(Modifier::BOLD))
+            .highlight_symbol("▶ ");
+        f.render_stateful_widget(list, chunks[3], &mut app.games_state);
     }
 
     f.render_widget(
         Paragraph::new(Span::styled(
-            "  [i] / [Enter]  Import a game folder",
+            "  [Enter/r] Run    [s] Settings    [d] Delete    [i/a] Import",
             Style::default().fg(C_ACCENT),
         )),
         chunks[4],
@@ -2499,142 +2519,6 @@ fn draw_game_confirm(
     f.render_widget(
         Paragraph::new(Span::styled(
             " [↑↓] Navigate  [Space] Toggle delete  [Enter] Confirm  [Esc] Cancel",
-            Style::default().fg(C_DIM),
-        )),
-        chunks[2],
-    );
-}
-
-// ── Game settings overlay (edit wine_game fields) ────────────────────────────
-
-fn draw_game_settings(f: &mut Frame, area: Rect, app_name: &str, exe: &str, prefix: &str, selected: usize) {
-    let popup = centered_rect(70, 50, area);
-    f.render_widget(Clear, popup);
-
-    let block = Block::default().borders(Borders::ALL)
-        .title(format!(" Game Settings — {app_name} "))
-        .title_style(Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD))
-        .border_style(Style::default().fg(C_ACCENT));
-    let inner = block.inner(popup);
-    f.render_widget(block, popup);
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(2),
-            Constraint::Length(2),
-            Constraint::Length(2),
-            Constraint::Length(1),
-            Constraint::Min(0),
-            Constraint::Length(1),
-        ])
-        .split(inner);
-
-    f.render_widget(
-        Paragraph::new(Span::styled(
-            "  Paths are evaluated inside the sandbox; both should start with /",
-            Style::default().fg(C_DIM),
-        )),
-        chunks[0],
-    );
-
-    let mk_row = |sel: bool, label: &str, value: &str| -> Paragraph<'static> {
-        let bg = if sel { C_SELECT } else { Color::Reset };
-        let label_color = if sel { Color::White } else { C_DIM };
-        let value_color = if sel { Color::White } else { C_ACCENT };
-        Paragraph::new(Line::from(vec![
-            Span::styled(if sel { " ▶ " } else { "   " }, Style::default().fg(C_ACCENT).bg(bg)),
-            Span::styled(format!("{label:<10}  "), Style::default().fg(label_color).bg(bg)),
-            Span::styled(value.to_string(),
-                Style::default().fg(value_color).bg(bg)
-                    .add_modifier(if sel { Modifier::BOLD } else { Modifier::empty() })),
-        ]))
-    };
-    f.render_widget(
-        mk_row(selected == 0, "Exe", exe),
-        Rect { x: inner.x, y: chunks[1].y, width: inner.width, height: 1 },
-    );
-    f.render_widget(
-        mk_row(selected == 1, "Prefix", prefix),
-        Rect { x: inner.x, y: chunks[2].y, width: inner.width, height: 1 },
-    );
-
-    f.render_widget(
-        Paragraph::new(Span::styled("─".repeat(inner.width as usize),
-            Style::default().fg(Color::Rgb(50, 50, 60)))),
-        chunks[3],
-    );
-
-    // Save button
-    let is_save = selected == 2;
-    let btn_style = if is_save {
-        Style::default().fg(Color::Black).bg(C_GREEN).add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(C_GREEN)
-    };
-    let save_y = inner.y + inner.height.saturating_sub(2);
-    f.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(if is_save { " ▶ " } else { "   " }, Style::default().fg(C_ACCENT)),
-            Span::styled("[ Save & Close ]", btn_style),
-        ])),
-        Rect { x: inner.x, y: save_y, width: inner.width, height: 1 },
-    );
-
-    let footer_y = inner.y + inner.height.saturating_sub(1);
-    f.render_widget(
-        Paragraph::new(Span::styled(
-            " [↑↓] Navigate  [Enter] Edit / Save  [Esc/q] Discard",
-            Style::default().fg(C_DIM),
-        )),
-        Rect { x: inner.x, y: footer_y, width: inner.width, height: 1 },
-    );
-}
-
-fn draw_game_settings_input(f: &mut Frame, area: Rect, field: GameSettingsField, value: &str) {
-    let title = match field {
-        GameSettingsField::Exe    => " Exe path ",
-        GameSettingsField::Prefix => " WINEPREFIX path ",
-    };
-    let hint = match field {
-        GameSettingsField::Exe    => "  Absolute path inside the sandbox, e.g. /games/nfsu2/Speed2.exe",
-        GameSettingsField::Prefix => "  Absolute path inside the sandbox, e.g. /games/nfsu2/.wineprefix",
-    };
-    draw_text_input_with_hint(f, area, title, hint, value);
-}
-
-fn draw_text_input_with_hint(f: &mut Frame, area: Rect, title: &str, hint: &str, value: &str) {
-    let popup = centered_rect(70, 30, area);
-    f.render_widget(Clear, popup);
-
-    let block = Block::default().borders(Borders::ALL)
-        .title(title.to_string())
-        .title_style(Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD))
-        .border_style(Style::default().fg(C_ACCENT));
-    let inner = block.inner(popup);
-    f.render_widget(block, popup);
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Length(3), Constraint::Length(1)])
-        .split(inner);
-
-    f.render_widget(
-        Paragraph::new(Span::styled(hint, Style::default().fg(C_DIM))),
-        chunks[0],
-    );
-
-    f.render_widget(
-        Paragraph::new(format!(" {}█", value))
-            .block(Block::default().borders(Borders::ALL)
-                .border_style(Style::default().fg(C_ACCENT)))
-            .style(Style::default().fg(Color::White)),
-        chunks[1],
-    );
-
-    f.render_widget(
-        Paragraph::new(Span::styled(
-            " [Enter] Confirm  [Esc] Cancel  [Backspace] Delete char",
             Style::default().fg(C_DIM),
         )),
         chunks[2],
