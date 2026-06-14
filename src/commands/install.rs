@@ -608,6 +608,18 @@ pub fn regenerate_runtime_caches(app_dir: &Path) {
         }
     }
 
+    // GSettings schema cache — compiled from the .xml files glib2 ships.
+    // Normally produced by glib2's pacman post-install hook; without it, GTK
+    // apps fall back to schema defaults, which can leave Firefox tab titles
+    // and context-menu labels rendered in the wrong (background-matching)
+    // color, looking like missing text.
+    let schemas_dir = app_dir.join("usr/share/glib-2.0/schemas");
+    if schemas_dir.is_dir() {
+        let _ = std::process::Command::new("glib-compile-schemas")
+            .arg(&schemas_dir)
+            .status();
+    }
+
     // gdk-pixbuf loader cache. Only relevant when external loader .so files
     // exist in the sandbox; the cache must list in-sandbox paths (without the
     // wryayer prefix) since the file is read from inside bwrap.
