@@ -95,7 +95,11 @@ fn reinstall(manifest: &crate::manifest::Manifest) -> Result<()> {
 
     let app_dir = app_dir(app_name)?;
 
-    // Remove old files but keep the directory
+    // Remove old package-provided files but keep user data: the sandbox home
+    // (browser profiles, font caches, GUI app settings), the per-app wryayer
+    // config, and the install manifest itself.  Without this, every update
+    // wipes the user's Firefox profile, etc.
+    const PRESERVE: &[&str] = &[".manifest.toml", "config.ini", "home"];
     if app_dir.exists() {
         for entry in fs::read_dir(&app_dir)
             .with_context(|| format!("failed to read app dir {}", app_dir.display()))?
@@ -103,7 +107,7 @@ fn reinstall(manifest: &crate::manifest::Manifest) -> Result<()> {
             let entry = entry.context("failed to read entry")?;
             let path = entry.path();
             let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if file_name == ".manifest.toml" {
+            if PRESERVE.contains(&file_name) {
                 continue;
             }
             if path.is_dir() {
