@@ -1680,8 +1680,9 @@ fn draw_shared_dirs(f: &mut Frame, area: Rect, app_name: &str, dirs: &[String], 
     let popup = centered_rect(60, 70, area);
     f.render_widget(Clear, popup);
 
+    let title_target = if app_name.is_empty() { "Defaults" } else { app_name };
     let block = Block::default().borders(Borders::ALL)
-        .title(format!(" Shared Folders — {app_name} "))
+        .title(format!(" Shared Folders — {title_target} "))
         .title_style(Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD))
         .border_style(Style::default().fg(C_ACCENT));
     let inner = block.inner(popup);

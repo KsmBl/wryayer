@@ -2050,11 +2050,20 @@ fn on_option_picker(app: &mut App, code: KeyCode) {
 
     match code {
         KeyCode::Esc | KeyCode::Char('q') => {
-            // Discard the picker choice, return to Config unchanged.
+            // Discard the picker choice. Per-app pickers return to the
+            // per-app Config popup; global-defaults pickers (empty app_name)
+            // return to the Settings tab.
             let name = app_name.clone();
             let cfg = config.clone();
             let idx = *setting_idx;
-            app.screen = Screen::Config { app_name: name, config: cfg, selected: idx };
+            if name.is_empty() {
+                app.global_config = cfg;
+                app.global_selected = idx;
+                app.tab = Tab::Settings;
+                app.screen = Screen::Main;
+            } else {
+                app.screen = Screen::Config { app_name: name, config: cfg, selected: idx };
+            }
             app.needs_clear = true;
         }
         KeyCode::Up | KeyCode::Char('k') => {
@@ -2289,7 +2298,7 @@ fn on_settings_tab(app: &mut App, code: KeyCode) {
                 return;
             }
             if app.global_selected == CFG_SHARES {
-                app.status = "Shared directories are per-app (configure via [s] Config on an installed app)".into();
+                open_shared_dirs_global(app);
                 return;
             }
             cycle_setting(&mut app.global_config, app.global_selected, 1);
@@ -2310,7 +2319,7 @@ fn on_settings_tab(app: &mut App, code: KeyCode) {
                 return;
             }
             if app.global_selected == CFG_SHARES {
-                app.status = "Shared directories are per-app (configure via [s] Config on an installed app)".into();
+                open_shared_dirs_global(app);
                 return;
             }
             let idx = app.global_selected;
@@ -2339,13 +2348,51 @@ fn on_settings_tab(app: &mut App, code: KeyCode) {
 
 // ── Shared dirs screen ────────────────────────────────────────────────────────
 
+/// Open the SharedDirs editor for the global defaults (empty app_name
+/// signals global mode throughout the SharedDirs / file-browser flow).
+fn open_shared_dirs_global(app: &mut App) {
+    let dirs = app.global_config.shared_dirs.clone();
+    let sel = dirs.len().saturating_sub(1);
+    app.screen = Screen::SharedDirs { app_name: String::new(), dirs, selected: sel };
+    app.needs_clear = true;
+}
+
+/// Read shared-dirs config from either the per-app file or the global defaults
+/// file, depending on whether app_name is set.
+fn read_shared_cfg(app_name: &str) -> AppConfig {
+    if app_name.is_empty() {
+        read_global_config()
+    } else {
+        read_config(app_name).unwrap_or_default()
+    }
+}
+
+/// Persist a config back to either the per-app file or defaults.ini.
+fn write_shared_cfg(app_name: &str, cfg: &AppConfig) {
+    if app_name.is_empty() {
+        let _ = write_global_config(cfg);
+    } else {
+        let _ = write_config(app_name, cfg);
+    }
+}
+
 fn on_shared_dirs(app: &mut App, code: KeyCode) {
     let Screen::SharedDirs { app_name, dirs, selected } = &mut app.screen else { return };
     match code {
         KeyCode::Esc | KeyCode::Char('q') => {
             let name = app_name.clone();
-            let config = read_config(&name).unwrap_or_default();
-            app.screen = Screen::Config { app_name: name, config, selected: CFG_SHARES };
+            if name.is_empty() {
+                // Returning from the global-defaults editor: refresh the
+                // in-memory global_config from disk and pop back to the
+                // Settings tab instead of the per-app Config popup.
+                app.global_config = read_global_config();
+                app.global_selected = CFG_SHARES;
+                app.tab = Tab::Settings;
+                app.screen = Screen::Main;
+            } else {
+                let config = read_config(&name).unwrap_or_default();
+                app.screen = Screen::Config { app_name: name, config, selected: CFG_SHARES };
+            }
             app.needs_clear = true;
         }
         KeyCode::Up | KeyCode::Char('k') => {
@@ -2364,9 +2411,9 @@ fn on_shared_dirs(app: &mut App, code: KeyCode) {
                 if !dirs.is_empty() && idx >= dirs.len() {
                     *selected = dirs.len() - 1;
                 }
-                let mut config = read_config(&name).unwrap_or_default();
+                let mut config = read_shared_cfg(&name);
                 config.shared_dirs = dirs.clone();
-                let _ = write_config(&name, &config);
+                write_shared_cfg(&name, &config);
             }
         }
         KeyCode::Char('a') => {
@@ -2483,7 +2530,7 @@ fn on_file_browser(app: &mut App, code: KeyCode) {
             app.needs_clear = true;
         }
         FbAction::Close(BrowserMode::PickShareDir(app_name)) => {
-            let config = read_config(&app_name).unwrap_or_default();
+            let config = read_shared_cfg(&app_name);
             let dirs = config.shared_dirs;
             let selected = dirs.len().saturating_sub(1);
             app.screen = Screen::SharedDirs { app_name, dirs, selected };
@@ -2513,10 +2560,10 @@ fn on_file_browser(app: &mut App, code: KeyCode) {
         }
         FbAction::SelectShareDir { path, app_name } => {
             let path_str = path.to_string_lossy().into_owned();
-            let mut config = read_config(&app_name).unwrap_or_default();
+            let mut config = read_shared_cfg(&app_name);
             if !config.shared_dirs.contains(&path_str) {
                 config.shared_dirs.push(path_str);
-                let _ = write_config(&app_name, &config);
+                write_shared_cfg(&app_name, &config);
             }
             let dirs = config.shared_dirs;
             let selected = dirs.len().saturating_sub(1);
