@@ -306,7 +306,7 @@ pub fn run(
         // alias_of to find the right filesystem tree and main_binary.
         // Using target_name here would call `wryayer run cpufetch` for every
         // merged binary regardless of which binary was actually requested.
-        if !keep_without_launcher {
+        if !keep_without_launcher && !keep_no_launcher {
             let launcher_app = if merge_mode { &alias_name_owned } else { &target_name_owned };
             for bin in &resolved_bin_names {
                 if created_launchers.contains(bin) {
