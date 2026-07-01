@@ -186,14 +186,40 @@ fn launch_bwrap(
 ) -> Result<ExitStatus> {
     let (mut cmd, spoof_dir, mut xvfb) = bwrap_cmd(app_root_str, binary, args, temp, config, wine);
     set_bwrap_env(&mut cmd);
-    if let Some(mib) = config.ram_limit {
+    let ram_mib = if let Some(mib) = config.ram_limit {
         if has_systemd_run() {
             cmd = wrap_with_ram_limit(cmd, mib);
+            Some(mib)
         } else {
             eprintln!("warning: systemd-run not found — running without RAM limit");
+            None
         }
+    } else {
+        None
+    };
+
+    // When systemd-run wraps the command we can track the scope's cgroup
+    // memory.current and rewrite the sandbox's /proc/meminfo so MemFree
+    // shrinks with real usage.  Needs a live parent, so it's a spawn+wait
+    // pair rather than a blocking status() call.
+    let meminfo_path = ram_mib.map(|_| Path::new(app_root_str).join(".spoof").join("meminfo"));
+    let mut child = cmd.spawn().context("failed to run bwrap")?;
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let updater = match (ram_mib, meminfo_path) {
+        (Some(mib), Some(path)) if path.exists() => {
+            let pid = child.id();
+            let stop_clone = stop.clone();
+            Some(std::thread::spawn(move || {
+                meminfo_updater_loop(pid, mib, path, stop_clone);
+            }))
+        }
+        _ => None,
+    };
+    let status = child.wait().context("failed to wait for bwrap")?;
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    if let Some(u) = updater {
+        let _ = u.join();
     }
-    let status = cmd.status().context("failed to run bwrap")?;
     // Xvfb was launched with -terminate so it exits when its last client
     // (the sandboxed app) disconnects.  Kill it explicitly as a safety net
     // in case the app crashed without cleanly closing its X connection.
@@ -327,6 +353,82 @@ pub fn wrap_with_ram_limit(inner: Command, mib: u64) -> Command {
         }
     }
     outer
+}
+
+/// Kernel-style /proc/meminfo body for a fixed MemTotal (kB) and current
+/// MemFree (kB).  Buffers/Cached/SReclaimable/Shmem stay at zero so tools
+/// that derive `used = total - free - buffers - cached - sreclaimable + shmem`
+/// (free, htop) land on `total - free`, matching the cgroup's memory.current.
+fn format_meminfo(total_kb: u64, free_kb: u64) -> String {
+    format!(
+        "MemTotal:       {total_kb} kB\n\
+         MemFree:        {free_kb} kB\n\
+         MemAvailable:   {free_kb} kB\n\
+         Buffers:             0 kB\n\
+         Cached:              0 kB\n\
+         SwapCached:          0 kB\n\
+         Active:              0 kB\n\
+         Inactive:            0 kB\n\
+         SwapTotal:           0 kB\n\
+         SwapFree:            0 kB\n\
+         Shmem:               0 kB\n\
+         Slab:                0 kB\n\
+         SReclaimable:        0 kB\n\
+         SUnreclaim:          0 kB\n"
+    )
+}
+
+/// Locate the cgroup memory.current file for `pid` (a systemd-run --scope
+/// child).  systemd-run moves itself into the new scope only after talking to
+/// systemd, so the process spends a brief window in the parent's cgroup.
+/// Accept only a cgroup whose `memory.max` equals the configured limit — that
+/// unambiguously identifies our scope and rejects the outer session's cgroup.
+fn find_scope_memory_current(pid: u32, mib: u64) -> Option<PathBuf> {
+    let want_max = mib.saturating_mul(1024 * 1024);
+    for _ in 0..40 {
+        if let Ok(content) = std::fs::read_to_string(format!("/proc/{pid}/cgroup")) {
+            for line in content.lines() {
+                if let Some(rest) = line.strip_prefix("0::") {
+                    let dir = Path::new("/sys/fs/cgroup")
+                        .join(rest.trim().trim_start_matches('/'));
+                    let max = std::fs::read_to_string(dir.join("memory.max"))
+                        .ok()
+                        .and_then(|s| s.trim().parse::<u64>().ok());
+                    if max == Some(want_max) {
+                        let mem = dir.join("memory.current");
+                        if mem.exists() {
+                            return Some(mem);
+                        }
+                    }
+                }
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    None
+}
+
+/// Poll the cgroup's memory.current and rewrite the bind-mounted meminfo file
+/// so sandboxed tools see MemFree shrink as the app allocates.  Exits when
+/// `stop` is set or the memory file disappears (scope ended).
+fn meminfo_updater_loop(
+    pid: u32,
+    mib: u64,
+    meminfo_path: PathBuf,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    use std::sync::atomic::Ordering;
+    let Some(mem_current) = find_scope_memory_current(pid, mib) else { return };
+    let total_kb = mib.saturating_mul(1024);
+    while !stop.load(Ordering::Relaxed) {
+        let Ok(s) = std::fs::read_to_string(&mem_current) else { break };
+        if let Ok(used_bytes) = s.trim().parse::<u64>() {
+            let used_kb = used_bytes / 1024;
+            let free_kb = total_kb.saturating_sub(used_kb);
+            let _ = std::fs::write(&meminfo_path, format_meminfo(total_kb, free_kb));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
 }
 
 // ── bwrap command builder ─────────────────────────────────────────────────────
@@ -563,6 +665,25 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
             }
         } else {
             cmd.args(["--ro-bind-try", cpuinfo_path.as_str(), "/proc/cpuinfo"]);
+        }
+    }
+
+    // ── RAM limit: fake /proc/meminfo ────────────────────────────────────────
+    //
+    // MemoryMax on the cgroup caps allocations, but /proc/meminfo is not
+    // namespaced by the kernel — htop, free, and `sysinfo(2)`-based tools
+    // still report host RAM.  Overlay a synthetic meminfo whose MemTotal is
+    // the limit so the app sees the enforced ceiling as its total memory.
+    // The initial contents assume zero usage; launch_bwrap starts an updater
+    // thread that rewrites this file with the cgroup's live memory.current so
+    // MemFree/MemAvailable shrink as the app allocates.
+    if let Some(mib) = config.ram_limit {
+        let total_kb = mib.saturating_mul(1024);
+        let mf = spoof_dir.join("meminfo");
+        if std::fs::write(&mf, format_meminfo(total_kb, total_kb)).is_ok() {
+            if let Some(s) = mf.to_str() {
+                cmd.args(["--ro-bind", s, "/proc/meminfo"]);
+            }
         }
     }
 
