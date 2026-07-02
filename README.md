@@ -30,6 +30,76 @@ wryayer solves all three by extracting packages into self-contained directory tr
 
 ---
 
+## The interactive TUI
+
+`wryayer tui` is the fastest way to browse installed apps, search and install new
+ones, tweak sandbox settings, and launch everything — without memorising a single
+subcommand.
+
+```fish
+wryayer tui
+```
+
+**Installed tab** — every app with a live running-instance count and an update
+dot next to anything out of date. The right panel shows version, size, the
+available update, snapshots, and the full package list. Merged-in tools
+(installed with `--into`) appear indented under their host.
+
+![wryayer TUI — Installed tab](docs/screenshots/installed.png)
+
+**Install tab** — search the official repos and the AUR at once (each result
+tagged `[repo]` or `[aur]`). Press `Space` to mark several packages, then
+`Enter` to install them all in sequence.
+
+![wryayer TUI — Install tab](docs/screenshots/install.png)
+
+**Settings tab** — global defaults inherited by every newly installed app:
+network and device toggles, temp mode, identity spoofing, RAM limit, and the
+install-behaviour switches (**Confirm install** / **Ask shortcut**). Values are
+colour-coded (green = on, red = off, yellow = other), with a live description
+and option list on the right.
+
+![wryayer TUI — Settings tab](docs/screenshots/settings.png)
+
+### Key bindings
+
+| Key | Action |
+|---|---|
+| `Tab` / `Shift+Tab` | Switch tabs (Installed / Install / Import / **Games** / Space / Settings) |
+| `↑` / `↓` or `j` / `k` | Navigate lists |
+| `r` | Run selected app |
+| `d` / `Delete` | Remove selected app (double-confirm) |
+| `e` | Export selected app to a zip |
+| `p` | Snapshot selected app (hard-linked clone) |
+| `o` | Roll selected app back to its latest snapshot |
+| `u` | Update selected app |
+| `U` | Update **all** out-of-date apps |
+| `c` | Check for updates |
+| `s` | Open per-app config |
+| `n` | Rename app (set display name) |
+| `q` / `Esc` | Quit / close overlay |
+| `t` | Toggle debug log during install/remove operations |
+| `?` | Show key-bindings reference |
+| `Shift+Q` | Force-quit from anywhere |
+
+**Update indicators** — On startup (and after every install/update/remove) wryayer checks all apps for newer versions in the background and marks the out-of-date ones with a dot in the Installed list. `u` updates the selected app; `Shift+U` updates them all after a confirmation listing what's out of date.
+
+**Running-instance count** — Apps with a live sandbox running show a count next to their name, so you can see at a glance what's open.
+
+**Multi-select install** — In the Install tab, press `Space` to mark one or more search results, then `Enter` to install all marked packages one after another. Marks persist across searches, so you can queue packages from several searches before starting. Pressing `Enter` with no marks installs the hovered item.
+
+**Install prompts** — Before an install begins, wryayer asks for a confirmation and then whether to create a `~/bin/<name>` launcher shortcut. Both can be turned off in the Settings tab if you'd rather installs start immediately:
+
+| Setting | Effect |
+|---|---|
+| **Default shortcut** | Whether the shortcut prompt pre-selects "Yes" or "No" |
+| **Confirm install** | `off` skips the "Install `<pkg>`?" prompt and starts the install immediately |
+| **Ask shortcut** | `off` skips the shortcut prompt and silently applies **Default shortcut** |
+
+Settings are stored in `~/.wryayer/defaults.ini` and apply as defaults to every newly installed app; per-app overrides always take precedence.
+
+---
+
 ## Supported distributions
 
 | Distribution | Support | Notes |
@@ -359,48 +429,8 @@ binary. The TUI's **Games** tab wraps the same flow in a 3-step wizard
 
 ### Interactive TUI
 
-```fish
-wryayer tui
-```
-
-Key bindings:
-
-| Key | Action |
-|---|---|
-| `Tab` / `Shift+Tab` | Switch tabs (Installed / Install / Import / **Games** / Space / Settings) |
-| `↑` / `↓` or `j` / `k` | Navigate lists |
-| `r` | Run selected app |
-| `d` / `Delete` | Remove selected app (double-confirm) |
-| `e` | Export selected app to a zip |
-| `p` | Snapshot selected app (hard-linked clone) |
-| `o` | Roll selected app back to its latest snapshot |
-| `u` | Update selected app |
-| `U` | Update **all** out-of-date apps |
-| `c` | Check for updates |
-| `s` | Open per-app config |
-| `n` | Rename app (set display name) |
-| `q` / `Esc` | Quit / close overlay |
-| `t` | Toggle debug log during install/remove operations |
-| `?` | Show key-bindings reference |
-| `Shift+Q` | Force-quit from anywhere |
-
-**Update indicators** — On startup (and after every install/update/remove) wryayer checks all apps for newer versions in the background and marks the out-of-date ones with a small dot in the Installed list. `Shift+U` updates them all in one go, after a confirmation listing what's out of date.
-
-**Running-instance count** — Apps that currently have a live sandbox running show a count next to their name, so you can see at a glance what's open.
-
-**Multi-select install** — In the Install tab, press `Space` to mark one or more search results, then `Enter` to install all marked packages one after another. Marks persist across searches so you can search for different packages and add them to the queue before starting. Only marked packages are installed; pressing `Enter` with no marks installs the hovered item.
-
-**Install prompts** — Before an install begins, wryayer asks for a confirmation and then whether to create a `~/bin/<name>` launcher shortcut. Both prompts can be turned off in **Settings** (see below) if you'd rather installs start immediately.
-
-The **Settings** tab uses a native two-panel layout: the left panel lists all settings with their current values colour-coded (green = on, red = off, yellow = other); the right panel shows a description and the available choices for the selected row. Press `Enter` or `←`/`→` to change a value; press `Enter` on **Save** to persist. Settings are stored in `~/.wryayer/defaults.ini` and apply as defaults to every newly installed app. Per-app overrides always take precedence.
-
-Global-only install behaviour lives in the Settings tab too:
-
-| Setting | Effect |
-|---|---|
-| **Default shortcut** | Whether the shortcut prompt pre-selects "Yes" or "No" |
-| **Confirm install** | `off` skips the "Install `<pkg>`?" prompt and starts the install immediately |
-| **Ask shortcut** | `off` skips the shortcut prompt and silently applies **Default shortcut** |
+The full TUI walkthrough, screenshots, and key-binding reference are near the
+top of this page — see **[The interactive TUI](#the-interactive-tui)**.
 
 ---
 
