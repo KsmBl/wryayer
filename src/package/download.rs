@@ -210,7 +210,12 @@ fn find_pkg_tarball(dir: &Path) -> Result<Option<PathBuf>> {
         let entry = entry.context("failed to read directory entry")?;
         let path = entry.path();
         if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            if name.ends_with(".pkg.tar.zst") && !name.ends_with("-debug.pkg.tar.zst") {
+            // Skip the split debug package makepkg emits when a PKGBUILD builds
+            // with debug symbols. It's named `<pkgbase>-debug-<ver>-<arch>.pkg.
+            // tar.zst`, so the `-debug-` marker sits in the middle, not at the
+            // end — matching only a trailing `-debug` misses it and we'd extract
+            // the symbols-only package instead of the real one.
+            if name.ends_with(".pkg.tar.zst") && !name.contains("-debug-") {
                 return Ok(Some(path));
             }
         }
