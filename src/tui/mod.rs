@@ -259,6 +259,10 @@ pub struct App {
     pub app_sizes: HashMap<String, u64>,
     pub du_apparent: u64,
     pub du_actual: u64,
+    // Running-instance counts per app, keyed by filesystem-root name.
+    // Refreshed on a throttle from the event loop (scanning /proc is not free).
+    pub running_instances: HashMap<String, usize>,
+    pub last_instance_scan: Instant,
     // Overlay
     pub screen: Screen,
     pub status: String,
@@ -321,6 +325,8 @@ impl App {
             app_sizes,
             du_apparent,
             du_actual,
+            running_instances: scan_running_instances(),
+            last_instance_scan: Instant::now(),
             screen: Screen::Main,
             status: String::new(),
             log_scroll: 0,
@@ -361,6 +367,18 @@ impl App {
             self.du_apparent = apparent;
             self.du_actual = actual;
         }
+        self.running_instances = scan_running_instances();
+        self.last_instance_scan = Instant::now();
+    }
+
+    /// Re-scan /proc for running sandboxes at most once per second so the
+    /// instance counts in the list stay live without hammering /proc on every
+    /// 50 ms redraw.
+    fn refresh_running_instances(&mut self) {
+        if self.last_instance_scan.elapsed() >= Duration::from_secs(1) {
+            self.running_instances = scan_running_instances();
+            self.last_instance_scan = Instant::now();
+        }
     }
 
     pub fn selected_installed(&self) -> Option<&Manifest> {
@@ -386,6 +404,59 @@ impl App {
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
+
+/// Count running sandboxes per app by scanning /proc for the bwrap monitor
+/// process of each launch.  Every wryayer sandbox runs `bwrap --bind <app_root>
+/// / …`, and only the outer monitor keeps that argv (the inner process is
+/// exec'd into the app), so one match == one running instance.  Keyed by the
+/// filesystem-root directory name (aliases share their target's root).
+fn scan_running_instances() -> HashMap<String, usize> {
+    let mut map: HashMap<String, usize> = HashMap::new();
+    let Ok(root) = crate::manifest::wryayer_root() else { return map };
+    let root_prefix = format!("{}/", root.to_string_lossy());
+
+    let Ok(entries) = std::fs::read_dir("/proc") else { return map };
+    for entry in entries.flatten() {
+        let fname = entry.file_name();
+        // Only numeric PID directories.
+        if !fname.to_str().map(|s| s.bytes().all(|b| b.is_ascii_digit())).unwrap_or(false) {
+            continue;
+        }
+        // Count only the actual bwrap monitor.  When ram_limit is set the launch
+        // is `systemd-run … bwrap --bind <root> / …`, so systemd-run's cmdline
+        // carries the same triple; filtering by the real executable (bwrap is
+        // exec'd through a symlink, but /proc/<pid>/exe still resolves to it)
+        // avoids double-counting that wrapper.
+        let is_bwrap = std::fs::read_link(entry.path().join("exe"))
+            .ok()
+            .as_deref()
+            .and_then(std::path::Path::file_name)
+            .map(|n| n == "bwrap")
+            .unwrap_or(false);
+        if !is_bwrap {
+            continue;
+        }
+        let Ok(raw) = std::fs::read(entry.path().join("cmdline")) else { continue };
+        let args: Vec<&str> = raw
+            .split(|&b| b == 0)
+            .filter_map(|s| std::str::from_utf8(s).ok())
+            .filter(|s| !s.is_empty())
+            .collect();
+        // Look for the `--bind <app_root> /` triple that mounts the sandbox root.
+        for w in args.windows(3) {
+            if w[0] == "--bind" && w[2] == "/" && w[1].starts_with(&root_prefix) {
+                if let Some(rest) = w[1].strip_prefix(&root_prefix) {
+                    let name = rest.split('/').next().unwrap_or("");
+                    if !name.is_empty() {
+                        *map.entry(name.to_string()).or_insert(0) += 1;
+                    }
+                }
+                break;
+            }
+        }
+    }
+    map
+}
 
 pub fn run() -> Result<()> {
     enable_raw_mode()?;
@@ -467,6 +538,7 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(
             }
         }
 
+        app.refresh_running_instances();
         terminal.draw(|f| ui::draw(f, &mut app))?;
 
         if app.quit {

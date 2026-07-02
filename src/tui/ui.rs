@@ -21,6 +21,9 @@ const C_RED: Color = Color::Red;
 const C_YELLOW: Color = Color::Yellow;
 const C_DIM: Color = Color::DarkGray;
 const C_SELECT: Color = Color::Rgb(40, 60, 80);
+// Low-saturation green for the "running instances" badge — reads as active
+// without competing with the app name.
+const C_RUNNING: Color = Color::Rgb(104, 148, 104);
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
@@ -240,7 +243,15 @@ fn draw_installed(f: &mut Frame, app: &mut App, area: Rect) {
         } else {
             Span::raw(" ")
         };
-        if let Some(ref target) = m.app.alias_of {
+        // Running-instance badge, keyed by the filesystem-root name (aliases
+        // share their target's sandbox root).  Rendered in low saturation.
+        let fs_root = m.app.alias_of.as_deref().unwrap_or(&m.app.name);
+        let run_badge = match app.running_instances.get(fs_root).copied().unwrap_or(0) {
+            0 => None,
+            n => Some(Span::styled(format!(" ({n})"), Style::default().fg(C_RUNNING))),
+        };
+
+        let mut spans = if let Some(ref target) = m.app.alias_of {
             let is_last = app.installed.get(i + 1)
                 .map(|next| next.app.alias_of.as_deref() != Some(target.as_str()))
                 .unwrap_or(true);
@@ -252,25 +263,29 @@ fn draw_installed(f: &mut Frame, app: &mut App, area: Rect) {
             } else {
                 spans.push(Span::styled(&m.app.name, Style::default().fg(C_DIM)));
             }
-            ListItem::new(Line::from(spans))
+            spans
         } else if let Some(ref dn) = m.app.display_name {
-            ListItem::new(Line::from(vec![
+            vec![
                 dot,
                 Span::styled(format!(" {}", dn), Style::default().fg(list_fg)),
                 Span::styled(format!(" [{}]", m.app.name), Style::default().fg(C_DIM)),
-            ]))
+            ]
         } else if let Some(ref pn) = m.app.pkg_name {
-            ListItem::new(Line::from(vec![
+            vec![
                 dot,
                 Span::styled(format!(" {}", m.app.name), Style::default().fg(list_fg)),
                 Span::styled(format!(" [{}]", pn), Style::default().fg(C_DIM)),
-            ]))
+            ]
         } else {
-            ListItem::new(Line::from(vec![
+            vec![
                 dot,
                 Span::styled(format!(" {}", m.app.name), Style::default().fg(list_fg)),
-            ]))
+            ]
+        };
+        if let Some(badge) = run_badge {
+            spans.push(badge);
         }
+        ListItem::new(Line::from(spans))
     }).collect();
 
     let list = List::new(items)

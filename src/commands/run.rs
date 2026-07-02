@@ -152,8 +152,9 @@ pub fn run(app_name: &str, bin: Option<&str>, args: &[String]) -> Result<()> {
         // exec() hand-off (correct signal disposition, no extra wryayer in the
         // process tree).
         // xvfb dropped here; Xvfb launched with -terminate exits automatically
-        // when the sandboxed app (its last client) exits after exec().
-        let (mut cmd, _, _xvfb) = bwrap_cmd(&app_root_str, &binary, &effective_args, &temp, &config, wine_ctx.as_ref());
+        // when the sandboxed app (its last client) exits after exec().  The
+        // dbus proxy carries PR_SET_PDEATHSIG, so it also dies with the app.
+        let (mut cmd, _, _xvfb, _dbus) = bwrap_cmd(&app_root_str, &binary, &effective_args, &temp, &config, wine_ctx.as_ref());
         set_bwrap_env(&mut cmd);
         if let Some(mib) = config.ram_limit {
             if has_systemd_run() {
@@ -184,7 +185,7 @@ fn launch_bwrap(
     config: &AppConfig,
     wine: Option<&WineCtx>,
 ) -> Result<ExitStatus> {
-    let (mut cmd, spoof_dir, mut xvfb) = bwrap_cmd(app_root_str, binary, args, temp, config, wine);
+    let (mut cmd, spoof_dir, mut xvfb, mut dbus_proxy) = bwrap_cmd(app_root_str, binary, args, temp, config, wine);
     set_bwrap_env(&mut cmd);
     let ram_mib = if let Some(mib) = config.ram_limit {
         if has_systemd_run() {
@@ -224,6 +225,11 @@ fn launch_bwrap(
     // (the sandboxed app) disconnects.  Kill it explicitly as a safety net
     // in case the app crashed without cleanly closing its X connection.
     if let Some(ref mut child) = xvfb {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    // The dbus proxy has no self-terminate flag; stop it now that the app is gone.
+    if let Some(ref mut child) = dbus_proxy {
         let _ = child.kill();
         let _ = child.wait();
     }
@@ -431,6 +437,84 @@ fn meminfo_updater_loop(
     }
 }
 
+/// Map a shared-dir path to the XDG role its basename represents, so a
+/// synthetic user-dirs.dirs can list only the shared roles.  Unshared roles
+/// disappear from the file-picker sidebar rather than appearing as broken
+/// clickable shortcuts.
+fn xdg_role_for_dir(path: &str) -> Option<&'static str> {
+    let name = std::path::Path::new(path).file_name()?.to_str()?;
+    match name {
+        "Desktop"   => Some("XDG_DESKTOP_DIR"),
+        "Downloads" => Some("XDG_DOWNLOAD_DIR"),
+        "Documents" => Some("XDG_DOCUMENTS_DIR"),
+        "Music"     => Some("XDG_MUSIC_DIR"),
+        "Pictures"  => Some("XDG_PICTURES_DIR"),
+        "Videos"    => Some("XDG_VIDEOS_DIR"),
+        "Templates" => Some("XDG_TEMPLATES_DIR"),
+        "Public"    => Some("XDG_PUBLICSHARE_DIR"),
+        _ => None,
+    }
+}
+
+/// Spawn an xdg-dbus-proxy that mirrors the host session bus at `socket_path`
+/// with the desktop portal filtered out.  In `--filter` mode the proxy's
+/// default policy makes every name invisible, so we allow-list the session
+/// services sandboxed GUI apps commonly use and simply never grant the portal
+/// names — leaving `org.freedesktop.portal.*` unreachable.  With no visible
+/// portal, GTK/Qt/Firefox/Chromium fall back to their in-sandbox file choosers,
+/// which honour the XDG overlays and can only browse mounted dirs.
+///
+/// The proxy is given PR_SET_PDEATHSIG so it dies with its parent even on the
+/// exec() retry path where nobody is left to kill it explicitly.
+fn spawn_dbus_proxy(host_bus: &str, socket_path: &str) -> Option<std::process::Child> {
+    // A stale socket from a previous run would make the proxy's bind() fail.
+    let _ = std::fs::remove_file(socket_path);
+
+    let mut proxy = Command::new("xdg-dbus-proxy");
+    proxy.arg(host_bus).arg(socket_path).arg("--filter");
+    for name in &[
+        "org.freedesktop.Notifications",         // desktop notifications
+        "org.freedesktop.secrets",               // keyring (saved passwords)
+        "org.freedesktop.ScreenSaver",           // inhibit idle during playback
+        "org.freedesktop.PowerManagement",       // ditto, older spec
+        "org.freedesktop.FileManager1",          // "show in file manager"
+        "org.a11y.Bus",                          // accessibility bridge
+        "org.kde.StatusNotifierWatcher",         // tray icons
+        "org.freedesktop.StatusNotifierWatcher",
+        "ca.desrt.dconf",                        // GSettings/dconf backend
+        "org.gtk.vfs.*",                         // GVFS mounts
+    ] {
+        proxy.arg(format!("--talk={name}"));
+    }
+    // Apps register their own MPRIS name to expose media controls.
+    proxy.arg("--own=org.mpris.MediaPlayer2.*");
+
+    proxy
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    unsafe {
+        proxy.pre_exec(|| {
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+            Ok(())
+        });
+    }
+
+    let mut child = proxy.spawn().ok()?;
+
+    // Wait (up to ~1s) for the proxy socket to appear before bwrap binds it.
+    for _ in 0..40 {
+        if std::path::Path::new(socket_path).exists() {
+            return Some(child);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    // Never came up — don't point the sandbox at a dead bus.
+    let _ = child.kill();
+    let _ = child.wait();
+    None
+}
+
 // ── bwrap command builder ─────────────────────────────────────────────────────
 
 fn find_free_xdisplay() -> Option<u32> {
@@ -444,7 +528,7 @@ fn find_free_xdisplay() -> Option<u32> {
     None
 }
 
-fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, config: &AppConfig, wine: Option<&WineCtx>) -> (Command, Option<PathBuf>, Option<std::process::Child>) {
+fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, config: &AppConfig, wine: Option<&WineCtx>) -> (Command, Option<PathBuf>, Option<std::process::Child>, Option<std::process::Child>) {
     // Terminal spoofing: exec bwrap through a symlink named after the detected
     // terminal. Linux sets task->comm from the exec basename, so fastfetch's
     // process-tree walk sees the terminal name instead of "bwrap".
@@ -687,6 +771,66 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
         }
     }
 
+    // ── XDG file-picker filtering ────────────────────────────────────────────
+    //
+    // GTK/Qt file choosers build their "Places" sidebar from
+    // $HOME/.config/user-dirs.dirs (via g_get_user_special_dir), and file
+    // managers pull sidebar entries from gtk-*/bookmarks and recently-used.xbel.
+    // Without an overlay these files can leak host paths — Pictures, Music,
+    // Videos — even though the sandbox itself doesn't bind them, so the picker
+    // shows clickable shortcuts that fail with ENOENT when clicked.  Write a
+    // synthetic user-dirs.dirs listing only shared_dirs whose basename matches
+    // an XDG role, and blank the other sources.
+    if let Ok(home) = std::env::var("HOME") {
+        let mut ud = String::from("# generated by wryayer\n");
+        for dir in &config.shared_dirs {
+            if let Some(role) = xdg_role_for_dir(dir) {
+                ud.push_str(&format!("{role}=\"{dir}\"\n"));
+            }
+        }
+        let udf = spoof_dir.join("user-dirs.dirs");
+        if std::fs::write(&udf, &ud).is_ok() {
+            if let Some(s) = udf.to_str() {
+                let target = format!("{home}/.config/user-dirs.dirs");
+                cmd.args(["--ro-bind", s, &target]);
+            }
+        }
+
+        // Blank system-wide XDG defaults so glib doesn't invent role→path
+        // fallbacks when the per-user file omits a role.
+        let udd = spoof_dir.join("user-dirs.defaults");
+        if std::fs::write(&udd, "").is_ok() {
+            if let Some(s) = udd.to_str() {
+                cmd.args(["--ro-bind-try", s, "/etc/xdg/user-dirs.defaults"]);
+            }
+        }
+
+        // Empty bookmarks — clears pinned entries in GTK 2/3/4 file dialogs.
+        let gb = spoof_dir.join("gtk-bookmarks");
+        if std::fs::write(&gb, "").is_ok() {
+            if let Some(s) = gb.to_str() {
+                for v in &["gtk-2.0", "gtk-3.0", "gtk-4.0"] {
+                    cmd.args(["--ro-bind-try", s, &format!("{home}/.config/{v}/bookmarks")]);
+                }
+            }
+        }
+
+        // Empty recently-used.xbel — otherwise host recent-file entries appear
+        // as broken clickable shortcuts in the picker's "Recent" section.
+        let rr = spoof_dir.join("recently-used.xbel");
+        let stub = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<xbel version=\"1.0\"/>\n";
+        if std::fs::write(&rr, stub).is_ok() {
+            if let Some(s) = rr.to_str() {
+                cmd.args(["--ro-bind-try", s, &format!("{home}/.local/share/recently-used.xbel")]);
+            }
+        }
+
+        // Disable the desktop-portal file chooser: it runs on the host and
+        // would bypass every overlay above by returning host paths.  GTK 3
+        // honours GTK_USE_PORTAL=0; Firefox uses GTK's chooser under the hood.
+        cmd.args(["--setenv", "GTK_USE_PORTAL", "0"]);
+    }
+
     if let Some(ref os_val) = config.spoof_os {
         let content = match os_val.as_str() {
             "ubuntu" => "NAME=Ubuntu\nID=ubuntu\nPRETTY_NAME=\"Ubuntu 24.04 LTS\"\nVERSION_ID=24.04\nID_LIKE=debian\n".to_string(),
@@ -786,6 +930,7 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
     //
     // Audio and Wayland are re-pointed explicitly so they keep working after the
     // runtime-dir change.
+    let mut dbus_proxy_child: Option<std::process::Child> = None;
     {
         let host_rt = std::env::var("XDG_RUNTIME_DIR")
             .unwrap_or_else(|_| format!("/run/user/{}", unsafe { libc::getuid() }));
@@ -828,6 +973,32 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
         // inherits that env and then cannot find the user bus socket under the
         // isolated path, causing "Failed to connect to user scope bus".
         cmd.args(["--setenv", "XDG_RUNTIME_DIR", &isolated_rt]);
+
+        // ── Session-bus portal filter ─────────────────────────────────────────
+        //
+        // The sandbox otherwise reaches the host desktop portal through the
+        // session bus (bound via /run), so Firefox/Chromium open the host-side
+        // portal file chooser — which shows the user's whole home and hands back
+        // paths that aren't mounted, producing errors.  Route D-Bus through
+        // xdg-dbus-proxy with the portal filtered out; apps then use their own
+        // in-sandbox choosers, which only see shared dirs.
+        //
+        // Uses --setenv (not cmd.env) for the same reason as XDG_RUNTIME_DIR:
+        // the systemd-run --scope wrapper must keep the real user bus to create
+        // the scope, so the filtered address may only exist inside the sandbox.
+        if config.portal_filter {
+            let host_bus = std::env::var("DBUS_SESSION_BUS_ADDRESS")
+                .unwrap_or_else(|_| format!("unix:path={host_rt}/bus"));
+            let proxy_sock = format!("{isolated_rt}/bus");
+            if let Some(child) = spawn_dbus_proxy(&host_bus, &proxy_sock) {
+                dbus_proxy_child = Some(child);
+                cmd.args([
+                    "--setenv",
+                    "DBUS_SESSION_BUS_ADDRESS",
+                    &format!("unix:path={proxy_sock}"),
+                ]);
+            }
+        }
     }
 
     // ── Wine game ─────────────────────────────────────────────────────────────
@@ -847,7 +1018,7 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
 
     cmd.args(["--", binary]);
     cmd.args(args);
-    (cmd, term_spoof_dir, xvfb_child)
+    (cmd, term_spoof_dir, xvfb_child, dbus_proxy_child)
 }
 
 /// Scan the sandbox's `home/` subtree for ELF files with missing soname

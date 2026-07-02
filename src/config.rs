@@ -58,6 +58,10 @@ pub struct AppConfig {
     pub spoof_resolution: Option<String>,
     /// Whether to create a ~/bin shortcut by default when installing (global only)
     pub create_shortcut: bool,
+    /// Route the sandbox's D-Bus session through a filter that hides the host
+    /// desktop portal, so file pickers run in-sandbox and only show shared
+    /// dirs instead of leaking host paths (default: true)
+    pub portal_filter: bool,
 }
 
 impl Default for AppConfig {
@@ -79,6 +83,7 @@ impl Default for AppConfig {
             ram_limit: None,
             spoof_resolution: None,
             create_shortcut: true,
+            portal_filter: true,
         }
     }
 }
@@ -179,6 +184,7 @@ fn sync_container_aliases(root_name: &str, root_config: &AppConfig) -> Result<()
         alias_cfg.spoof_terminal   = root_config.spoof_terminal;
         alias_cfg.ram_limit        = root_config.ram_limit;
         alias_cfg.spoof_resolution = root_config.spoof_resolution.clone();
+        alias_cfg.portal_filter    = root_config.portal_filter;
         let alias_path = config_path(alias)?;
         fs::write(&alias_path, format_ini(&alias_cfg))
             .with_context(|| format!("failed to write {}", alias_path.display()))?;
@@ -273,6 +279,9 @@ pub fn parse_ini(content: &str) -> Result<AppConfig> {
             }
             ("create_shortcut", v) => {
                 config.create_shortcut = !matches!(v, "off" | "false" | "0" | "no");
+            }
+            ("portal_filter", v) => {
+                config.portal_filter = !matches!(v, "off" | "false" | "0" | "no");
             }
             _ => {}
         }
@@ -376,10 +385,17 @@ pub fn format_ini(config: &AppConfig) -> String {
         s.push_str("; Screen resolution to report via xrandr and env vars (e.g. 1920x1080)\n");
         s.push_str(&format!("spoof_resolution = {res}\n"));
     }
-    if !config.create_shortcut {
+    if !config.create_shortcut || !config.portal_filter {
         s.push_str("\n[behavior]\n");
-        s.push_str("; Create ~/bin/<name> shortcut by default when installing apps\n");
-        s.push_str("create_shortcut = off\n");
+        if !config.create_shortcut {
+            s.push_str("; Create ~/bin/<name> shortcut by default when installing apps\n");
+            s.push_str("create_shortcut = off\n");
+        }
+        if !config.portal_filter {
+            s.push_str("; Hide the host desktop portal so file pickers only show shared dirs.\n");
+            s.push_str("; Turn off if an app needs portal features (screen-share, portal file open).\n");
+            s.push_str("portal_filter = off\n");
+        }
     }
     s
 }
