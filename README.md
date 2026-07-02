@@ -11,6 +11,9 @@ wryayer installs packages into fully-isolated per-app directory trees under `~/.
 
 On **Arch Linux** it resolves and downloads packages via `pacman` and the AUR. On **Debian / Ubuntu** it uses `apt-get download` and `dpkg-deb`. On **Fedora / RHEL** and derivatives it uses `dnf download` and `rpm2cpio`. The distro is detected automatically from `/etc/os-release`.
 
+> 🛠 **Curious how it works inside?** The architecture, on-disk layout, sandbox
+> internals, and developer/testing docs live in **[`README-CODE.md`](README-CODE.md)**.
+
 ---
 
 ## Why this exists
@@ -24,105 +27,6 @@ Arch Linux has one of the richest package ecosystems on the planet, but its sing
 wryayer solves all three by extracting packages into self-contained directory trees that are bind-mounted as `/` at runtime. Apps can't see your home directory unless you explicitly share a folder. Conflicting dependency versions coexist without interference. Removing an app is a single `rm -rf`.
 
 **It is not a security sandbox.** The goal is isolation and disk-space efficiency, not hardened confinement. A determined app can still escape via `/proc`, shared IPC, or device access; `audio=off` and `network=off` raise the bar but are not guarantees.
-
----
-
-## Architecture
-
-```
-                          ┌──────────────────────────────────────────┐
-                          │                 wryayer                   │
-                          └──────────────┬───────────────────────────┘
-              ┌───────────────────────────┴──────────────────────────┐
-              │  TUI (ratatui / crossterm)    CLI (clap)             │
-              │  ┌───────────────────────┐   install   remove  list  │
-              │  │ Installed │ Install   │   run       update  repair │
-              │  │ Import    │ Space     │   config    export  import │
-              │  │ Settings (global cfg) │   snapshot  rollback  tui  │
-              │  └───────────────────────┘   snapshots  snapshot-prune│
-              │                              dedup      completions   │
-              └────────────────────────┬─────────────────────────────┘
-                                       │
-          ┌────────────────────────────┼──────────────────────────────┐
-          │                      Core layer                           │
-          │                                                           │
-          │  manifest.rs           config.rs          launcher.rs     │
-          │  ┌──────────────┐   ┌────────────────┐  ┌─────────────┐   │
-          │  │ .manifest.   │   │ config.ini     │  │ ~/bin/<app> │   │
-          │  │ toml R/W     │   │ INI parse/write│  │ shell wrap  │   │
-          │  │ list apps    │   │ sandbox options│  │ create/rm   │   │
-          │  └──────────────┘   └────────────────┘  └─────────────┘   │
-          │                                                           │
-          │  package/                        commands/dedup.rs        │
-          │  ┌──────────────────────────┐   ┌─────────────────────┐   │
-          │  │ deps.rs                  │   │ hard-link identical │   │
-          │  │  BFS dep resolver        │   │ files across apps   │   │
-          │  │  virtual/soname fallback │   │ (dev,ino) accounting│   │
-          │  │ download.rs              │   │ format_bytes / du   │   │
-          │  │  delegates to distro.rs  │   └─────────────────────┘   │
-          │  │ extract.rs               │                             │
-          │  │  delegates to distro.rs  │                             │
-          │  │ soname_check.rs          │                             │
-          │  │  delegates to distro.rs  │                             │
-          │  └──────────────────────────┘                             │
-          │                                                           │
-          │  distro.rs  (auto-detected from /etc/os-release)          │
-          │  ┌──────────────────────────────────────────────────┐     │
-          │  │  Arch:   pacman -Si, pacman -Sp, tar --zstd,     │     │
-          │  │          vercmp, AUR RPC + git clone + makepkg   │     │
-          │  │  Debian: apt-cache show, apt-get download,       │     │
-          │  │          dpkg-deb -x, dpkg -S,                   │     │
-          │  │          dpkg --compare-versions                 │     │
-          │  │  Fedora: dnf repoquery, dnf download,            │     │
-          │  │          rpm2cpio | cpio, rpm -qf, rpm --eval    │     │
-          │  └──────────────────────────────────────────────────┘     │
-          └───────────────────────────────────────────────────────────┘
-
-Filesystem layout:
-─────────────────
-~/.wryayer/
-├── firefox/                 ← isolated root (bind-mounted as / at runtime)
-│   ├── usr/
-│   │   ├── bin/firefox
-│   │   └── lib/             ← shared libs, hard-linked with other apps
-│   │        libz.so.1       │  where content is identical (dedup)
-│   │        libpng.so.16    │
-│   ├── etc/                 ← app-specific /etc
-│   ├── .manifest.toml       ← package list + install metadata
-│   └── config.ini           ← per-app sandbox settings
-├── fastfetch/               ← target of an `install --into` chain
-│   ├── usr/bin/{fastfetch,hyfetch}
-│   └── .manifest.toml
-├── hyfetch/                 ← thin alias dir — no extracted files
-│   ├── .manifest.toml       ← alias_of = "fastfetch"
-│   └── config.ini           ← independent sandbox config
-└── vlc/
-     └── ...
-
-~/bin/
-├── firefox    ──►  exec wryayer run firefox "$@"
-├── fastfetch  ──►  exec wryayer run fastfetch "$@"
-├── hyfetch    ──►  exec wryayer run hyfetch "$@"   (bwrap roots on fastfetch/)
-└── vlc
-
-bwrap sandbox at runtime:
-──────────────────────────
-~/.wryayer/<app>/   ──► /                   (app root, rw)
-/dev                ──► /dev                (devices, configurable)
-/proc               ──► /proc
-/sys                ──► /sys                (read-only)
-/run                ──► /run
-/tmp                ──► /tmp                (system | tmpfs | local dir | uuid dir)
-/etc/resolv.conf    ──► /etc/...            (read-only host network/identity files)
-/etc/hosts               ...
-/etc/ssl/certs           ...
-/etc/ca-certificates ──► /etc/ca-certificates  (CA bundle target; symlinks in ssl/certs point here)
-/usr/share/fonts    ──► /usr/share/fonts    (read-only; required by Chromium/Electron/NW.js)
-/etc/fonts          ──► /etc/fonts          (fontconfig configuration)
-/usr/share/fontconfig ──► /usr/share/fontconfig
-/usr/lib/qt6/plugins ──► /usr/lib/qt6/plugins  (Qt platform plugins from host)
-<shared_dirs>       ──► <same>              (user-configured, read-write)
-```
 
 ---
 
@@ -166,6 +70,8 @@ wryayer auto-detects your distro from `/etc/os-release` and uses the appropriate
 | `gtk-update-icon-cache` | `sudo pacman -S gtk-update-icon-cache` | Optional — needed for icon themes (Adwaita, hicolor) |
 | `gdk-pixbuf-query-loaders` | `sudo pacman -S gdk-pixbuf2` | Optional — pixbuf loader cache |
 | `xorg-server-xvfb` | `sudo pacman -S xorg-server-xvfb` | Optional — required for browser screen resolution spoofing |
+| `xdg-dbus-proxy` | `sudo pacman -S xdg-dbus-proxy` | Optional — required for the file-picker portal filter (on by default) |
+| `avahi` | `sudo pacman -S avahi` | Optional — silences zeroconf errors in Electron/KDE apps |
 
 ### Debian / Ubuntu
 
@@ -178,6 +84,7 @@ wryayer auto-detects your distro from `/etc/os-release` and uses the appropriate
 | **apt** | Pre-installed | Dep resolution and download |
 | `ldconfig` | `sudo apt install libc-bin` | Library cache rebuild after install |
 | `xvfb` | `sudo apt install xvfb` | Optional — required for browser screen resolution spoofing |
+| `xdg-dbus-proxy` | `sudo apt install xdg-dbus-proxy` | Optional — required for the file-picker portal filter (on by default) |
 
 > **AUR packages are Arch-only.** On Debian/Ubuntu, only packages from `apt` repos are available. Attempting to install an AUR-only package will print a warning and skip that dep.
 
@@ -192,6 +99,7 @@ wryayer auto-detects your distro from `/etc/os-release` and uses the appropriate
 | **rpm2cpio** | `sudo dnf install rpm` | Package extraction |
 | `ldconfig` | Pre-installed | Library cache rebuild after install |
 | `xorg-x11-server-Xvfb` | `sudo dnf install xorg-x11-server-Xvfb` | Optional — required for browser screen resolution spoofing |
+| `xdg-dbus-proxy` | `sudo dnf install xdg-dbus-proxy` | Optional — required for the file-picker portal filter (on by default) |
 
 ---
 
@@ -352,6 +260,13 @@ wryayer update firefox    # update one app
 wryayer update --check    # report available updates without installing
 ```
 
+Updates **preserve your data and snapshots**: the sandbox `home/` (browser
+profiles, settings), the per-app `config.ini`, and every saved snapshot survive
+the re-extraction, and any programs merged in with `--into` are re-resolved so
+their binaries are never lost. In the TUI, wryayer checks for updates on startup
+and marks out-of-date apps with a dot; `u` updates the selected app and
+`Shift+U` updates every out-of-date app at once.
+
 ### Export and import
 
 ```fish
@@ -387,7 +302,10 @@ wryayer snapshot-prune firefox
 wryayer snapshot-prune firefox --keep 5
 ```
 
-Snapshots survive updates because wryayer unlinks any existing file before overwriting it during extraction — a re-extracted file always gets a fresh inode, while the snapshot's hard link continues pointing at the old content. The cross-app dedup pass at the end of every install re-establishes shared-library hard links.
+Snapshots survive updates: a rollback after an update returns you to the
+pre-update version. (Extraction always writes a fresh inode, so the snapshot's
+hard link keeps pointing at the old content; the dedup pass at the end of every
+install re-establishes shared-library hard links.)
 
 Snapshots are excluded from `wryayer list` size totals, `wryayer dedup`, and the export zip.
 
@@ -457,6 +375,7 @@ Key bindings:
 | `p` | Snapshot selected app (hard-linked clone) |
 | `o` | Roll selected app back to its latest snapshot |
 | `u` | Update selected app |
+| `U` | Update **all** out-of-date apps |
 | `c` | Check for updates |
 | `s` | Open per-app config |
 | `n` | Rename app (set display name) |
@@ -465,13 +384,23 @@ Key bindings:
 | `?` | Show key-bindings reference |
 | `Shift+Q` | Force-quit from anywhere |
 
+**Update indicators** — On startup (and after every install/update/remove) wryayer checks all apps for newer versions in the background and marks the out-of-date ones with a small dot in the Installed list. `Shift+U` updates them all in one go, after a confirmation listing what's out of date.
+
+**Running-instance count** — Apps that currently have a live sandbox running show a count next to their name, so you can see at a glance what's open.
+
 **Multi-select install** — In the Install tab, press `Space` to mark one or more search results, then `Enter` to install all marked packages one after another. Marks persist across searches so you can search for different packages and add them to the queue before starting. Only marked packages are installed; pressing `Enter` with no marks installs the hovered item.
 
-**Shortcut prompt** — Before each install begins, a popup asks whether to create a `~/bin/<name>` launcher shortcut. Choose "Yes" (the default) to create the shortcut, or "No" to install without one.
+**Install prompts** — Before an install begins, wryayer asks for a confirmation and then whether to create a `~/bin/<name>` launcher shortcut. Both prompts can be turned off in **Settings** (see below) if you'd rather installs start immediately.
 
 The **Settings** tab uses a native two-panel layout: the left panel lists all settings with their current values colour-coded (green = on, red = off, yellow = other); the right panel shows a description and the available choices for the selected row. Press `Enter` or `←`/`→` to change a value; press `Enter` on **Save** to persist. Settings are stored in `~/.wryayer/defaults.ini` and apply as defaults to every newly installed app. Per-app overrides always take precedence.
 
-The **Create shortcut** setting in the Settings tab controls whether the shortcut prompt defaults to "Yes" or "No" for every install. Set it to "No" to suppress shortcut creation by default while still being asked each time.
+Global-only install behaviour lives in the Settings tab too:
+
+| Setting | Effect |
+|---|---|
+| **Default shortcut** | Whether the shortcut prompt pre-selects "Yes" or "No" |
+| **Confirm install** | `off` skips the "Install `<pkg>`?" prompt and starts the install immediately |
+| **Ask shortcut** | `off` skips the shortcut prompt and silently applies **Default shortcut** |
 
 ---
 
@@ -507,6 +436,15 @@ wryayer config firefox share list
 | `audio` | `on` `off` | `on` | Mask ALSA + PipeWire/PulseAudio sockets |
 | `share add <path>` | Any existing directory | — | Bind-mount `<path>` read-write inside the sandbox |
 | `ramlimit <MiB\|none>` | Integer (MiB) or `none` | `none` | Hard cap on RAM **and** swap combined, enforced via `systemd-run --scope -p MemoryMax=NM -p MemorySwapMax=0` (requires systemd). Both limits are necessary — without `MemorySwapMax=0` the kernel silently offloads pages to swap (including zram), letting the app exceed the cap. |
+| `portal_filter` | `on` `off` | `on` | Hide the host desktop portal so in-sandbox file pickers list only your shared directories instead of the whole home tree. Turn `off` if an app needs portal features (screen-share, portal-based file open). |
+
+### File pickers only show shared directories
+
+With `portal_filter` on (the default), opening a file dialog inside a sandboxed
+app shows **only the folders you've shared** (`share add …`) — not your real
+home directory. This needs `xdg-dbus-proxy` installed; without it the filter is
+skipped and the app falls back to the host portal. Set `portal_filter off` for a
+specific app if it relies on portal features that the filter blocks.
 
 ### Identity spoofing
 
@@ -601,7 +539,7 @@ The config is stored as a human-readable INI file at `~/.wryayer/<app>/config.in
 
 **Microphone isolation is incomplete.** Setting `microphone=off` masks ALSA capture devices (`/dev/snd/pcmC*D*c`). Apps using PipeWire or PulseAudio can still access the microphone socket in `XDG_RUNTIME_DIR`. To fully block mic access, also set `audio=off`.
 
-**No D-Bus session bus isolation.** The sandbox inherits the host `DBUS_SESSION_BUS_ADDRESS`. Apps that use D-Bus can still talk to other session services (Notifications, portal services, etc.).
+**Partial D-Bus session isolation.** With `portal_filter` on, the sandbox's session bus is routed through a filter proxy that hides the host desktop portal (so file pickers stay confined to shared dirs) while still forwarding Notifications, secrets, MPRIS, etc. Other session services remain reachable, and with `portal_filter off` the app talks to the host session bus directly.
 
 **Hard links require same filesystem.** Deduplication only works when all `~/.wryayer/<app>/` directories are on the same filesystem. If you mount `~/.wryayer` on a separate partition from another app, `dedup` will silently skip cross-device hard-links.
 
@@ -630,7 +568,7 @@ The config is stored as a human-readable INI file at `~/.wryayer/<app>/config.in
 - [x] **Install into existing app** — `wryayer install <pkg> --into <existing>` for plugins and bundles; alias gets its own first-class entry under `~/.wryayer/<pkg>/` with `alias_of` pointer
 - [x] **TUI install target picker** — choosing Install on a search result now prompts whether to start a new app or merge into an existing one
 - [ ] **Wayland isolation** — bind a private Wayland socket so apps can't impersonate each other
-- [ ] **D-Bus portal forwarding** — route file-chooser and notification portals through `xdg-desktop-portal` without exposing the full session bus
+- [x] **D-Bus portal filtering** — file pickers run in-sandbox and only show shared dirs, via an `xdg-dbus-proxy` filter that hides the host portal (`portal_filter`)
 - [ ] **Package signing verification** — validate `.pkg.tar.zst` signatures before extraction
 - [ ] **Delta updates** — only re-download changed packages instead of the full dep tree
 - [ ] **Export/import via SSH or SFTP** — `wryayer export --remote user@host:/path`
@@ -639,54 +577,17 @@ The config is stored as a human-readable INI file at `~/.wryayer/<app>/config.in
 - [x] **Global default settings** — Settings tab in TUI and `~/.wryayer/defaults.ini` set defaults inherited by all new apps
 - [x] **Multi-select install** — mark multiple search results with `Space`, install them all sequentially with `Enter`; marks persist across searches
 - [x] **Screen resolution spoofing** — run the app inside an Xvfb virtual display at the target resolution so `window.screen.width/height` reports the spoofed value in browsers
+- [x] **Update all** — check every app for updates on TUI start and update the out-of-date ones with `Shift+U`
 - [ ] **Per-app env var overrides** — let users set `LANG`, `QT_SCALE_FACTOR`, etc. in `config.ini`
 - [ ] **Dependency graph viewer** — TUI screen showing the full package tree for an installed app
 - [ ] **Auto-snapshot on update** — capture a snapshot automatically before each update so failures can be undone with one keystroke
 
 ---
 
-## Developing and testing
+## Contributing & internals
 
-### Build
-
-```fish
-cargo build
-```
-
-### Run tests
-
-Tests that touch the filesystem isolate themselves by temporarily redirecting `HOME` to a temp directory. Run with a single thread to avoid races on the `HOME` environment variable:
-
-```fish
-cargo test -- --test-threads=1
-```
-
-Or set a thread-safe count per test binary:
-
-```fish
-RUST_TEST_THREADS=1 cargo test
-```
-
-### Test coverage
-
-The test suite targets **≥ 90 % branch coverage** on all pure and filesystem-dependent logic. Coverage is achieved through **equivalence class partitioning** — one representative value per class rather than exhaustive enumeration — combined with explicit boundary and error-path tests.
-
-| Module / test file | What is covered |
-|---|---|
-| `config.rs` (`config_tests.rs`) | `parse_ini` (all keys, all enum variants, error paths, `ram_limit` disable aliases / integers / absent), `format_ini` (`[resources]` section presence/absence), `parse_bool` (3 EC), round-trip (including `ram_limit`) |
-| `config.rs` (`global_config_tests.rs`) | `read_global_config` fallback when file absent, `write_global_config` + `read_global_config` round-trip |
-| `manifest.rs` | `write_manifest`/`read_manifest` round-trip, `list_all_apps` (empty, sorted, skips bad dirs), atomicity |
-| `launcher.rs` | `create_launcher` (content, permissions), `remove_launcher` (missing, non-wryayer, valid) |
-| `commands/dedup.rs` | `format_bytes` (4 EC + 7 boundaries), `du_walk` (SKIP_DIRS, hard-link accounting) |
-| `package/deps.rs` | `strip_version_constraint` (7 operators), `is_soname_dep` (5 EC), `parse_pacman_field`, `parse_pacman_depends` (5 EC) |
-| `commands/run.rs` | Arg stripping (5 cases), `no_other_instance` (missing file, bad content, live PID, dead PID), `has_systemd_run` (filesystem consistency), `wrap_with_ram_limit` (outer program, `--user`/`--scope`/`--quiet`, `MemoryMax`, `MemorySwapMax=0`, `--` separator, inner args preserved, env transfer) |
-| `commands/install.rs` | `ensure_base_layout` (creates all symlinks, idempotent, preserves real dirs) |
-| `commands/snapshot.rs` | `create` / `labels` / `latest` round-trip, inode sharing, `.snapshots` recursion guard, `rollback` (restores modifications, errors on missing label, preserves snapshots dir) |
-| `commands/remove.rs` + alias model | `alias_of` serde round-trip, `skip_serializing_if` for `None`, legacy manifests without the field still parse, `list_all_apps` surfaces aliases as own entries, removing an alias leaves the target tree + manifest untouched, removing a target with dependent aliases is blocked with all blockers named, standalone removal unaffected |
-| `tui/mod.rs` (`option_picker_tests.rs`) | `setting_options` (shape per row incl. RAM limit row 13, spoof_resolution row 14, create_shortcut row 15), `setting_title`, `setting_description`, `option_description`, `setting_current`, `apply_setting`, `cycle_setting` — full forward/backward/wrap cycles for all non-empty rows |
-| `tui/mod.rs` | `parse_progress` (`PROGRESS n/total` parsing + garbage rejection), konami FSM (full sequence, wrong-key reset, case-insensitive BA) |
-
-External-tool-dependent code (`bwrap_cmd`, `reinstall`, distro backends) is covered by integration tests that require a live environment with `bwrap` and either `pacman` (Arch) or `apt` / `dpkg` (Debian/Ubuntu) present.
+Architecture, on-disk layout, sandbox construction, and developer/testing docs
+(build, `cargo test`, coverage) live in **[`README-CODE.md`](README-CODE.md)**.
 
 ---
 
