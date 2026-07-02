@@ -74,6 +74,31 @@ fn reinstall(manifest: &crate::manifest::Manifest) -> Result<()> {
     eprintln!("Resolving dependencies for {app_name}...");
     let mut resolved = resolve_full_dep_tree(app_name)?;
 
+    // Merged-in child programs (installed with `--into <app>`) share this same
+    // filesystem tree but are tracked by their own alias manifests; their
+    // packages are NOT part of app_name's dependency tree.  Re-resolve each one
+    // and fold it into the set, otherwise the wipe-and-extract below deletes
+    // every child binary.  Any resolve failure bails *before* the wipe, so a
+    // transient error can never leave the tree missing a child.
+    let mut seen: std::collections::HashSet<String> =
+        resolved.iter().map(|p| p.name.clone()).collect();
+    let children: Vec<Manifest> = list_all_apps()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|m| m.app.alias_of.as_deref() == Some(app_name.as_str()))
+        .collect();
+    for child in &children {
+        let root_pkg = child.app.pkg_name.as_deref().unwrap_or(child.app.name.as_str());
+        eprintln!("Resolving child program {} ({root_pkg})...", child.app.name);
+        let child_tree = resolve_full_dep_tree(root_pkg)
+            .with_context(|| format!("failed to resolve child program '{}'", child.app.name))?;
+        for p in child_tree {
+            if seen.insert(p.name.clone()) {
+                resolved.push(p);
+            }
+        }
+    }
+
     let home = std::env::var("HOME").context("HOME not set")?;
     let cache_dir = PathBuf::from(&home).join(".cache").join("wryayer").join("pkg");
     let build_dir = PathBuf::from(&home).join(".cache").join("wryayer").join("build");
@@ -97,9 +122,11 @@ fn reinstall(manifest: &crate::manifest::Manifest) -> Result<()> {
 
     // Remove old package-provided files but keep user data: the sandbox home
     // (browser profiles, font caches, GUI app settings), the per-app wryayer
-    // config, and the install manifest itself.  Without this, every update
-    // wipes the user's Firefox profile, etc.
-    const PRESERVE: &[&str] = &[".manifest.toml", "config.ini", "home"];
+    // config, the install manifest, and all snapshots (so a post-update
+    // rollback still returns to a pre-update version).  Without this, every
+    // update wipes the user's Firefox profile and every saved snapshot.
+    const PRESERVE: &[&str] =
+        &[".manifest.toml", "config.ini", "home", crate::commands::snapshot::SNAP_DIR];
     if app_dir.exists() {
         for entry in fs::read_dir(&app_dir)
             .with_context(|| format!("failed to read app dir {}", app_dir.display()))?
