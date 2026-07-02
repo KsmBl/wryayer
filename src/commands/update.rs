@@ -202,6 +202,33 @@ fn reinstall(manifest: &crate::manifest::Manifest) -> Result<()> {
     Ok(())
 }
 
+/// Check every installed (non-alias) app for a newer package version without
+/// modifying anything.  Returns app name -> latest available version for the
+/// apps that have an update.  Network- and pacman-bound, so callers should run
+/// it off any UI thread.
+pub fn check_all_updates() -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    let Ok(manifests) = list_all_apps() else { return out };
+    for manifest in &manifests {
+        if manifest.app.alias_of.is_some() {
+            continue;
+        }
+        let name = &manifest.app.name;
+        let main_pkg = manifest.packages.iter().find(|p| p.name == *name);
+        let current = main_pkg.map(|p| p.version.as_str()).unwrap_or("0");
+        let latest = match main_pkg.map(|p| &p.source).unwrap_or(&PackageSource::Official) {
+            PackageSource::Official => get_official_version(name),
+            PackageSource::Aur => get_aur_version(name),
+        };
+        if let Ok(Some(ver)) = latest {
+            if is_newer(&ver, current).unwrap_or(false) {
+                out.insert(name.clone(), ver);
+            }
+        }
+    }
+    out
+}
+
 fn get_official_version(pkg_name: &str) -> Result<Option<String>> {
     crate::distro::pkg_latest_version(pkg_name)
 }

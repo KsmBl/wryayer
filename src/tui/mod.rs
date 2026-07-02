@@ -201,6 +201,7 @@ pub enum PendingAction {
     RemoveCascade(String, Vec<String>),
     ConfirmedRemoveCascade(String),
     Update(String),
+    UpdateAll,
     Install { pkg: String, app_name: Option<String>, into: Option<String> },
     Export(String),
     Snapshot(String),
@@ -240,6 +241,10 @@ pub struct App {
     pub installed: Vec<Manifest>,
     pub inst_state: ListState,
     pub update_available: HashMap<String, String>,
+    /// Async update check, streamed in from a background thread on start and
+    /// after reloads so the list dots appear without blocking the UI.
+    pub update_tx: Sender<HashMap<String, String>>,
+    pub update_rx: Receiver<HashMap<String, String>>,
     // Install tab — async search
     pub search_input: String,
     /// (package_name, optional_repo) pairs returned by pkg_search.
@@ -305,12 +310,16 @@ impl App {
         }
         let (app_sizes, du_apparent, du_actual) = all_du().unwrap_or_default();
         let (search_tx, search_rx) = mpsc::channel();
+        let (update_tx, update_rx) = mpsc::channel();
+        spawn_update_check(update_tx.clone());
         Ok(Self {
             quit: false,
             tab: Tab::Installed,
             installed,
             inst_state,
             update_available: HashMap::new(),
+            update_tx,
+            update_rx,
             search_input: String::new(),
             search_results: Vec::new(),
             search_searching: false,
@@ -369,6 +378,10 @@ impl App {
         }
         self.running_instances = scan_running_instances();
         self.last_instance_scan = Instant::now();
+        // Package versions may have changed (install/update/remove); re-check so
+        // stale update dots clear and new ones appear.
+        self.update_available.clear();
+        spawn_update_check(self.update_tx.clone());
     }
 
     /// Re-scan /proc for running sandboxes at most once per second so the
@@ -458,6 +471,14 @@ fn scan_running_instances() -> HashMap<String, usize> {
     map
 }
 
+/// Kick off an update check on a background thread; the result map is sent back
+/// over `tx` and drained into `App::update_available` by the event loop.
+fn spawn_update_check(tx: Sender<HashMap<String, String>>) {
+    thread::spawn(move || {
+        let _ = tx.send(crate::commands::update::check_all_updates());
+    });
+}
+
 pub fn run() -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -519,6 +540,11 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(
                 app.screen = Screen::OutdatedPackages { pkg, install_args: original_args, selected: 0 };
                 app.needs_clear = true;
             }
+        }
+
+        // Drain async update-check results
+        while let Ok(map) = app.update_rx.try_recv() {
+            app.update_available = map;
         }
 
         // Drain async search results
@@ -1025,6 +1051,32 @@ fn on_installed(app: &mut App, code: KeyCode) {
                     danger: false,
                 };
             }
+        }
+        KeyCode::Char('U') => {
+            let mut names: Vec<&String> = app.update_available.keys().collect();
+            names.sort();
+            let body = if names.is_empty() {
+                vec![
+                    "No updates detected from the last check.".into(),
+                    String::new(),
+                    "Press y to update all apps anyway, n or Esc to cancel.".into(),
+                ]
+            } else {
+                let mut b = vec![format!("{} app(s) with updates:", names.len())];
+                for n in &names {
+                    b.push(format!("  • {n}"));
+                }
+                b.push(String::new());
+                b.push("Press y to update all, n or Esc to cancel.".into());
+                b
+            };
+            app.screen = Screen::Confirm {
+                title: "Update all apps?".into(),
+                body,
+                action: PendingAction::UpdateAll,
+                danger: false,
+            };
+            app.needs_clear = true;
         }
         KeyCode::Char('s') => {
             if let Some(m) = app.selected_installed() {
@@ -1553,6 +1605,8 @@ fn execute_action(app: &mut App, action: PendingAction) {
             launch_op(app, format!("Remove — {name}"), vec!["remove".into(), "--cascade".into(), name], None, true),
         PendingAction::Update(name) =>
             launch_op(app, format!("Update — {name}"), vec!["update".into(), name], None, true),
+        PendingAction::UpdateAll =>
+            launch_op(app, "Update all apps".into(), vec!["update".into()], None, true),
         PendingAction::Install { pkg, app_name: None, into: None } => {
             let title = format!("Install — {pkg}");
             let args = vec!["install".into(), pkg.clone()];
