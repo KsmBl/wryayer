@@ -118,6 +118,15 @@ pub fn run(app_name: &str, bin: Option<&str>, args: &[String]) -> Result<()> {
     // a previous session.
     fix_home_sonames(&app_root);
 
+    // Apps that probe zeroconf (Electron/Chromium, KDE, CUPS-linked, etc.) print
+    // "Failed to connect to Avahi server: Daemon not running" when avahi-daemon
+    // is installed but stopped — the default on Arch. We expose the host system
+    // bus (--bind /run), so the fix is to make the daemon reachable rather than
+    // to hide the bus (hiding it yields the exact same error). Best-effort.
+    if config.network {
+        ensure_avahi_daemon();
+    }
+
     let (temp, cleanup) = prepare_temp(&config, &app_root)?;
 
     // For wine games, prepend the .exe path to the user-supplied args. The
@@ -166,6 +175,39 @@ pub fn run(app_name: &str, bin: Option<&str>, args: &[String]) -> Result<()> {
     } else {
         std::process::exit(status.code().unwrap_or(0));
     }
+}
+
+/// Start avahi-daemon if it's installed but not currently running, so sandboxed
+/// apps that query Avahi over the system bus don't fail with "Daemon not
+/// running". avahi-client prints that same message whether the daemon is absent
+/// or the system bus is unreachable, so the only way to silence it is a live
+/// daemon. Entirely best-effort: if the unit is missing, already active, or the
+/// user's polkit rules don't permit an unprivileged start, we leave things as
+/// they are and the harmless warning simply remains.
+fn ensure_avahi_daemon() {
+    // Nothing to start if the service isn't installed.
+    if !Path::new("/usr/lib/systemd/system/avahi-daemon.service").exists() {
+        return;
+    }
+    // Skip if it's already running (the common case after the first launch).
+    let active = Command::new("systemctl")
+        .args(["is-active", "--quiet", "avahi-daemon"])
+        .status();
+    if matches!(active, Ok(s) if s.success()) {
+        return;
+    }
+    // Try an unprivileged start first (many desktops authorize this via polkit),
+    // then fall back to a non-interactive sudo in case the user has cached
+    // credentials. Both are best-effort; failures are ignored on purpose.
+    let started = Command::new("systemctl")
+        .args(["start", "avahi-daemon"])
+        .status();
+    if matches!(started, Ok(s) if s.success()) {
+        return;
+    }
+    let _ = Command::new("sudo")
+        .args(["-n", "systemctl", "start", "avahi-daemon"])
+        .status();
 }
 
 struct WineCtx {
