@@ -71,6 +71,15 @@ fn reinstall(manifest: &crate::manifest::Manifest) -> Result<()> {
     let app_name = &manifest.app.name;
     let bin_name = &manifest.app.main_binary;
 
+    // The dep-resolution cache never expires, so re-resolving would return the
+    // versions recorded at first install and write them straight back into the
+    // manifest — leaving the TUI showing the old version after a successful
+    // update. Drop the cache for this app's whole tree so every package is
+    // re-queried for its current version.
+    let cached_names: Vec<String> = manifest.packages.iter().map(|p| p.name.clone()).collect();
+    crate::package::deps::invalidate_dep_cache(&cached_names);
+    crate::package::deps::invalidate_dep_cache(&[app_name.clone()]);
+
     eprintln!("Resolving dependencies for {app_name}...");
     let mut resolved = resolve_full_dep_tree(app_name)?;
 
@@ -89,6 +98,9 @@ fn reinstall(manifest: &crate::manifest::Manifest) -> Result<()> {
         .collect();
     for child in &children {
         let root_pkg = child.app.pkg_name.as_deref().unwrap_or(child.app.name.as_str());
+        let child_names: Vec<String> = child.packages.iter().map(|p| p.name.clone()).collect();
+        crate::package::deps::invalidate_dep_cache(&child_names);
+        crate::package::deps::invalidate_dep_cache(&[root_pkg.to_string()]);
         eprintln!("Resolving child program {} ({root_pkg})...", child.app.name);
         let child_tree = resolve_full_dep_tree(root_pkg)
             .with_context(|| format!("failed to resolve child program '{}'", child.app.name))?;

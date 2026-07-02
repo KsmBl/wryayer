@@ -29,6 +29,19 @@ fn dep_cache_path(pkg_name: &str) -> Option<PathBuf> {
     Some(dep_cache_dir()?.join(format!("{safe}.toml")))
 }
 
+/// Drop cached dependency resolutions for the named packages so the next
+/// resolve re-queries the package manager (and AUR) for current versions.
+/// The dep cache never expires, so without this an update would re-resolve to
+/// the version recorded at first install and write that stale value back into
+/// the manifest — even though the freshly downloaded/built package is newer.
+pub fn invalidate_dep_cache(pkg_names: &[String]) {
+    for name in pkg_names {
+        if let Some(path) = dep_cache_path(name) {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
 fn read_dep_cache(pkg_name: &str) -> Option<PkgDepCache> {
     let content = std::fs::read_to_string(dep_cache_path(pkg_name)?).ok()?;
     toml::from_str(&content).ok()
