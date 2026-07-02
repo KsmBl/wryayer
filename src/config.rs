@@ -58,6 +58,12 @@ pub struct AppConfig {
     pub spoof_resolution: Option<String>,
     /// Whether to create a ~/bin shortcut by default when installing (global only)
     pub create_shortcut: bool,
+    /// Whether the TUI shows the "Install '<pkg>'?" confirmation before an
+    /// install. When false the install starts immediately (global only).
+    pub confirm_install: bool,
+    /// Whether the TUI asks about the ~/bin shortcut before installing. When
+    /// false it silently applies `create_shortcut` instead (global only).
+    pub ask_shortcut: bool,
     /// Route the sandbox's D-Bus session through a filter that hides the host
     /// desktop portal, so file pickers run in-sandbox and only show shared
     /// dirs instead of leaking host paths (default: true)
@@ -83,6 +89,8 @@ impl Default for AppConfig {
             ram_limit: None,
             spoof_resolution: None,
             create_shortcut: true,
+            confirm_install: true,
+            ask_shortcut: true,
             portal_filter: true,
         }
     }
@@ -280,6 +288,12 @@ pub fn parse_ini(content: &str) -> Result<AppConfig> {
             ("create_shortcut", v) => {
                 config.create_shortcut = !matches!(v, "off" | "false" | "0" | "no");
             }
+            ("confirm_install", v) => {
+                config.confirm_install = !matches!(v, "off" | "false" | "0" | "no");
+            }
+            ("ask_shortcut", v) => {
+                config.ask_shortcut = !matches!(v, "off" | "false" | "0" | "no");
+            }
             ("portal_filter", v) => {
                 config.portal_filter = !matches!(v, "off" | "false" | "0" | "no");
             }
@@ -385,11 +399,19 @@ pub fn format_ini(config: &AppConfig) -> String {
         s.push_str("; Screen resolution to report via xrandr and env vars (e.g. 1920x1080)\n");
         s.push_str(&format!("spoof_resolution = {res}\n"));
     }
-    if !config.create_shortcut || !config.portal_filter {
+    if !config.create_shortcut || !config.confirm_install || !config.ask_shortcut || !config.portal_filter {
         s.push_str("\n[behavior]\n");
         if !config.create_shortcut {
             s.push_str("; Create ~/bin/<name> shortcut by default when installing apps\n");
             s.push_str("create_shortcut = off\n");
+        }
+        if !config.confirm_install {
+            s.push_str("; Ask 'Install <pkg>?' before installing from the TUI\n");
+            s.push_str("confirm_install = off\n");
+        }
+        if !config.ask_shortcut {
+            s.push_str("; Ask whether to create a ~/bin shortcut before installing\n");
+            s.push_str("ask_shortcut = off\n");
         }
         if !config.portal_filter {
             s.push_str("; Hide the host desktop portal so file pickers only show shared dirs.\n");

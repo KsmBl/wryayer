@@ -1171,12 +1171,12 @@ fn on_duplicate_install(app: &mut App, code: KeyCode) {
                     "Press y to confirm, n or Esc to cancel.".into(),
                 ],
             };
-            app.screen = Screen::Confirm {
-                title: format!("Install '{pkg}' as '{new_name}'?"),
+            install_confirm(
+                app,
+                format!("Install '{pkg}' as '{new_name}'?"),
                 body,
-                action: PendingAction::Install { pkg, app_name: Some(new_name), into },
-                danger: false,
-            };
+                PendingAction::Install { pkg, app_name: Some(new_name), into },
+            );
         }
         KeyCode::Backspace => { value.pop(); }
         KeyCode::Char(c) => { value.push(c); }
@@ -1402,16 +1402,16 @@ fn on_install(app: &mut App, code: KeyCode) {
                             .map(|m| m.app.name.clone())
                             .collect();
                         if targets.is_empty() {
-                            app.screen = Screen::Confirm {
-                                title: format!("Install '{pkg}'?"),
-                                body: vec![
+                            install_confirm(
+                                app,
+                                format!("Install '{pkg}'?"),
+                                vec![
                                     format!("Installs {pkg} into ~/.wryayer/{pkg}/"),
                                     String::new(),
                                     "Press y to confirm, n or Esc to cancel.".into(),
                                 ],
-                                action: PendingAction::Install { pkg, app_name: None, into: None },
-                                danger: false,
-                            };
+                                PendingAction::Install { pkg, app_name: None, into: None },
+                            );
                         } else {
                             app.screen = Screen::InstallTarget { pkg, targets, selected: 0 };
                         }
@@ -1503,12 +1503,7 @@ fn on_install_target(app: &mut App, code: KeyCode) {
                     ],
                 ),
             };
-            app.screen = Screen::Confirm {
-                title,
-                body,
-                action: PendingAction::Install { pkg, app_name: None, into },
-                danger: false,
-            };
+            install_confirm(app, title, body, PendingAction::Install { pkg, app_name: None, into });
         }
         _ => {}
     }
@@ -1570,6 +1565,38 @@ fn on_confirm(app: &mut App, code: KeyCode) -> Result<()> {
     Ok(())
 }
 
+/// Show the "Install '<pkg>'?" confirmation, or — when the user turned
+/// confirm_install off in the global settings — skip it and start the install
+/// straight away.
+fn install_confirm(app: &mut App, title: String, body: Vec<String>, action: PendingAction) {
+    if app.global_config.confirm_install {
+        app.screen = Screen::Confirm { title, body, action, danger: false };
+    } else {
+        execute_action(app, action);
+    }
+    app.needs_clear = true;
+}
+
+/// Ask whether to create a ~/bin shortcut, or — when ask_shortcut is off —
+/// launch the install immediately using the create_shortcut default.
+fn ask_shortcut_or_launch(app: &mut App, pkg: String, title: String, args: Vec<String>) {
+    if app.global_config.ask_shortcut {
+        app.screen = Screen::AskShortcut {
+            pkg,
+            title,
+            args,
+            selected: if app.global_config.create_shortcut { 0 } else { 1 },
+        };
+        app.needs_clear = true;
+    } else {
+        let mut args = args;
+        if !app.global_config.create_shortcut {
+            args.push("--keep-without-launcher".into());
+        }
+        launch_op(app, title, args, None, true);
+    }
+}
+
 fn execute_action(app: &mut App, action: PendingAction) {
     match action {
         PendingAction::Remove(name) => {
@@ -1610,21 +1637,18 @@ fn execute_action(app: &mut App, action: PendingAction) {
         PendingAction::Install { pkg, app_name: None, into: None } => {
             let title = format!("Install — {pkg}");
             let args = vec!["install".into(), pkg.clone()];
-            app.screen = Screen::AskShortcut { pkg, title, args, selected: if app.global_config.create_shortcut { 0 } else { 1 } };
-            app.needs_clear = true;
+            ask_shortcut_or_launch(app, pkg, title, args);
         }
         PendingAction::Install { pkg, app_name: Some(an), into: None } => {
             let title = format!("Install — {pkg} as {an}");
             let args = vec!["install".into(), pkg.clone(), "--app-name".into(), an];
-            app.screen = Screen::AskShortcut { pkg, title, args, selected: if app.global_config.create_shortcut { 0 } else { 1 } };
-            app.needs_clear = true;
+            ask_shortcut_or_launch(app, pkg, title, args);
         }
         PendingAction::Install { pkg, app_name, into: Some(target) } => {
             let mut args = vec!["install".into(), pkg.clone(), "--into".into(), target.clone()];
             if let Some(an) = app_name { args.extend(["--app-name".into(), an]); }
             let title = format!("Install — {pkg} → {target}");
-            app.screen = Screen::AskShortcut { pkg, title, args, selected: if app.global_config.create_shortcut { 0 } else { 1 } };
-            app.needs_clear = true;
+            ask_shortcut_or_launch(app, pkg, title, args);
         }
         PendingAction::Export(name) => {
             let total = dir_bytes(&format!(
@@ -1705,7 +1729,7 @@ fn on_op_done(app: &mut App, code: KeyCode) -> Result<()> {
 //       12=spoof_terminal 13=ram_limit 14=spoof_resolution
 // Per-app Config (no wine_game):  15=Save
 // Per-app Config (wine_game):     15=game_exe 16=game_prefix 17=Save
-// Global Settings:                15=create_shortcut 16=Save
+// Global Settings:                15=create_shortcut 16=confirm_install 17=ask_shortcut 18=Save
 pub const CFG_SHARES: usize = 6;
 pub const CFG_SPOOF_HOSTNAME: usize = 7;
 pub const CFG_SPOOF_USERNAME: usize = 8;
@@ -1718,10 +1742,14 @@ pub const CFG_SPOOF_RESOLUTION: usize = 14;
 /// Wine-game rows (only present when the Config screen carries `wine_game = Some`).
 pub const CFG_GAME_EXE: usize = 15;
 pub const CFG_GAME_PREFIX: usize = 16;
-/// create_shortcut only shown in the global Settings tab, not per-app Config
+/// The following three are only shown in the global Settings tab, not per-app
+/// Config. Their indices sit past the per-app rows (which top out at 17 = wine
+/// save), so the shared setting_* helpers never see them from a per-app screen.
 pub const CFG_CREATE_SHORTCUT: usize = 15;
-pub const CFG_SAVE: usize = 16;
-pub const CFG_LEN: usize = 17;
+pub const CFG_CONFIRM_INSTALL: usize = 16;
+pub const CFG_ASK_SHORTCUT: usize = 17;
+pub const CFG_SAVE: usize = 18;
+pub const CFG_LEN: usize = 19;
 
 /// Index of the Save button in the per-app Config screen. Shifts down by 2 when
 /// the screen carries wine_game rows.
@@ -1890,6 +1918,7 @@ pub fn setting_options(idx: usize) -> Vec<&'static str> {
         CFG_RAM_LIMIT => vec!["none", "512 MiB", "1 GiB", "2 GiB", "4 GiB", "8 GiB"],
         CFG_SPOOF_RESOLUTION => vec!["system", "1280×720", "1920×1080", "2560×1440", "3840×2160", "input"],
         CFG_CREATE_SHORTCUT => vec!["yes", "no"],
+        CFG_CONFIRM_INSTALL | CFG_ASK_SHORTCUT => vec!["on", "off"],
         _ => vec![],
     }
 }
@@ -1913,6 +1942,8 @@ pub fn setting_title(idx: usize) -> &'static str {
         13 => "RAM limit",
         14 => "Spoof resolution",
         15 => "Default shortcut",
+        16 => "Confirm install",
+        17 => "Ask shortcut",
         _ => "Option",
     }
 }
@@ -1936,6 +1967,8 @@ pub fn setting_description(idx: usize) -> &'static str {
         13 => "Maximum RAM the app may use (RAM + swap both capped).\n\nEnforced via systemd-run MemoryMax + MemorySwapMax=0.\n'none' disables the limit. Requires systemd.",
         14 => "Spoof the screen resolution reported to the app.\n\nCreates a fake xrandr binary inside the sandbox and sets resolution env vars. Works for apps that call xrandr as a subprocess.\n\nNote: Chromium/Electron apps query the display server directly (X11/Wayland) and are not affected by this setting.",
         15 => "Whether to pre-select 'Yes' or 'No' in the shortcut prompt shown before each install.\n\nThe prompt always appears — this only controls which answer is highlighted by default.",
+        16 => "Whether to show the 'Install <pkg>?' confirmation before installing.\n\n• on  — ask for a y/n confirmation first (default)\n• off — start the install immediately, no prompt",
+        17 => "Whether to ask about creating a ~/bin shortcut before installing.\n\n• on  — show the shortcut prompt (default)\n• off — skip it and use the 'Default shortcut' setting above without asking",
         _ => "No description available.",
     }
 }
@@ -2008,6 +2041,12 @@ pub fn option_description(setting_idx: usize, choice_idx: usize) -> &'static str
         // Default shortcut
         (15, 0) => "yes — Pre-select 'Yes' in the shortcut prompt. The prompt still appears; press Enter to confirm quickly.",
         (15, 1) => "no — Pre-select 'No' in the shortcut prompt. Useful if you rarely want ~/bin shortcuts.",
+        // Confirm install
+        (16, 0) => "on — Show the 'Install <pkg>?' confirmation before every install.",
+        (16, 1) => "off — Skip the confirmation and start installing right away.",
+        // Ask shortcut
+        (17, 0) => "on — Ask whether to create a ~/bin shortcut before each install.",
+        (17, 1) => "off — Don't ask; silently apply the 'Default shortcut' setting.",
         _ => "No description available.",
     }
 }
@@ -2083,6 +2122,8 @@ pub fn setting_current(config: &AppConfig, idx: usize) -> usize {
             _                => 5,
         },
         CFG_CREATE_SHORTCUT => if config.create_shortcut { 0 } else { 1 },
+        CFG_CONFIRM_INSTALL => if config.confirm_install { 0 } else { 1 },
+        CFG_ASK_SHORTCUT => if config.ask_shortcut { 0 } else { 1 },
         _ => 0,
     }
 }
@@ -2141,6 +2182,10 @@ pub fn apply_setting(config: &mut AppConfig, idx: usize, choice: usize) {
         // (14, 5) = "input" — handled by on_option_picker which opens TextInput
         (15, 0) => config.create_shortcut = true,
         (15, 1) => config.create_shortcut = false,
+        (16, 0) => config.confirm_install = true,
+        (16, 1) => config.confirm_install = false,
+        (17, 0) => config.ask_shortcut = true,
+        (17, 1) => config.ask_shortcut = false,
         _ => {}
     }
 }
@@ -2741,16 +2786,16 @@ fn process_install_queue(app: &mut App) {
             .map(|m| m.app.name.clone())
             .collect();
         if targets.is_empty() {
-            app.screen = Screen::Confirm {
-                title: format!("Install '{pkg}'?"),
-                body: vec![
+            install_confirm(
+                app,
+                format!("Install '{pkg}'?"),
+                vec![
                     format!("Installs {pkg} into ~/.wryayer/{pkg}/"),
                     String::new(),
                     "Press y to confirm, n or Esc to cancel.".into(),
                 ],
-                action: PendingAction::Install { pkg, app_name: None, into: None },
-                danger: false,
-            };
+                PendingAction::Install { pkg, app_name: None, into: None },
+            );
         } else {
             app.screen = Screen::InstallTarget { pkg, targets, selected: 0 };
         }

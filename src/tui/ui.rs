@@ -1109,6 +1109,8 @@ fn draw_settings_tab(f: &mut Frame, app: &mut App, area: Rect) {
             Some(s)          => s.chars().take(10).collect(),
         }),
         ("Shortcut",    if config.create_shortcut { "yes".into() } else { "no".into() }),
+        ("Confirm inst",if config.confirm_install { "on".into() } else { "off".into() }),
+        ("Ask shortcut",if config.ask_shortcut { "on".into() } else { "off".into() }),
     ];
 
     // Reserve last 2 rows for separator + save
