@@ -161,7 +161,10 @@ fn ensure_makedepends(clone_dir: &Path, pkg_name: &str) -> Result<()> {
 }
 
 fn run_makepkg(clone_dir: &Path, noextract: bool) -> Result<std::process::Output> {
-    let mut args = vec!["-d", "--noconfirm", "--noprogressbar", "--skippgpcheck"];
+    // `-f` overwrites any package left over from a previous build in this same
+    // clone dir; without it makepkg aborts with "A package has already been
+    // built" whenever we rebuild (e.g. on update or after a partial run).
+    let mut args = vec!["-df", "--noconfirm", "--noprogressbar", "--skippgpcheck"];
     if noextract {
         // --noextract skips re-cloning/resetting the source tree and skips
         // prepare(), so any patches we applied to node_modules survive.
