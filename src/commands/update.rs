@@ -33,12 +33,16 @@ pub fn run(app_name: Option<&str>, check_only: bool) -> Result<()> {
         }
 
         let name = &manifest.app.name;
-        let main_pkg = manifest.packages.iter().find(|p| p.name == manifest.app.name);
+        // When installed with --app-name, `name` is the user's custom label and
+        // the real upstream package is in `pkg_name`. Version checks must query
+        // the real package, not the custom name.
+        let pkg = manifest.app.pkg_name.as_deref().unwrap_or(name);
+        let main_pkg = manifest.packages.iter().find(|p| p.name == pkg);
         let current_version = main_pkg.map(|p| p.version.as_str()).unwrap_or("0");
 
         let latest_version = match main_pkg.map(|p| &p.source).unwrap_or(&PackageSource::Official) {
-            PackageSource::Official => get_official_version(name)?,
-            PackageSource::Aur => get_aur_version(name)?,
+            PackageSource::Official => get_official_version(pkg)?,
+            PackageSource::Aur => get_aur_version(pkg)?,
         };
 
         match latest_version {
@@ -70,6 +74,10 @@ pub fn run(app_name: Option<&str>, check_only: bool) -> Result<()> {
 fn reinstall(manifest: &crate::manifest::Manifest) -> Result<()> {
     let app_name = &manifest.app.name;
     let bin_name = &manifest.app.main_binary;
+    // The dependency tree is resolved from the real upstream package. When the
+    // app was installed with --app-name, `app_name` is only the user's custom
+    // label (and the app-dir name); the package to resolve is `pkg_name`.
+    let pkg_name = manifest.app.pkg_name.as_deref().unwrap_or(app_name).to_string();
 
     // The dep-resolution cache never expires, so re-resolving would return the
     // versions recorded at first install and write them straight back into the
@@ -78,10 +86,10 @@ fn reinstall(manifest: &crate::manifest::Manifest) -> Result<()> {
     // re-queried for its current version.
     let cached_names: Vec<String> = manifest.packages.iter().map(|p| p.name.clone()).collect();
     crate::package::deps::invalidate_dep_cache(&cached_names);
-    crate::package::deps::invalidate_dep_cache(&[app_name.clone()]);
+    crate::package::deps::invalidate_dep_cache(&[pkg_name.clone()]);
 
-    eprintln!("Resolving dependencies for {app_name}...");
-    let mut resolved = resolve_full_dep_tree(app_name)?;
+    eprintln!("Resolving dependencies for {app_name} ({pkg_name})...");
+    let mut resolved = resolve_full_dep_tree(&pkg_name)?;
 
     // Merged-in child programs (installed with `--into <app>`) share this same
     // filesystem tree but are tracked by their own alias manifests; their
@@ -226,11 +234,15 @@ pub fn check_all_updates() -> std::collections::HashMap<String, String> {
             continue;
         }
         let name = &manifest.app.name;
-        let main_pkg = manifest.packages.iter().find(|p| p.name == *name);
+        // Query the real upstream package (pkg_name) for custom --app-name
+        // installs, but key the result on the app's name so the TUI can match
+        // the dot to the list entry.
+        let pkg = manifest.app.pkg_name.as_deref().unwrap_or(name);
+        let main_pkg = manifest.packages.iter().find(|p| p.name == pkg);
         let current = main_pkg.map(|p| p.version.as_str()).unwrap_or("0");
         let latest = match main_pkg.map(|p| &p.source).unwrap_or(&PackageSource::Official) {
-            PackageSource::Official => get_official_version(name),
-            PackageSource::Aur => get_aur_version(name),
+            PackageSource::Official => get_official_version(pkg),
+            PackageSource::Aur => get_aur_version(pkg),
         };
         if let Ok(Some(ver)) = latest {
             if is_newer(&ver, current).unwrap_or(false) {
