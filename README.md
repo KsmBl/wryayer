@@ -61,6 +61,13 @@ and option list on the right.
 
 ![wryayer TUI — Settings tab](docs/screenshots/settings.png)
 
+**Per-app config** — press `s` on any installed app to override the global
+defaults for just that app: network/device toggles, temp mode, identity
+spoofing, RAM limit, **Avahi mode**, and (for wine games) the exe and prefix.
+Changes are saved to that app's own `config.ini`.
+
+![wryayer TUI — per-app config](docs/screenshots/config.png)
+
 ### Key bindings
 
 | Key | Action |
