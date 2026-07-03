@@ -11,7 +11,7 @@ use crate::config::{AppConfig, AvahiMode, LocalDelete, TempMode};
 
 use super::{
     App, Screen, Tab, CFG_SAVE, CFG_SHARES, CFG_CREATE_SHORTCUT, CFG_GAME_EXE, CFG_GAME_PREFIX,
-    app_cfg_save_idx, setting_description, setting_options, setting_current, setting_title,
+    CFG_RAM_LIMIT, app_cfg_save_idx, setting_description, setting_options, setting_current, setting_title,
     HOSTNAME_SAMPLE, MACHINE_ID_SAMPLE, USERNAME_SAMPLE,
 };
 
@@ -335,7 +335,16 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 CFG_GAME_PREFIX => "WINEPREFIX path",
                 _ => super::setting_title(field_idx),
             };
-            draw_text_input(f, area, title, &value);
+            let hint: &[&str] = if field_idx == CFG_RAM_LIMIT {
+                &[
+                    "  Type a limit as:  <number> <KB|MB|GB>",
+                    "  e.g.  256 MB   ·   2 GB   ·   500000 KB",
+                    "  Leave blank to disable the limit.",
+                ]
+            } else {
+                &["  Leave blank to disable. Press Enter to confirm."]
+            };
+            draw_text_input(f, area, title, &value, hint);
         }
         Screen::KeyHelp => {
             draw_key_help(f, area);
@@ -1783,8 +1792,9 @@ fn draw_config(
 
 // ── Text input overlay ────────────────────────────────────────────────────────
 
-fn draw_text_input(f: &mut Frame, area: Rect, title: &str, value: &str) {
-    let popup = centered_rect(54, 30, area);
+fn draw_text_input(f: &mut Frame, area: Rect, title: &str, value: &str, hint: &[&str]) {
+    // Grow the popup to fit a multi-line hint (1 border top + hint lines + input + footer).
+    let popup = centered_rect(58, 34, area);
     f.render_widget(Clear, popup);
 
     let block = Block::default().borders(Borders::ALL).border_type(c_border_type())
@@ -1794,18 +1804,16 @@ fn draw_text_input(f: &mut Frame, area: Rect, title: &str, value: &str) {
     let inner = block.inner(popup);
     f.render_widget(block, popup);
 
+    let hint_h = hint.len().max(1) as u16;
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Length(3), Constraint::Length(1)])
+        .constraints([Constraint::Length(hint_h), Constraint::Length(3), Constraint::Length(1)])
         .split(inner);
 
-    f.render_widget(
-        Paragraph::new(Span::styled(
-            "  Leave blank to disable. Press Enter to confirm.",
-            Style::default().fg(c_dim()),
-        )),
-        chunks[0],
-    );
+    let hint_lines: Vec<Line> = hint.iter()
+        .map(|l| Line::from(Span::styled(*l, Style::default().fg(c_dim()))))
+        .collect();
+    f.render_widget(Paragraph::new(hint_lines), chunks[0]);
 
     f.render_widget(
         Paragraph::new(format!(" {}█", value))

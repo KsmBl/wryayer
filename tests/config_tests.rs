@@ -303,7 +303,7 @@ fn format_ini_includes_resources_section_when_limit_set() {
     let cfg = AppConfig { ram_limit: Some(2 * 1024 * 1024), ..AppConfig::default() }; // 2 GiB in KiB
     let ini = format_ini(&cfg);
     assert!(ini.contains("[resources]"),    "must emit [resources] section");
-    assert!(ini.contains("ram_limit = 2 GiB"), "must emit the human value");
+    assert!(ini.contains("ram_limit = 2 GB"), "must emit the human value");
 }
 
 // ── round-trip — ram_limit ────────────────────────────────────────────────────

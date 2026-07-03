@@ -332,8 +332,8 @@ fn options_for_ram_limit_row_has_presets_plus_custom() {
     let opts = setting_options(13);
     assert_eq!(opts.len(), 7, "expected 6 presets + custom for RAM limit row");
     assert_eq!(opts[0], "none");
-    assert_eq!(opts[1], "512 MiB");
-    assert_eq!(opts[5], "8 GiB");
+    assert_eq!(opts[1], "512 MB");
+    assert_eq!(opts[5], "8 GB");
     assert_eq!(opts[6], "custom");
 }
 

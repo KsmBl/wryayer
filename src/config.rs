@@ -402,12 +402,13 @@ pub fn parse_ram_limit(v: &str) -> Option<u64> {
 /// Render a KiB RAM limit as the largest whole unit (GiB / MiB / KiB). The
 /// result round-trips through [`parse_ram_limit`].
 pub fn format_ram_limit(kib: u64) -> String {
+    // Labelled KB/MB/GB to match what the user types (1024-based, like systemd).
     if kib.is_multiple_of(1024 * 1024) {
-        format!("{} GiB", kib / (1024 * 1024))
+        format!("{} GB", kib / (1024 * 1024))
     } else if kib.is_multiple_of(1024) {
-        format!("{} MiB", kib / 1024)
+        format!("{} MB", kib / 1024)
     } else {
-        format!("{} KiB", kib)
+        format!("{} KB", kib)
     }
 }
 
