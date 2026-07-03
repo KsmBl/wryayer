@@ -243,10 +243,11 @@ fn draw_installed(f: &mut Frame, app: &mut App, area: Rect) {
         } else {
             Span::raw(" ")
         };
-        // Running-instance badge, keyed by the filesystem-root name (aliases
-        // share their target's sandbox root).  Rendered in low saturation.
-        let fs_root = m.app.alias_of.as_deref().unwrap_or(&m.app.name);
-        let run_badge = match app.running_instances.get(fs_root).copied().unwrap_or(0) {
+        // Running-instance badge, keyed by app.name.  scan_running_instances
+        // attributes each launch to the specific program running in the shared
+        // sandbox root, so a child (`--into`) shows its own count, not the
+        // parent's.  Rendered in low saturation.
+        let run_badge = match app.running_instances.get(&m.app.name).copied().unwrap_or(0) {
             0 => None,
             n => Some(Span::styled(format!(" ({n})"), Style::default().fg(C_RUNNING))),
         };

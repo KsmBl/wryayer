@@ -421,12 +421,37 @@ impl App {
 /// Count running sandboxes per app by scanning /proc for the bwrap monitor
 /// process of each launch.  Every wryayer sandbox runs `bwrap --bind <app_root>
 /// / …`, and only the outer monitor keeps that argv (the inner process is
-/// exec'd into the app), so one match == one running instance.  Keyed by the
-/// filesystem-root directory name (aliases share their target's root).
+/// exec'd into the app), so one match == one running instance.
+///
+/// The result is keyed by `app.name`.  Programs installed with `--into <parent>`
+/// share the parent's sandbox root, so the `--bind <root> /` triple only names
+/// the parent; counting by root alone would attribute a running child to its
+/// parent and show the same total on both rows.  We instead disambiguate by the
+/// binary the sandbox is actually running (`bwrap … -- <binary> …`), which is
+/// each program's own `main_binary`, and fall back to the root's own app when a
+/// launch used a binary that matches no manifest (e.g. a `run --bin` override).
 fn scan_running_instances() -> HashMap<String, usize> {
     let mut map: HashMap<String, usize> = HashMap::new();
     let Ok(root) = crate::manifest::wryayer_root() else { return map };
     let root_prefix = format!("{}/", root.to_string_lossy());
+
+    // (fs_root dir name, main-binary basename) -> app.name, plus the non-alias
+    // owner of each root as the fallback attribution.
+    let manifests = crate::manifest::list_all_apps().unwrap_or_default();
+    let mut by_bin: HashMap<(String, String), String> = HashMap::new();
+    let mut root_owner: HashMap<String, String> = HashMap::new();
+    for m in &manifests {
+        let fs_root = m.app.alias_of.clone().unwrap_or_else(|| m.app.name.clone());
+        let bin = std::path::Path::new(&m.app.main_binary)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(m.app.main_binary.as_str())
+            .to_string();
+        by_bin.insert((fs_root.clone(), bin), m.app.name.clone());
+        if m.app.alias_of.is_none() {
+            root_owner.insert(fs_root, m.app.name.clone());
+        }
+    }
 
     let Ok(entries) = std::fs::read_dir("/proc") else { return map };
     for entry in entries.flatten() {
@@ -455,13 +480,28 @@ fn scan_running_instances() -> HashMap<String, usize> {
             .filter_map(|s| std::str::from_utf8(s).ok())
             .filter(|s| !s.is_empty())
             .collect();
+
+        // The binary bwrap execs sits right after the `--` command separator.
+        let run_bin = args
+            .iter()
+            .position(|&a| a == "--")
+            .and_then(|i| args.get(i + 1))
+            .and_then(|p| std::path::Path::new(p).file_name())
+            .and_then(|n| n.to_str());
+
         // Look for the `--bind <app_root> /` triple that mounts the sandbox root.
         for w in args.windows(3) {
             if w[0] == "--bind" && w[2] == "/" && w[1].starts_with(&root_prefix) {
                 if let Some(rest) = w[1].strip_prefix(&root_prefix) {
-                    let name = rest.split('/').next().unwrap_or("");
-                    if !name.is_empty() {
-                        *map.entry(name.to_string()).or_insert(0) += 1;
+                    let fs_root = rest.split('/').next().unwrap_or("");
+                    if !fs_root.is_empty() {
+                        // Attribute to the program whose main_binary is running in
+                        // this shared root; fall back to the root's own app.
+                        let key = run_bin
+                            .and_then(|b| by_bin.get(&(fs_root.to_string(), b.to_string())).cloned())
+                            .or_else(|| root_owner.get(fs_root).cloned())
+                            .unwrap_or_else(|| fs_root.to_string());
+                        *map.entry(key).or_insert(0) += 1;
                     }
                 }
                 break;
