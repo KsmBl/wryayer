@@ -117,6 +117,15 @@ pub fn list_all_apps() -> Result<Vec<Manifest>> {
             Some(n) => n.to_string(),
             None => continue,
         };
+        // A directory without a manifest file isn't an installed app yet: it's a
+        // partial install in progress (install.rs creates the app dir before it
+        // writes the manifest) or a leftover. Skip it silently — warning here
+        // spams the install log for the very app being installed. Only a
+        // manifest that exists but won't parse is a real problem worth flagging.
+        match manifest_path(&app_name) {
+            Ok(p) if !p.exists() => continue,
+            _ => {}
+        }
         match read_manifest(&app_name) {
             Ok(m) => manifests.push(m),
             Err(e) => eprintln!("warning: skipping '{}': {e:#}", app_name),
