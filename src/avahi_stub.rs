@@ -441,7 +441,7 @@ impl Marshal {
         Marshal { buf: Vec::new() }
     }
     fn align(&mut self, n: usize) {
-        while self.buf.len() % n != 0 {
+        while !self.buf.len().is_multiple_of(n) {
             self.buf.push(0);
         }
     }

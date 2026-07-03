@@ -335,6 +335,7 @@ pub fn parse_ini(content: &str) -> Result<AppConfig> {
     Ok(config)
 }
 
+#[allow(clippy::result_unit_err)] // callers only care whether it parsed; the unit err is the signal
 pub fn parse_bool(v: &str) -> Result<bool, ()> {
     match v {
         "on" | "true" | "1" => Ok(true),

@@ -3,6 +3,7 @@ use crate::manifest::read_manifest;
 use anyhow::{bail, Context, Result};
 use std::path::Path;
 
+#[allow(clippy::too_many_arguments)] // one optional per config field; a struct would just move the noise
 pub fn run(
     app_name: &str,
     temp_mode: Option<&str>,

@@ -16,7 +16,7 @@ pub fn run(zip_path: &Path) -> Result<()> {
         .with_context(|| format!("failed to open {}", zip_path.display()))?;
     let mut archive = ZipArchive::new(file).context("failed to read zip")?;
 
-    if archive.len() == 0 {
+    if archive.is_empty() {
         bail!("zip is empty");
     }
 

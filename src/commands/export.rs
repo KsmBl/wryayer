@@ -108,7 +108,7 @@ pub fn run(app_name: &str, output: Option<&PathBuf>) -> Result<()> {
                 written += 1;
             }
 
-            if written % stride == 0 {
+            if written.is_multiple_of(stride) {
                 eprintln!("PROGRESS {written}/{total_entries}");
             }
         }

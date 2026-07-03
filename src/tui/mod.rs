@@ -234,6 +234,12 @@ pub enum BrowserMode {
 
 // ── App state ─────────────────────────────────────────────────────────────────
 
+/// A package-search hit: (package_name, optional_repo).
+type SearchHit = (String, Option<String>);
+/// A generation-tagged batch of search hits sent from the search thread, so a
+/// stale batch from an earlier query can be discarded.
+type SearchBatch = (u64, Vec<SearchHit>);
+
 pub struct App {
     pub quit: bool,
     pub tab: Tab,
@@ -248,11 +254,11 @@ pub struct App {
     // Install tab — async search
     pub search_input: String,
     /// (package_name, optional_repo) pairs returned by pkg_search.
-    pub search_results: Vec<(String, Option<String>)>,
+    pub search_results: Vec<SearchHit>,
     pub search_searching: bool,
     pub search_gen: u64,
-    pub search_tx: Sender<(u64, Vec<(String, Option<String>)>)>,
-    pub search_rx: Receiver<(u64, Vec<(String, Option<String>)>)>,
+    pub search_tx: Sender<SearchBatch>,
+    pub search_rx: Receiver<SearchBatch>,
     pub avail_state: ListState,
     pub search_list_focused: bool,
     // Import tab
@@ -941,12 +947,11 @@ fn on_installed(app: &mut App, code: KeyCode) {
     }
 
     match code {
-        KeyCode::Right | KeyCode::Char('l') => {
-            if app.selected_installed().is_some() {
+        KeyCode::Right | KeyCode::Char('l')
+            if app.selected_installed().is_some() => {
                 app.detail_focused = true;
                 app.detail_scroll = 0;
             }
-        }
         KeyCode::Up | KeyCode::Char('k') => {
             let i = app.inst_state.selected().unwrap_or(0);
             app.inst_state.select(Some(if i == 0 { len - 1 } else { i - 1 }));
@@ -1233,12 +1238,10 @@ fn on_already_installed(app: &mut App, code: KeyCode) {
             app.screen = Screen::Main;
             app.needs_clear = true;
         }
-        KeyCode::Up | KeyCode::Char('k') => {
-            if *selected > 0 { *selected -= 1; }
-        }
-        KeyCode::Down | KeyCode::Char('j') => {
-            if *selected < 1 { *selected += 1; }
-        }
+        KeyCode::Up | KeyCode::Char('k')
+            if *selected > 0 => { *selected -= 1; }
+        KeyCode::Down | KeyCode::Char('j')
+            if *selected < 1 => { *selected += 1; }
         KeyCode::Enter | KeyCode::Char(' ') => {
             let pkg = pkg.clone();
             match *selected {
@@ -1300,12 +1303,10 @@ fn on_no_launcher_choice(app: &mut App, code: KeyCode) {
             app.screen = Screen::Main;
             app.needs_clear = true;
         }
-        KeyCode::Up | KeyCode::Char('k') => {
-            if *selected > 0 { *selected -= 1; }
-        }
-        KeyCode::Down | KeyCode::Char('j') => {
-            if *selected < 1 { *selected += 1; }
-        }
+        KeyCode::Up | KeyCode::Char('k')
+            if *selected > 0 => { *selected -= 1; }
+        KeyCode::Down | KeyCode::Char('j')
+            if *selected < 1 => { *selected += 1; }
         KeyCode::Enter | KeyCode::Char(' ') => {
             let pkg = pkg.clone();
             let into_target = into_target.clone();
@@ -1342,12 +1343,10 @@ fn on_outdated_packages(app: &mut App, code: KeyCode) {
             app.screen = Screen::Main;
             app.needs_clear = true;
         }
-        KeyCode::Up | KeyCode::Char('k') => {
-            if *selected > 0 { *selected -= 1; }
-        }
-        KeyCode::Down | KeyCode::Char('j') => {
-            if *selected < 1 { *selected += 1; }
-        }
+        KeyCode::Up | KeyCode::Char('k')
+            if *selected > 0 => { *selected -= 1; }
+        KeyCode::Down | KeyCode::Char('j')
+            if *selected < 1 => { *selected += 1; }
         KeyCode::Enter | KeyCode::Char(' ') => {
             let s = *selected;
             let pkg = pkg.clone();
@@ -1382,12 +1381,11 @@ fn on_install(app: &mut App, code: KeyCode) {
                 app.search_input.pop();
                 trigger_search(app);
             }
-            KeyCode::Down => {
-                if !app.search_results.is_empty() {
+            KeyCode::Down
+                if !app.search_results.is_empty() => {
                     app.search_list_focused = true;
                     app.avail_state.select(Some(0));
                 }
-            }
             KeyCode::Enter if !app.selected_pkgs.is_empty() => {
                 enqueue_marked(app);
             }
@@ -1716,9 +1714,8 @@ fn on_op_running(app: &mut App, code: KeyCode) {
                     app.log_scroll = log.len().saturating_sub(1);
                 }
             }
-            KeyCode::Up | KeyCode::Char('k') if *show_log => {
-                if app.log_scroll > 0 { app.log_scroll -= 1; }
-            }
+            KeyCode::Up | KeyCode::Char('k') if *show_log
+                && app.log_scroll > 0 => { app.log_scroll -= 1; }
             KeyCode::Down | KeyCode::Char('j') if *show_log => {
                 app.log_scroll += 1;
             }
@@ -1738,7 +1735,7 @@ fn on_op_done(app: &mut App, code: KeyCode) -> Result<()> {
         }
         if *show_log {
             match code {
-                KeyCode::Up | KeyCode::Char('k') => { if app.log_scroll > 0 { app.log_scroll -= 1; } }
+                KeyCode::Up | KeyCode::Char('k') if app.log_scroll > 0 => { app.log_scroll -= 1; }
                 KeyCode::Down | KeyCode::Char('j') => { app.log_scroll += 1; }
                 _ => {}
             }
@@ -2155,7 +2152,7 @@ pub fn setting_current(config: &AppConfig, idx: usize) -> usize {
             Some("arduinoide") => 4,
             _                  => 5,
         },
-        CFG_SPOOF_TERMINAL => if config.spoof_terminal { 1 } else { 0 },
+        CFG_SPOOF_TERMINAL => usize::from(config.spoof_terminal),
         CFG_RAM_LIMIT => match config.ram_limit {
             None        => 0,
             Some(512)   => 1,
@@ -2541,11 +2538,10 @@ fn on_settings_tab(app: &mut App, code: KeyCode) {
             }
             cycle_setting(&mut app.global_config, app.global_selected, 1);
         }
-        KeyCode::Left => {
-            if app.global_selected != CFG_SAVE && app.global_selected != CFG_SHARES {
+        KeyCode::Left
+            if app.global_selected != CFG_SAVE && app.global_selected != CFG_SHARES => {
                 cycle_setting(&mut app.global_config, app.global_selected, -1);
             }
-        }
         KeyCode::Enter => {
             if app.global_selected == CFG_SAVE {
                 let cfg = app.global_config.clone();
@@ -2636,13 +2632,12 @@ fn on_shared_dirs(app: &mut App, code: KeyCode) {
         KeyCode::Up | KeyCode::Char('k') => {
             *selected = selected.saturating_sub(1);
         }
-        KeyCode::Down | KeyCode::Char('j') => {
-            if !dirs.is_empty() {
+        KeyCode::Down | KeyCode::Char('j')
+            if !dirs.is_empty() => {
                 *selected = (*selected + 1).min(dirs.len() - 1);
             }
-        }
-        KeyCode::Char('d') | KeyCode::Delete => {
-            if !dirs.is_empty() {
+        KeyCode::Char('d') | KeyCode::Delete
+            if !dirs.is_empty() => {
                 let name = app_name.clone();
                 let idx = *selected;
                 dirs.remove(idx);
@@ -2653,7 +2648,6 @@ fn on_shared_dirs(app: &mut App, code: KeyCode) {
                 config.shared_dirs = dirs.clone();
                 write_shared_cfg(&name, &config);
             }
-        }
         KeyCode::Char('a') => {
             let name = app_name.clone();
             open_file_browser(app, BrowserMode::PickShareDir(name));
@@ -2881,12 +2875,10 @@ fn on_ask_shortcut(app: &mut App, code: KeyCode) {
             app.screen = Screen::Main;
             app.needs_clear = true;
         }
-        KeyCode::Up | KeyCode::Char('k') => {
-            if *selected > 0 { *selected -= 1; }
-        }
-        KeyCode::Down | KeyCode::Char('j') => {
-            if *selected < 1 { *selected += 1; }
-        }
+        KeyCode::Up | KeyCode::Char('k')
+            if *selected > 0 => { *selected -= 1; }
+        KeyCode::Down | KeyCode::Char('j')
+            if *selected < 1 => { *selected += 1; }
         KeyCode::Enter | KeyCode::Char(' ') => {
             let screen = std::mem::replace(&mut app.screen, Screen::Main);
             if let Screen::AskShortcut { title, mut args, selected, .. } = screen {
@@ -3006,13 +2998,13 @@ fn spawn_wryayer(args: Vec<String>, tx: mpsc::Sender<Msg>) {
         let stderr = child.stderr.take().unwrap();
         let tx2 = tx.clone();
         thread::spawn(move || {
-            for line in BufReader::new(stderr).lines().flatten() {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
                 let _ = tx2.send(Msg::Line(line));
             }
         });
 
         if let Some(stdout) = child.stdout.take() {
-            for line in BufReader::new(stdout).lines().flatten() {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                 let _ = tx.send(Msg::Line(line));
             }
         }

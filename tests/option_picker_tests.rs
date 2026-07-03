@@ -1,3 +1,6 @@
+// Tests intentionally build a Default config and tweak one field at a time.
+#![allow(clippy::field_reassign_with_default)]
+
 use wryayer::config::{AppConfig, AvahiMode, LocalDelete, TempMode};
 use wryayer::tui::{
     apply_setting, cycle_setting, option_description, setting_current, setting_description,

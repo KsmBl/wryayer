@@ -260,29 +260,6 @@ fn is_versioned_soname(s: &str) -> bool {
             .all(|seg| !seg.is_empty() && seg.chars().all(|c| c.is_ascii_digit()))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::is_versioned_soname;
-    #[test]
-    fn accepts_typical_sonames() {
-        assert!(is_versioned_soname("libsndfile.so.1"));
-        assert!(is_versioned_soname("libQt6Core.so.6"));
-        assert!(is_versioned_soname("libssl.so.3"));
-        assert!(is_versioned_soname("libsndfile.so.1.0.37"));
-        assert!(is_versioned_soname("libgcc_s.so.1"));
-    }
-    #[test]
-    fn rejects_non_sonames() {
-        assert!(!is_versioned_soname("libsndfile.so"));
-        assert!(!is_versioned_soname("libsndfile"));
-        assert!(!is_versioned_soname("libsndfile.so.x"));
-        assert!(!is_versioned_soname("/usr/lib/libsndfile.so.1"));
-        assert!(!is_versioned_soname("libsndfile.so.1 not found"));
-        assert!(!is_versioned_soname("foo.so.1"));
-        assert!(!is_versioned_soname(""));
-    }
-}
-
 pub(crate) fn soname_in_app(app_dir: &Path, soname: &str) -> bool {
     for root in &["usr/lib", "usr/lib64", "lib", "lib64"] {
         let dir = app_dir.join(root);
@@ -305,4 +282,27 @@ pub(crate) fn soname_in_app(app_dir: &Path, soname: &str) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_versioned_soname;
+    #[test]
+    fn accepts_typical_sonames() {
+        assert!(is_versioned_soname("libsndfile.so.1"));
+        assert!(is_versioned_soname("libQt6Core.so.6"));
+        assert!(is_versioned_soname("libssl.so.3"));
+        assert!(is_versioned_soname("libsndfile.so.1.0.37"));
+        assert!(is_versioned_soname("libgcc_s.so.1"));
+    }
+    #[test]
+    fn rejects_non_sonames() {
+        assert!(!is_versioned_soname("libsndfile.so"));
+        assert!(!is_versioned_soname("libsndfile"));
+        assert!(!is_versioned_soname("libsndfile.so.x"));
+        assert!(!is_versioned_soname("/usr/lib/libsndfile.so.1"));
+        assert!(!is_versioned_soname("libsndfile.so.1 not found"));
+        assert!(!is_versioned_soname("foo.so.1"));
+        assert!(!is_versioned_soname(""));
+    }
 }

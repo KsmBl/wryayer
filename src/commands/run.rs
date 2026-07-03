@@ -997,7 +997,7 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
             "arduinoide" => "NAME=ArduinoIDE\nID=arduinoide\nPRETTY_NAME=ArduinoIDE\nVERSION_ID=2.3\n".to_string(),
             custom => {
                 let mut pretty = custom.to_string();
-                pretty.get_mut(..1).map(|c| c.make_ascii_uppercase());
+                if let Some(c) = pretty.get_mut(..1) { c.make_ascii_uppercase() }
                 format!("NAME={pretty}\nID={custom}\nPRETTY_NAME={pretty}\nVERSION_ID=1.0\n")
             }
         };

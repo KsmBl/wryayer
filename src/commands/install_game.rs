@@ -281,7 +281,7 @@ fn detect_main_exe(game_dir: &Path, app_name: &str) -> Result<ExeChoice> {
     }
 
     let mut sorted = ranked;
-    sorted.sort_by(|a, b| b.2.cmp(&a.2));
+    sorted.sort_by_key(|t| std::cmp::Reverse(t.2));
 
     let best_score = sorted[0].2;
     let close_runners = sorted.iter()
@@ -298,6 +298,7 @@ fn detect_main_exe(game_dir: &Path, app_name: &str) -> Result<ExeChoice> {
     Ok(ExeChoice::Many(candidates))
 }
 
+#[allow(clippy::only_used_in_recursion)] // `root` is threaded through for future relative-path use
 fn collect_exes(root: &Path, dir: &Path, out: &mut Vec<(PathBuf, u64)>, depth: usize) -> Result<()> {
     if depth > 6 {
         return Ok(());

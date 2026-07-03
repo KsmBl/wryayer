@@ -182,7 +182,7 @@ fn draw_matrix(f: &mut Frame, elapsed_ms: u64, done: bool, success: bool) {
         '0','1','ﾊ','ﾐ','ﾋ','ｰ','ｳ','ｼ','ﾅ','ﾓ','ﾆ','ｻ','ﾜ','ﾂ','ｵ','ﾘ','ｱ','ﾎ','ﾃ',
     ];
     for col in 0..w {
-        let speed = 40 + (hash(col as u64) % 80) as u64;
+        let speed = 40 + (hash(col as u64) % 80);
         let head_y = ((elapsed_ms / speed) % (h as u64 * 2)) as i32;
         let trail = 6 + (hash(col as u64 ^ 0xF00D) % 8) as i32;
         for d in 0..trail {

@@ -1,3 +1,6 @@
+// Tests intentionally build a Default config and tweak individual fields.
+#![allow(clippy::field_reassign_with_default)]
+
 use wryayer::config::{
     read_global_config, write_global_config, AppConfig, TempMode,
 };

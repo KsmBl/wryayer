@@ -275,7 +275,7 @@ pub fn soname_owner(soname: &str) -> Result<Option<String>> {
 pub fn parse_pacman_field(stdout: &str, field: &str) -> Option<String> {
     for line in stdout.lines() {
         if line.starts_with(field) && line.contains(':') {
-            let value = line.splitn(2, ':').nth(1)?.trim().to_string();
+            let value = line.split_once(':')?.1.trim().to_string();
             return Some(value);
         }
     }
@@ -285,7 +285,7 @@ pub fn parse_pacman_field(stdout: &str, field: &str) -> Option<String> {
 pub fn parse_pacman_depends(stdout: &str) -> Vec<String> {
     for line in stdout.lines() {
         if line.starts_with("Depends On") {
-            let value = match line.splitn(2, ':').nth(1) {
+            let value = match line.split_once(':').map(|x| x.1) {
                 Some(v) => v.trim(),
                 None => return vec![],
             };
@@ -303,7 +303,7 @@ pub fn parse_pacman_depends(stdout: &str) -> Vec<String> {
 }
 
 pub fn strip_version_constraint(dep: &str) -> &str {
-    dep.split(|c| matches!(c, '>' | '<' | '=' | '!'))
+    dep.split(['>', '<', '=', '!'])
         .next()
         .unwrap_or(dep)
 }

@@ -475,7 +475,7 @@ fn draw_install(f: &mut Frame, app: &mut App, area: Rect) {
     let installed_names: std::collections::HashSet<&str> =
         app.installed.iter().map(|m| m.app.name.as_str()).collect();
 
-    let items: Vec<ListItem> = app.search_results.iter().enumerate().map(|(_i, (pkg, repo))| {
+    let items: Vec<ListItem> = app.search_results.iter().map(|(pkg, repo)| {
         let is_marked = app.selected_pkgs.contains(pkg.as_str());
         let repo_span = repo.as_deref().map(|r| {
             Span::styled(format!(" [{}]", r), Style::default().fg(C_DIM))
@@ -666,6 +666,7 @@ fn log_line_color(l: &str) -> Color {
     }
 }
 
+#[allow(clippy::too_many_arguments)] // draws one operation screen from its many independent pieces of state
 fn draw_operation(
     f: &mut Frame,
     area: Rect,
@@ -972,7 +973,7 @@ fn draw_space(f: &mut Frame, app: &App, area: Rect) {
     let mut rows: Vec<(&str, u64)> = app.installed.iter()
         .map(|m| (m.app.name.as_str(), *app.app_sizes.get(&m.app.name).unwrap_or(&0)))
         .collect();
-    rows.sort_by(|a, b| b.1.cmp(&a.1));
+    rows.sort_by_key(|r| std::cmp::Reverse(r.1));
 
     for (name, size) in &rows {
         if y + 1 >= inner.y + inner.height { break; }

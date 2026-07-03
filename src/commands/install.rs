@@ -70,11 +70,11 @@ fn run_inner(
     //   fresh mode → same as alias_name (must match per the comment above)
     //   merge mode → follow the --into chain to find the real filesystem root
     let target_name = if let Some(into_name) = into {
-        let resolved = read_manifest(into_name)
+        
+        read_manifest(into_name)
             .ok()
             .and_then(|m| m.app.alias_of)
-            .unwrap_or_else(|| into_name.to_string());
-        resolved
+            .unwrap_or_else(|| into_name.to_string())
     } else {
         alias_name.clone()
     };

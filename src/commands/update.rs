@@ -86,7 +86,7 @@ fn reinstall(manifest: &crate::manifest::Manifest) -> Result<()> {
     // re-queried for its current version.
     let cached_names: Vec<String> = manifest.packages.iter().map(|p| p.name.clone()).collect();
     crate::package::deps::invalidate_dep_cache(&cached_names);
-    crate::package::deps::invalidate_dep_cache(&[pkg_name.clone()]);
+    crate::package::deps::invalidate_dep_cache(std::slice::from_ref(&pkg_name));
 
     eprintln!("Resolving dependencies for {app_name} ({pkg_name})...");
     let mut resolved = resolve_full_dep_tree(&pkg_name)?;
