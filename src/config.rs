@@ -402,14 +402,22 @@ pub fn parse_ram_limit(v: &str) -> Option<u64> {
 /// Render a KiB RAM limit as the largest whole unit (GiB / MiB / KiB). The
 /// result round-trips through [`parse_ram_limit`].
 pub fn format_ram_limit(kib: u64) -> String {
-    // Labelled KB/MB/GB to match what the user types (1024-based, like systemd).
-    if kib.is_multiple_of(1024 * 1024) {
-        format!("{} GB", kib / (1024 * 1024))
-    } else if kib.is_multiple_of(1024) {
-        format!("{} MB", kib / 1024)
-    } else {
-        format!("{} KB", kib)
+    // Show the value in the largest unit that reads naturally and round-trips
+    // exactly through parse_ram_limit — so "1.5 GB" stays "1.5 GB" instead of
+    // being demoted to "1536 MB", while odd values (e.g. 500000 KB) keep their
+    // own unit rather than turning into a fractional bigger one. Labelled KB/MB/GB
+    // to match what the user types (1024-based, like systemd).
+    for (div, unit) in [(1024u64 * 1024, "GB"), (1024u64, "MB")] {
+        if kib >= div {
+            let count = format!("{:.2}", kib as f64 / div as f64);
+            let count = count.trim_end_matches('0').trim_end_matches('.');
+            let label = format!("{count} {unit}");
+            if parse_ram_limit(&label) == Some(kib) {
+                return label;
+            }
+        }
     }
+    format!("{kib} KB")
 }
 
 #[allow(clippy::result_unit_err)] // callers only care whether it parsed; the unit err is the signal
