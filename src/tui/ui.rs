@@ -1341,6 +1341,10 @@ fn draw_settings_tab(f: &mut Frame, app: &mut App, area: Rect) {
             crate::config::Theme::Amber   => "amber".into(),
             crate::config::Theme::Matrix  => "matrix".into(),
         }),
+        ("Layout",      match config.layout {
+            crate::config::Layout::Default => "default".into(),
+            crate::config::Layout::Sidebar => "sidebar".into(),
+        }),
     ];
 
     // Reserve last 2 rows for separator + save
