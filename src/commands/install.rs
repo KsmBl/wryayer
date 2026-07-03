@@ -427,7 +427,27 @@ pub fn run(
         }
     }
 
+    // Optionally wipe the shared download/build cache so no record of what was
+    // installed is left outside ~/.wryayer (useful when that dir is an encrypted
+    // container). Best-effort; a failure never fails the install.
+    if crate::config::read_global_config().clean_cache {
+        clean_wryayer_cache();
+    }
+
     Ok(())
+}
+
+/// Delete `~/.cache/wryayer` (the download, build, and dependency-resolution
+/// caches). Called after an install when `clean_cache` is enabled. Best-effort.
+fn clean_wryayer_cache() {
+    let Ok(home) = std::env::var("HOME") else { return };
+    let cache = PathBuf::from(home).join(".cache").join("wryayer");
+    if cache.exists() {
+        match fs::remove_dir_all(&cache) {
+            Ok(()) => eprintln!("Cleaned cache: {}", cache.display()),
+            Err(e) => eprintln!("warning: failed to clean cache {}: {e:#}", cache.display()),
+        }
+    }
 }
 
 /// Recreate the well-known top-level symlinks that the `filesystem` package

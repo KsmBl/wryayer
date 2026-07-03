@@ -191,6 +191,7 @@ fn round_trip_all_non_default_values() {
         create_shortcut:     true,
         confirm_install:     false,
         ask_shortcut:        false,
+        clean_cache:         true,
         portal_filter:       false,
         avahi:               AvahiMode::Host,
     };
@@ -205,6 +206,7 @@ fn round_trip_all_non_default_values() {
     assert_eq!(parsed.avahi, AvahiMode::Host);
     assert!(!parsed.confirm_install);
     assert!(!parsed.ask_shortcut);
+    assert!(parsed.clean_cache);
     assert!(!parsed.portal_filter);
 }
 
