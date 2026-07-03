@@ -1670,9 +1670,8 @@ fn draw_config(
         }),
         ("Spoof term.", if config.spoof_terminal { " detect".to_string() } else { "  off  ".to_string() }),
         ("RAM limit  ", match config.ram_limit {
-            None      => " none    ".to_string(),
-            Some(mib) if mib % 1024 == 0 => format!(" {} GiB  ", mib / 1024),
-            Some(mib) => format!(" {} MiB  ", mib),
+            None      => " none ".to_string(),
+            Some(kib) => format!(" {} ", crate::config::format_ram_limit(kib)),
         }),
         ("Resolution ", match config.spoof_resolution.as_deref() {
             None             => " system  ".to_string(),
@@ -1700,22 +1699,29 @@ fn draw_config(
 
     // Save is pinned to the bottom so it's always reachable on small terminals.
     let save_y = inner.y + inner.height.saturating_sub(2);
-    // Stop rendering rows before they collide with the separator + save button.
-    let clip_y = save_y.saturating_sub(2);
 
-    let mut y = inner.y;
+    // One line per row, scrolled to keep the selected row on screen when the
+    // popup is too short for all of them.  The button sits at height-2 with its
+    // separator just above it, so reserve 3 lines (rows must stop before the
+    // separator, or the last one gets overwritten by it).
+    let visible_h = (inner.height as usize).saturating_sub(3);
+    let sel_row = selected.min(rows.len().saturating_sub(1)); // Save selection scrolls to the end
+    let max_offset = rows.len().saturating_sub(visible_h);
+    let mut offset = if sel_row >= visible_h { sel_row + 1 - visible_h } else { 0 };
+    offset = offset.min(max_offset);
+
     for (idx, (label, value)) in rows.iter().enumerate() {
-        if y >= clip_y { break; }
+        if idx < offset || idx >= offset + visible_h {
+            continue;
+        }
+        let y = inner.y + (idx - offset) as u16;
         let is_sel = idx == selected;
-
         let val_color = match value.trim() {
             "on"  => c_green(),
             "off" => c_red(),
             _     => c_yellow(),
         };
         let bg = if is_sel { c_select() } else { Color::Reset };
-        let row = Rect { x: inner.x, y, width: inner.width, height: 1 };
-
         f.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(if is_sel { " ▶ " } else { "   " }, Style::default().fg(c_accent())),
@@ -1723,20 +1729,22 @@ fn draw_config(
                 Span::styled(format!("[{value}]"), Style::default().fg(val_color).bg(bg)
                     .add_modifier(if is_sel { Modifier::BOLD } else { Modifier::empty() })),
             ])),
-            row,
+            Rect { x: inner.x, y, width: inner.width, height: 1 },
         );
-        y += 1;
+    }
 
-        // Game rows render compactly (no separator) so the extra two rows fit
-        // on the same popup height as the non-game Config screen.
-        let is_game_row = has_wg && (idx == CFG_GAME_EXE || idx == CFG_GAME_PREFIX);
-        if !is_game_row && y < clip_y {
-            f.render_widget(
-                Paragraph::new(Span::styled("─".repeat(inner.width as usize), Style::default().fg(Color::Rgb(50, 50, 60)))),
-                Rect { x: inner.x, y, width: inner.width, height: 1 },
-            );
-            y += 1;
-        }
+    // Scroll indicators when rows are clipped above/below.
+    if visible_h > 0 && offset > 0 {
+        f.render_widget(
+            Paragraph::new(Span::styled("▲", Style::default().fg(c_dim()))),
+            Rect { x: inner.x + inner.width.saturating_sub(1), y: inner.y, width: 1, height: 1 },
+        );
+    }
+    if visible_h > 0 && offset + visible_h < rows.len() {
+        f.render_widget(
+            Paragraph::new(Span::styled("▼", Style::default().fg(c_dim()))),
+            Rect { x: inner.x + inner.width.saturating_sub(1), y: inner.y + visible_h as u16 - 1, width: 1, height: 1 },
+        );
     }
 
     // Save button — always at the bottom
