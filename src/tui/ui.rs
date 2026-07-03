@@ -395,6 +395,30 @@ fn draw_installed(f: &mut Frame, app: &mut App, area: Rect) {
     draw_detail(f, app, chunks[1]);
 }
 
+/// Read the live `/proc/meminfo` overlay wryayer maintains for a ram-limited
+/// sandbox and return `(used_mib, total_mib)`. The file only exists — and is
+/// only kept fresh — while a ram-limited instance of `fs_root` is running, so a
+/// successful read doubles as "this app is running under a RAM cap".
+fn read_sandbox_ram(fs_root: &str) -> Option<(u64, u64)> {
+    let home = std::env::var("HOME").ok()?;
+    let path = format!("{home}/.wryayer/{fs_root}/.spoof/meminfo");
+    parse_meminfo(&std::fs::read_to_string(path).ok()?)
+}
+
+/// Parse a `/proc/meminfo` body into `(used_mib, total_mib)`.
+fn parse_meminfo(content: &str) -> Option<(u64, u64)> {
+    let (mut total, mut free) = (None, None);
+    for line in content.lines() {
+        if let Some(v) = line.strip_prefix("MemTotal:") {
+            total = v.trim().trim_end_matches("kB").trim().parse::<u64>().ok();
+        } else if let Some(v) = line.strip_prefix("MemFree:") {
+            free = v.trim().trim_end_matches("kB").trim().parse::<u64>().ok();
+        }
+    }
+    let (t, f) = (total?, free?);
+    Some((t.saturating_sub(f) / 1024, t / 1024)) // kB -> MiB
+}
+
 fn draw_detail(f: &mut Frame, app: &mut App, area: Rect) {
     let focused = app.detail_focused;
     let border_color = if focused { c_accent() } else { c_dim() };
@@ -462,6 +486,24 @@ fn draw_detail(f: &mut Frame, app: &mut App, area: Rect) {
         launchers_line,
         Line::from(vec![Span::styled("  Size:       ", dim), Span::styled(size_str, Style::default().fg(c_accent()))]),
     ];
+
+    // Running-instance count, plus live RAM usage for ram-limited sandboxes.
+    let running = app.running_instances.get(&m.app.name).copied().unwrap_or(0);
+    if running > 0 {
+        lines.push(Line::from(vec![
+            Span::styled("  Running:    ", dim),
+            Span::styled(format!("{running} instance(s)"), Style::default().fg(c_running())),
+        ]));
+        let fs_root = m.app.alias_of.as_deref().unwrap_or(&m.app.name);
+        if let Some((used, total)) = read_sandbox_ram(fs_root) {
+            let pct = used.saturating_mul(100).checked_div(total).unwrap_or(0);
+            let color = if pct >= 90 { c_red() } else if pct >= 70 { c_yellow() } else { c_green() };
+            lines.push(Line::from(vec![
+                Span::styled("  RAM:        ", dim),
+                Span::styled(format!("{used} / {total} MiB ({pct}%)"), Style::default().fg(color)),
+            ]));
+        }
+    }
 
     if let Some(new_ver) = app.update_available.get(&m.app.name) {
         lines.push(Line::raw(""));
@@ -2702,5 +2744,18 @@ mod theme_tests {
         assert_eq!(c_fg(), Color::White);
         assert_eq!(c_border_type(), BorderType::Plain);
         assert_eq!(c_select_symbol(), "▶ ");
+    }
+
+    #[test]
+    fn parse_meminfo_computes_used_and_total_in_mib() {
+        // 2 GiB total, 1.5 GiB free -> 512 MiB used, 2048 MiB total.
+        let body = "MemTotal:       2097152 kB\nMemFree:        1572864 kB\nMemAvailable:   1572864 kB\n";
+        assert_eq!(parse_meminfo(body), Some((512, 2048)));
+    }
+
+    #[test]
+    fn parse_meminfo_rejects_incomplete() {
+        assert_eq!(parse_meminfo("MemTotal: 2097152 kB\n"), None);
+        assert_eq!(parse_meminfo(""), None);
     }
 }

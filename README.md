@@ -42,8 +42,10 @@ wryayer tui
 
 **Installed tab** — every app with a live running-instance count and an update
 dot next to anything out of date. The right panel shows version, size, the
-available update, snapshots, and the full package list. Merged-in tools
-(installed with `--into`) appear indented under their host.
+available update, snapshots, and the full package list — and, while an app is
+running, its instance count plus live **RAM usage** (used / limit) for apps that
+have a RAM cap set. Merged-in tools (installed with `--into`) appear indented
+under their host.
 
 ![wryayer TUI — Installed tab](docs/screenshots/installed.png)
 
