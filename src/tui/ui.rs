@@ -37,6 +37,9 @@ struct Palette {
     border: BorderType,
     /// The glyph printed to the left of the highlighted list row.
     select_symbol: &'static str,
+    /// When true the tab bar is a vertical sidebar on the left (a different
+    /// layout construction) instead of a horizontal strip across the top.
+    sidebar: bool,
 }
 
 /// The original cool palette: white text, cyan accent, single-line borders.
@@ -52,6 +55,7 @@ const PALETTE_DEFAULT: Palette = Palette {
     running: Color::Rgb(104, 148, 104),
     border: BorderType::Plain,
     select_symbol: "▶ ",
+    sidebar: false,
 };
 
 /// A warm amber palette — same construction as default, warmer colours.
@@ -66,6 +70,7 @@ const PALETTE_AMBER: Palette = Palette {
     running: Color::Rgb(158, 138, 96),
     border: BorderType::Plain,
     select_symbol: "▶ ",
+    sidebar: false,
 };
 
 /// A green-phosphor terminal — a fundamentally different construction, not a
@@ -83,6 +88,7 @@ const PALETTE_MATRIX: Palette = Palette {
     running: Color::Rgb(96, 200, 112),
     border: BorderType::Double,
     select_symbol: "> ",
+    sidebar: true,
 };
 
 static ACTIVE_THEME: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
@@ -111,6 +117,8 @@ fn c_accent() -> Color { palette().accent }
 fn c_border_type() -> BorderType { palette().border }
 /// Glyph shown to the left of the highlighted list row.
 fn c_select_symbol() -> &'static str { palette().select_symbol }
+/// Whether the tab bar is a left sidebar (true) or a top strip (false).
+fn c_sidebar_layout() -> bool { palette().sidebar }
 fn c_green() -> Color { palette().green }
 fn c_red() -> Color { palette().red }
 fn c_yellow() -> Color { palette().yellow }
@@ -123,23 +131,38 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     set_active_theme(app.global_config.theme);
     let area = f.area();
 
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(0), Constraint::Length(1)])
-        .split(area);
-
-    draw_tabs(f, app, chunks[0]);
+    // Two constructions: the default top strip, or (matrix) a left sidebar.
+    // Both resolve to a body area for the active tab and a full-width status bar.
+    let (body, status) = if c_sidebar_layout() {
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(0), Constraint::Length(1)])
+            .split(area);
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Length(16), Constraint::Min(0)])
+            .split(rows[0]);
+        draw_side_tabs(f, app, cols[0]);
+        (cols[1], rows[1])
+    } else {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(3), Constraint::Min(0), Constraint::Length(1)])
+            .split(area);
+        draw_tabs(f, app, chunks[0]);
+        (chunks[1], chunks[2])
+    };
 
     match app.tab {
-        Tab::Installed => draw_installed(f, app, chunks[1]),
-        Tab::Install   => draw_install(f, app, chunks[1]),
-        Tab::Import    => draw_import(f, app, chunks[1]),
-        Tab::Games     => draw_games(f, app, chunks[1]),
-        Tab::Space     => draw_space(f, app, chunks[1]),
-        Tab::Settings  => draw_settings_tab(f, app, chunks[1]),
+        Tab::Installed => draw_installed(f, app, body),
+        Tab::Install   => draw_install(f, app, body),
+        Tab::Import    => draw_import(f, app, body),
+        Tab::Games     => draw_games(f, app, body),
+        Tab::Space     => draw_space(f, app, body),
+        Tab::Settings  => draw_settings_tab(f, app, body),
     }
 
-    draw_statusbar(f, app, chunks[2]);
+    draw_statusbar(f, app, status);
 
     // Overlays
     match &app.screen {
@@ -302,6 +325,37 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 }
 
 // ── Tab bar ───────────────────────────────────────────────────────────────────
+
+/// Vertical tab bar for the sidebar layout: the tab names stacked down the left
+/// edge, the active one highlighted with the theme's selection glyph and colour.
+fn draw_side_tabs(f: &mut Frame, app: &App, area: Rect) {
+    const NAMES: [&str; 6] = ["Installed", "Install", "Import", "Games", "Space", "Settings"];
+    let sel = match app.tab {
+        Tab::Installed => 0, Tab::Install => 1, Tab::Import => 2,
+        Tab::Games => 3, Tab::Space => 4, Tab::Settings => 5,
+    };
+    let items: Vec<ListItem> = NAMES.iter().enumerate().map(|(i, name)| {
+        if i == sel {
+            ListItem::new(Line::from(vec![
+                Span::styled(c_select_symbol(), Style::default().fg(c_accent()).add_modifier(Modifier::BOLD)),
+                Span::styled(*name, Style::default().fg(c_fg()).add_modifier(Modifier::BOLD)),
+            ]))
+            .style(Style::default().bg(c_select()))
+        } else {
+            ListItem::new(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(*name, Style::default().fg(c_accent())),
+            ]))
+        }
+    }).collect();
+    let list = List::new(items).block(
+        Block::default().borders(Borders::ALL).border_type(c_border_type())
+            .title(" wryayer ")
+            .title_style(Style::default().fg(c_accent()).add_modifier(Modifier::BOLD))
+            .border_style(Style::default().fg(c_accent())),
+    );
+    f.render_widget(list, area);
+}
 
 fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
     let mk = |label: &str| Line::from(vec![
@@ -2737,6 +2791,7 @@ mod theme_tests {
         assert_ne!(c_fg(), Color::White); // green body text, not white
         assert_eq!(c_border_type(), BorderType::Double); // double-line CRT borders
         assert_eq!(c_select_symbol(), "> "); // prompt glyph, not the solid arrow
+        assert!(c_sidebar_layout()); // tabs move to a left sidebar
 
         set_active_theme(Theme::Default);
         assert_eq!(c_accent(), PALETTE_DEFAULT.accent);
@@ -2744,6 +2799,7 @@ mod theme_tests {
         assert_eq!(c_fg(), Color::White);
         assert_eq!(c_border_type(), BorderType::Plain);
         assert_eq!(c_select_symbol(), "▶ ");
+        assert!(!c_sidebar_layout()); // default keeps the top tab strip
     }
 
     #[test]
