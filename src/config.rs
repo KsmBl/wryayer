@@ -22,6 +22,8 @@ pub enum Theme {
     Default,
     /// A warm amber palette.
     Amber,
+    /// A green-phosphor terminal palette (green body text, not white).
+    Matrix,
 }
 
 /// How to satisfy sandboxed apps that probe Avahi/zeroconf at startup.
@@ -341,6 +343,7 @@ pub fn parse_ini(content: &str) -> Result<AppConfig> {
             ("theme", v) => {
                 config.theme = match v {
                     "amber" => Theme::Amber,
+                    "matrix" => Theme::Matrix,
                     _ => Theme::Default,
                 };
             }
@@ -479,8 +482,12 @@ pub fn format_ini(config: &AppConfig) -> String {
             s.push_str("clean_cache = on\n");
         }
         if config.theme != Theme::Default {
-            s.push_str("; TUI colour theme: default | amber\n");
-            let name = match config.theme { Theme::Amber => "amber", Theme::Default => "default" };
+            s.push_str("; TUI colour theme: default | amber | matrix\n");
+            let name = match config.theme {
+                Theme::Amber => "amber",
+                Theme::Matrix => "matrix",
+                Theme::Default => "default",
+            };
             s.push_str(&format!("theme = {name}\n"));
         }
         if !config.portal_filter {

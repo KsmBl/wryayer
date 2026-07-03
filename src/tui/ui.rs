@@ -23,6 +23,8 @@ use super::{
 // active theme.
 
 struct Palette {
+    /// Primary foreground for body text, labels, and selected rows.
+    fg: Color,
     accent: Color,
     green: Color,
     red: Color,
@@ -32,8 +34,9 @@ struct Palette {
     running: Color,
 }
 
-/// The original cool palette: cyan accent, dark-blue selection.
+/// The original cool palette: white text, cyan accent, dark-blue selection.
 const PALETTE_DEFAULT: Palette = Palette {
+    fg: Color::White,
     accent: Color::Cyan,
     green: Color::Green,
     red: Color::Red,
@@ -44,8 +47,9 @@ const PALETTE_DEFAULT: Palette = Palette {
     running: Color::Rgb(104, 148, 104),
 };
 
-/// A warm amber palette.
+/// A warm amber palette (white text on warm accents).
 const PALETTE_AMBER: Palette = Palette {
+    fg: Color::White,
     accent: Color::Rgb(224, 165, 74),
     green: Color::Rgb(150, 172, 90),
     red: Color::Rgb(214, 106, 84),
@@ -55,6 +59,21 @@ const PALETTE_AMBER: Palette = Palette {
     running: Color::Rgb(158, 138, 96),
 };
 
+/// A green-phosphor terminal palette — a fundamentally different construction:
+/// the body text itself is green (not white), so the whole UI reads as a
+/// monochrome CRT rather than a recolour of the default. A muted red/amber is
+/// kept for genuine error/warning legibility.
+const PALETTE_MATRIX: Palette = Palette {
+    fg: Color::Rgb(122, 222, 130),
+    accent: Color::Rgb(80, 250, 128),
+    green: Color::Rgb(120, 240, 120),
+    red: Color::Rgb(232, 120, 96),
+    yellow: Color::Rgb(206, 232, 116),
+    dim: Color::Rgb(70, 120, 78),
+    select: Color::Rgb(20, 58, 28),
+    running: Color::Rgb(96, 200, 112),
+};
+
 static ACTIVE_THEME: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
 /// Select the palette used by subsequent draws. Called each frame from `draw`.
@@ -62,6 +81,7 @@ pub fn set_active_theme(theme: crate::config::Theme) {
     let idx = match theme {
         crate::config::Theme::Default => 0,
         crate::config::Theme::Amber => 1,
+        crate::config::Theme::Matrix => 2,
     };
     ACTIVE_THEME.store(idx, std::sync::atomic::Ordering::Relaxed);
 }
@@ -69,10 +89,12 @@ pub fn set_active_theme(theme: crate::config::Theme) {
 fn palette() -> &'static Palette {
     match ACTIVE_THEME.load(std::sync::atomic::Ordering::Relaxed) {
         1 => &PALETTE_AMBER,
+        2 => &PALETTE_MATRIX,
         _ => &PALETTE_DEFAULT,
     }
 }
 
+fn c_fg() -> Color { palette().fg }
 fn c_accent() -> Color { palette().accent }
 fn c_green() -> Color { palette().green }
 fn c_red() -> Color { palette().red }
@@ -278,7 +300,7 @@ fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
         .select(sel)
         .block(Block::default().borders(Borders::ALL)
             .title(" wryayer ").title_style(Style::default().fg(c_accent()).add_modifier(Modifier::BOLD)))
-        .highlight_style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD).bg(c_select()))
+        .highlight_style(Style::default().fg(c_fg()).add_modifier(Modifier::BOLD).bg(c_select()))
         .divider(Span::styled("|", Style::default().fg(c_dim())));
     f.render_widget(tabs, area);
 }
@@ -292,7 +314,7 @@ fn draw_installed(f: &mut Frame, app: &mut App, area: Rect) {
         .split(area);
 
     let list_active = !app.detail_focused;
-    let list_fg = if list_active { Color::White } else { c_dim() };
+    let list_fg = if list_active { c_fg() } else { c_dim() };
     let list_border = if list_active { c_accent() } else { c_dim() };
 
     let items: Vec<ListItem> = app.installed.iter().enumerate().map(|(i, m)| {
@@ -351,7 +373,7 @@ fn draw_installed(f: &mut Frame, app: &mut App, area: Rect) {
         .block(Block::default().borders(Borders::ALL).title(" Apps ")
             .title_style(Style::default().fg(list_border))
             .border_style(Style::default().fg(list_border)))
-        .highlight_style(Style::default().bg(c_select()).fg(Color::White).add_modifier(Modifier::BOLD))
+        .highlight_style(Style::default().bg(c_select()).fg(c_fg()).add_modifier(Modifier::BOLD))
         .highlight_symbol("▶ ");
 
     f.render_stateful_widget(list, chunks[0], &mut app.inst_state);
@@ -390,19 +412,19 @@ fn draw_detail(f: &mut Frame, app: &mut App, area: Rect) {
     let name_line = if let Some(ref dn) = m.app.display_name {
         Line::from(vec![
             Span::styled("  Name:       ", dim),
-            Span::styled(dn.as_str(), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(dn.as_str(), Style::default().fg(c_fg()).add_modifier(Modifier::BOLD)),
             Span::styled(format!("  [{}]", m.app.name), Style::default().fg(c_dim())),
         ])
     } else if let Some(ref pn) = m.app.pkg_name {
         Line::from(vec![
             Span::styled("  Name:       ", dim),
-            Span::styled(m.app.name.as_str(), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(m.app.name.as_str(), Style::default().fg(c_fg()).add_modifier(Modifier::BOLD)),
             Span::styled(format!("  [{}]", pn), Style::default().fg(c_dim())),
         ])
     } else {
         Line::from(vec![
             Span::styled("  Name:       ", dim),
-            Span::styled(m.app.name.as_str(), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(m.app.name.as_str(), Style::default().fg(c_fg()).add_modifier(Modifier::BOLD)),
         ])
     };
 
@@ -459,7 +481,7 @@ fn draw_detail(f: &mut Frame, app: &mut App, area: Rect) {
         for label in &snap_labels {
             lines.push(Line::from(vec![
                 Span::styled("    ", dim),
-                Span::styled(label.as_str(), Style::default().fg(Color::White)),
+                Span::styled(label.as_str(), Style::default().fg(c_fg())),
             ]));
         }
     }
@@ -477,7 +499,7 @@ fn draw_detail(f: &mut Frame, app: &mut App, area: Rect) {
         let name: String = pkg.name.chars().take(24).collect();
         lines.push(Line::from(vec![
             Span::styled(format!("    {name:<max_name$}  "), dim),
-            Span::styled(&pkg.version, Style::default().fg(Color::White)),
+            Span::styled(&pkg.version, Style::default().fg(c_fg())),
         ]));
     }
 
@@ -490,7 +512,7 @@ fn draw_detail(f: &mut Frame, app: &mut App, area: Rect) {
     } else {
         lines.push(Line::from(vec![
             Span::styled("  No launcher — reinstall with ", Style::default().fg(c_yellow())),
-            Span::styled("--bin-names <name>", Style::default().fg(Color::White)),
+            Span::styled("--bin-names <name>", Style::default().fg(c_fg())),
         ]));
         lines.push(Line::from(Span::styled(
             "  [d] Delete  [e] Export  [p] Snapshot  [o] Rollback",
@@ -524,9 +546,9 @@ fn draw_install(f: &mut Frame, app: &mut App, area: Rect) {
     f.render_widget(
         Paragraph::new(format!("{}{}", app.search_input, cursor))
             .block(Block::default().borders(Borders::ALL).title(search_title)
-                .title_style(Style::default().fg(if bar_active { Color::White } else { c_dim() }))
+                .title_style(Style::default().fg(if bar_active { c_fg() } else { c_dim() }))
                 .border_style(Style::default().fg(if bar_active { c_accent() } else { c_dim() })))
-            .style(Style::default().fg(Color::White)),
+            .style(Style::default().fg(c_fg())),
         chunks[0],
     );
 
@@ -541,7 +563,7 @@ fn draw_install(f: &mut Frame, app: &mut App, area: Rect) {
         if installed_names.contains(pkg.as_str()) {
             let mut spans = vec![
                 Span::styled("✓ ", Style::default().fg(c_green())),
-                Span::styled(pkg.as_str(), Style::default().fg(Color::White)),
+                Span::styled(pkg.as_str(), Style::default().fg(c_fg())),
             ];
             if let Some(rs) = repo_span { spans.push(rs); }
             spans.push(Span::styled(" [installed]", Style::default().fg(c_green())));
@@ -549,7 +571,7 @@ fn draw_install(f: &mut Frame, app: &mut App, area: Rect) {
         } else if is_marked {
             let mut spans = vec![
                 Span::styled("◉ ", Style::default().fg(c_accent())),
-                Span::styled(pkg.as_str(), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                Span::styled(pkg.as_str(), Style::default().fg(c_fg()).add_modifier(Modifier::BOLD)),
             ];
             if let Some(rs) = repo_span { spans.push(rs); }
             spans.push(Span::styled(" [marked]", Style::default().fg(c_accent())));
@@ -557,7 +579,7 @@ fn draw_install(f: &mut Frame, app: &mut App, area: Rect) {
         } else {
             let mut spans = vec![
                 Span::raw("  "),
-                Span::styled(pkg.as_str(), Style::default().fg(Color::White)),
+                Span::styled(pkg.as_str(), Style::default().fg(c_fg())),
             ];
             if let Some(rs) = repo_span { spans.push(rs); }
             ListItem::new(Line::from(spans))
@@ -574,7 +596,7 @@ fn draw_install(f: &mut Frame, app: &mut App, area: Rect) {
 
     let list = List::new(items)
         .block(Block::default().borders(Borders::ALL).title(results_title).title_style(Style::default().fg(c_accent())))
-        .highlight_style(Style::default().bg(c_select()).fg(Color::White).add_modifier(Modifier::BOLD))
+        .highlight_style(Style::default().bg(c_select()).fg(c_fg()).add_modifier(Modifier::BOLD))
         .highlight_symbol("▶ ");
 
     f.render_stateful_widget(list, chunks[1], &mut app.avail_state);
@@ -584,9 +606,9 @@ fn draw_install(f: &mut Frame, app: &mut App, area: Rect) {
         let n = app.selected_pkgs.len();
         let hint = Line::from(vec![
             Span::styled(format!(" {n} marked — press "), Style::default().fg(c_accent())),
-            Span::styled("Enter", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled("Enter", Style::default().fg(c_fg()).add_modifier(Modifier::BOLD)),
             Span::styled(" to install all, ", Style::default().fg(c_accent())),
-            Span::styled("Space", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled("Space", Style::default().fg(c_fg()).add_modifier(Modifier::BOLD)),
             Span::styled(" to toggle", Style::default().fg(c_accent())),
         ]);
         f.render_widget(Paragraph::new(hint), chunks[2]);
@@ -595,15 +617,15 @@ fn draw_install(f: &mut Frame, app: &mut App, area: Rect) {
             let hint = if installed_names.contains(pkg.as_str()) {
                 Line::from(vec![
                     Span::styled(" Already installed — ", Style::default().fg(c_green())),
-                    Span::styled("Enter", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                    Span::styled("Enter", Style::default().fg(c_fg()).add_modifier(Modifier::BOLD)),
                     Span::styled(" to uninstall", Style::default().fg(c_green())),
                 ])
             } else {
                 Line::from(vec![
                     Span::styled(" Press ", Style::default().fg(c_dim())),
-                    Span::styled("Enter", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                    Span::styled("Enter", Style::default().fg(c_fg()).add_modifier(Modifier::BOLD)),
                     Span::styled(" to install, ", Style::default().fg(c_dim())),
-                    Span::styled("Space", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                    Span::styled("Space", Style::default().fg(c_fg()).add_modifier(Modifier::BOLD)),
                     Span::styled(" to mark", Style::default().fg(c_dim())),
                 ])
             };
@@ -646,9 +668,9 @@ fn draw_import(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(
         Paragraph::new(format!("  {}{}", app.import_input, "█"))
             .block(Block::default().borders(Borders::ALL)
-                .title(" Path ").title_style(Style::default().fg(Color::White))
+                .title(" Path ").title_style(Style::default().fg(c_fg()))
                 .border_style(Style::default().fg(c_accent())))
-            .style(Style::default().fg(Color::White)),
+            .style(Style::default().fg(c_fg())),
         chunks[3],
     );
     f.render_widget(
@@ -679,7 +701,7 @@ fn draw_statusbar(f: &mut Frame, app: &App, area: Rect) {
         spans.push(Span::styled(" │ ", Style::default().fg(c_dim())));
     }
     if !app.status.is_empty() {
-        spans.push(Span::styled(format!(" {} ", app.status), Style::default().fg(Color::White)));
+        spans.push(Span::styled(format!(" {} ", app.status), Style::default().fg(c_fg())));
         spans.push(Span::styled(" │ ", Style::default().fg(c_dim())));
     }
     spans.push(Span::styled(format!(" {hint}"), Style::default().fg(c_dim())));
@@ -720,7 +742,7 @@ fn log_line_color(l: &str) -> Color {
     } else if l.contains("Done") || l.contains("complete") || l.contains("Updated") || l.contains("Saved") {
         c_green()
     } else {
-        Color::White
+        c_fg()
     }
 }
 
@@ -764,7 +786,7 @@ fn draw_operation(
         let header_block = Block::default()
             .borders(Borders::LEFT | Borders::RIGHT | Borders::TOP)
             .title(format!(" {title} "))
-            .title_style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD))
+            .title_style(Style::default().fg(c_fg()).add_modifier(Modifier::BOLD))
             .border_style(Style::default().fg(border_color));
 
         if let Some((d_now, d_total)) = progress.filter(|(_, t)| *t > 0) {
@@ -845,7 +867,7 @@ fn draw_operation(
         let block = Block::default()
             .borders(Borders::ALL)
             .title(format!(" {title} "))
-            .title_style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD))
+            .title_style(Style::default().fg(c_fg()).add_modifier(Modifier::BOLD))
             .border_style(Style::default().fg(border_color));
         let inner = block.inner(popup);
         f.render_widget(block, popup);
@@ -986,7 +1008,7 @@ fn draw_space(f: &mut Frame, app: &App, area: Rect) {
         Span::styled("█".repeat(bar_w), Style::default().fg(c_accent())),
         Span::styled(
             format!("  {:>size_w$}", format_bytes(app.du_apparent)),
-            Style::default().fg(Color::White),
+            Style::default().fg(c_fg()),
         ),
     ]);
     f.render_widget(Paragraph::new(apparent_line),
@@ -1008,7 +1030,7 @@ fn draw_space(f: &mut Frame, app: &App, area: Rect) {
         Span::styled("░".repeat(dimmed), Style::default().fg(Color::Rgb(55, 55, 65))),
         Span::styled(
             format!("  {:>size_w$}", format_bytes(app.du_actual)),
-            Style::default().fg(Color::White),
+            Style::default().fg(c_fg()),
         ),
         Span::styled(saves_str, Style::default().fg(c_green())),
     ]);
@@ -1048,7 +1070,7 @@ fn draw_space(f: &mut Frame, app: &App, area: Rect) {
             Span::styled(bar, Style::default().fg(c_accent())),
             Span::styled(
                 format!("  {:>size_w$}  {:>2}%", format_bytes(*size), pct),
-                Style::default().fg(Color::White),
+                Style::default().fg(c_fg()),
             ),
         ]);
         f.render_widget(Paragraph::new(row),
@@ -1180,6 +1202,7 @@ fn draw_settings_tab(f: &mut Frame, app: &mut App, area: Rect) {
         ("Theme",       match config.theme {
             crate::config::Theme::Default => "default".into(),
             crate::config::Theme::Amber   => "amber".into(),
+            crate::config::Theme::Matrix  => "matrix".into(),
         }),
     ];
 
@@ -1199,7 +1222,7 @@ fn draw_settings_tab(f: &mut Frame, app: &mut App, area: Rect) {
         f.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(if is_sel { "▶ " } else { "  " }, Style::default().fg(c_accent()).bg(bg)),
-                Span::styled(padded_label, Style::default().fg(if is_sel { Color::White } else { c_dim() }).bg(bg)),
+                Span::styled(padded_label, Style::default().fg(if is_sel { c_fg() } else { c_dim() }).bg(bg)),
                 Span::styled(" ", Style::default().bg(bg)),
                 Span::styled(format!("[{}]", value),
                     Style::default().fg(val_color).bg(bg)
@@ -1237,7 +1260,7 @@ fn draw_settings_tab(f: &mut Frame, app: &mut App, area: Rect) {
     let desc_block = Block::default()
         .borders(Borders::ALL)
         .title(format!(" {} ", setting_title(selected)))
-        .title_style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD))
+        .title_style(Style::default().fg(c_fg()).add_modifier(Modifier::BOLD))
         .border_style(Style::default().fg(c_dim()));
     let desc_inner = desc_block.inner(cols[1]);
     f.render_widget(desc_block, cols[1]);
@@ -1257,7 +1280,7 @@ fn draw_settings_tab(f: &mut Frame, app: &mut App, area: Rect) {
     };
     f.render_widget(
         Paragraph::new(desc_text)
-            .style(Style::default().fg(Color::White))
+            .style(Style::default().fg(c_fg()))
             .wrap(Wrap { trim: false }),
         chunks[0],
     );
@@ -1278,7 +1301,7 @@ fn draw_settings_tab(f: &mut Frame, app: &mut App, area: Rect) {
         let active = i == cur;
         let bullet = if active { "●" } else { "○" };
         let bullet_color = if active { c_accent() } else { c_dim() };
-        let text_color = if active { Color::White } else { c_dim() };
+        let text_color = if active { c_fg() } else { c_dim() };
         Line::from(vec![
             Span::styled(format!(" {} ", bullet), Style::default().fg(bullet_color)),
             Span::styled(*opt, Style::default().fg(text_color)
@@ -1450,7 +1473,7 @@ fn draw_config(
         f.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(if is_sel { " ▶ " } else { "   " }, Style::default().fg(c_accent())),
-                Span::styled(format!("{label}  "), Style::default().fg(if is_sel { Color::White } else { c_dim() }).bg(bg)),
+                Span::styled(format!("{label}  "), Style::default().fg(if is_sel { c_fg() } else { c_dim() }).bg(bg)),
                 Span::styled(format!("[{value}]"), Style::default().fg(val_color).bg(bg)
                     .add_modifier(if is_sel { Modifier::BOLD } else { Modifier::empty() })),
             ])),
@@ -1551,7 +1574,7 @@ fn draw_text_input(f: &mut Frame, area: Rect, title: &str, value: &str) {
         Paragraph::new(format!(" {}█", value))
             .block(Block::default().borders(Borders::ALL)
                 .border_style(Style::default().fg(c_accent())))
-            .style(Style::default().fg(Color::White)),
+            .style(Style::default().fg(c_fg())),
         chunks[1],
     );
 
@@ -1600,7 +1623,7 @@ fn draw_option_picker(
         let is_current = i == current;
         let marker = if is_current { "● " } else { "  " };
         let marker_color = if is_current { c_green() } else { c_dim() };
-        let opt_color = if is_current { c_green() } else { Color::White };
+        let opt_color = if is_current { c_green() } else { c_fg() };
         ListItem::new(Line::from(vec![
             Span::styled(marker, Style::default().fg(marker_color)),
             Span::styled(opt.to_string(), Style::default().fg(opt_color)),
@@ -1610,7 +1633,7 @@ fn draw_option_picker(
     let mut list_state = ListState::default();
     list_state.select(Some(selected));
     let list = List::new(items)
-        .highlight_style(Style::default().bg(c_select()).fg(Color::White).add_modifier(Modifier::BOLD))
+        .highlight_style(Style::default().bg(c_select()).fg(c_fg()).add_modifier(Modifier::BOLD))
         .highlight_symbol("▶ ");
     f.render_stateful_widget(list, chunks[0], &mut list_state);
 
@@ -1646,7 +1669,7 @@ fn draw_setting_help(f: &mut Frame, area: Rect, setting_idx: usize) {
 
     f.render_widget(
         Paragraph::new(format!("  {desc}"))
-            .style(Style::default().fg(Color::White))
+            .style(Style::default().fg(c_fg()))
             .wrap(Wrap { trim: false }),
         chunks[0],
     );
@@ -1692,7 +1715,7 @@ fn draw_key_help(f: &mut Frame, area: Rect) {
                     format!("  {:>width$}  ", k, width = max_key),
                     Style::default().fg(c_accent()),
                 ),
-                Span::styled(*v, Style::default().fg(Color::White)),
+                Span::styled(*v, Style::default().fg(c_fg())),
             ])
         })
         .collect();
@@ -1753,7 +1776,7 @@ fn draw_option_help(f: &mut Frame, area: Rect, setting_idx: usize, choice_idx: u
 
     f.render_widget(
         Paragraph::new(format!("  {desc}"))
-            .style(Style::default().fg(Color::White))
+            .style(Style::default().fg(c_fg()))
             .wrap(Wrap { trim: false }),
         chunks[0],
     );
@@ -1798,7 +1821,7 @@ fn draw_shared_dirs(f: &mut Frame, area: Rect, app_name: &str, dirs: &[String], 
         let items: Vec<ListItem> = dirs.iter().enumerate().map(|(i, d)| {
             let is_sel = i == selected;
             let style = if is_sel {
-                Style::default().fg(Color::White).bg(c_select()).add_modifier(Modifier::BOLD)
+                Style::default().fg(c_fg()).bg(c_select()).add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(c_accent())
             };
@@ -1856,7 +1879,7 @@ fn draw_install_target(f: &mut Frame, area: Rect, pkg: &str, targets: &[String],
     let mut items: Vec<ListItem> = vec![
         ListItem::new(Line::from(vec![
             Span::styled("✚ ", Style::default().fg(c_green())),
-            Span::styled("New app", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled("New app", Style::default().fg(c_fg()).add_modifier(Modifier::BOLD)),
             Span::styled(
                 format!("  ~/.wryayer/{pkg}/"),
                 Style::default().fg(c_dim()),
@@ -1868,7 +1891,7 @@ fn draw_install_target(f: &mut Frame, area: Rect, pkg: &str, targets: &[String],
         items.push(ListItem::new(Line::from(vec![
             Span::styled("⇆ ", Style::default().fg(c_yellow())),
             Span::styled("Merge into ", Style::default().fg(c_dim())),
-            Span::styled(t.as_str(), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(t.as_str(), Style::default().fg(c_fg()).add_modifier(Modifier::BOLD)),
             Span::styled(
                 format!("  ~/.wryayer/{t}/"),
                 Style::default().fg(c_dim()),
@@ -1879,7 +1902,7 @@ fn draw_install_target(f: &mut Frame, area: Rect, pkg: &str, targets: &[String],
     let mut list_state = ListState::default();
     list_state.select(Some(selected));
     let list = List::new(items)
-        .highlight_style(Style::default().bg(c_select()).fg(Color::White).add_modifier(Modifier::BOLD))
+        .highlight_style(Style::default().bg(c_select()).fg(c_fg()).add_modifier(Modifier::BOLD))
         .highlight_symbol("▶ ");
     f.render_stateful_widget(list, chunks[1], &mut list_state);
 
@@ -1942,7 +1965,7 @@ fn draw_file_browser(
 
     let list = List::new(items)
         .block(Block::default())
-        .highlight_style(Style::default().bg(c_select()).fg(Color::White).add_modifier(Modifier::BOLD))
+        .highlight_style(Style::default().bg(c_select()).fg(c_fg()).add_modifier(Modifier::BOLD))
         .highlight_symbol("▶ ");
 
     f.render_stateful_widget(list, chunks[0], &mut list_state);
@@ -2001,7 +2024,7 @@ fn draw_konami_overlay(
     };
     let fy = area.y + area.height.saturating_sub(1);
     f.render_widget(
-        Paragraph::new(Span::styled(footer, Style::default().fg(Color::White).bg(Color::DarkGray))),
+        Paragraph::new(Span::styled(footer, Style::default().fg(c_fg()).bg(Color::DarkGray))),
         Rect { x: area.x, y: fy, width: area.width, height: 1 },
     );
 }
@@ -2036,7 +2059,7 @@ fn draw_rename_app(f: &mut Frame, area: Rect, app_name: &str, value: &str) {
         Paragraph::new(format!(" {}█", value))
             .block(Block::default().borders(Borders::ALL)
                 .border_style(Style::default().fg(c_accent())))
-            .style(Style::default().fg(Color::White)),
+            .style(Style::default().fg(c_fg())),
         chunks[1],
     );
 
@@ -2128,7 +2151,7 @@ fn draw_outdated_packages(f: &mut Frame, area: Rect, pkg: &str, selected: usize)
     let mut items: Vec<ListItem> = vec![
         ListItem::new(Line::from(vec![
             Span::styled("  Got 404 downloading ", Style::default().fg(c_dim())),
-            Span::styled(pkg, Style::default().fg(Color::White)),
+            Span::styled(pkg, Style::default().fg(c_fg())),
             Span::styled(" — the mirror no longer", Style::default().fg(c_dim())),
         ])),
         ListItem::new(Line::from(vec![
@@ -2194,7 +2217,7 @@ fn draw_ask_shortcut(f: &mut Frame, area: Rect, pkg: &str, selected: usize) {
     f.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("  ~/bin/", Style::default().fg(c_dim())),
-            Span::styled(pkg, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(pkg, Style::default().fg(c_fg()).add_modifier(Modifier::BOLD)),
         ])),
         chunks[0],
     );
@@ -2250,11 +2273,11 @@ fn draw_no_launcher_choice(f: &mut Frame, area: Rect, pkg: &str, available_bins:
         let truncated: String = bins_str.chars().take(inner.width as usize - 4).collect();
         items.push(ListItem::new(Line::from(vec![
             Span::styled("  Available: ", Style::default().fg(c_dim())),
-            Span::styled(truncated, Style::default().fg(Color::White)),
+            Span::styled(truncated, Style::default().fg(c_fg())),
         ])));
         items.push(ListItem::new(Line::from(vec![
             Span::styled("  Reinstall with ", Style::default().fg(c_dim())),
-            Span::styled("--bin-names <name>", Style::default().fg(Color::White)),
+            Span::styled("--bin-names <name>", Style::default().fg(c_fg())),
             Span::styled(" to add a launcher.", Style::default().fg(c_dim())),
         ])));
         items.push(ListItem::new(Line::raw("")));
@@ -2332,7 +2355,7 @@ fn draw_duplicate_install(f: &mut Frame, area: Rect, pkg: &str, value: &str, int
         Paragraph::new(format!(" {}█", value))
             .block(Block::default().borders(Borders::ALL)
                 .border_style(Style::default().fg(c_accent())))
-            .style(Style::default().fg(Color::White)),
+            .style(Style::default().fg(c_fg())),
         chunks[1],
     );
 
@@ -2403,7 +2426,7 @@ fn draw_games(f: &mut Frame, app: &mut App, area: Rect) {
             let display = m.app.display_name.as_deref().unwrap_or(m.app.name.as_str());
             ListItem::new(Line::from(vec![
                 Span::styled("  🎮 ", Style::default().fg(c_yellow())),
-                Span::styled(display.to_string(), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                Span::styled(display.to_string(), Style::default().fg(c_fg()).add_modifier(Modifier::BOLD)),
                 Span::styled(format!("   {exe}"), Style::default().fg(c_accent())),
             ]))
         }).collect();
@@ -2412,7 +2435,7 @@ fn draw_games(f: &mut Frame, app: &mut App, area: Rect) {
                 .title(format!(" Imported games ({}) ", games.len()))
                 .title_style(Style::default().fg(c_accent()))
                 .border_style(Style::default().fg(c_dim())))
-            .highlight_style(Style::default().bg(c_select()).fg(Color::White).add_modifier(Modifier::BOLD))
+            .highlight_style(Style::default().bg(c_select()).fg(c_fg()).add_modifier(Modifier::BOLD))
             .highlight_symbol("▶ ");
         f.render_stateful_widget(list, chunks[3], &mut app.games_state);
     }
@@ -2447,7 +2470,7 @@ fn draw_game_exe_pick(f: &mut Frame, area: Rect, game_dir: &str, exes: &[(String
     f.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("  Folder: ", Style::default().fg(c_dim())),
-            Span::styled(game_dir, Style::default().fg(Color::White)),
+            Span::styled(game_dir, Style::default().fg(c_fg())),
         ])),
         chunks[0],
     );
@@ -2456,7 +2479,7 @@ fn draw_game_exe_pick(f: &mut Frame, area: Rect, game_dir: &str, exes: &[(String
         let mib = sz / 1_048_576;
         ListItem::new(Line::from(vec![
             Span::styled("  ", Style::default()),
-            Span::styled(rel.as_str(), Style::default().fg(Color::White)),
+            Span::styled(rel.as_str(), Style::default().fg(c_fg())),
             Span::styled(format!("   {mib} MiB"), Style::default().fg(c_dim())),
         ]))
     }).collect();
@@ -2464,7 +2487,7 @@ fn draw_game_exe_pick(f: &mut Frame, area: Rect, game_dir: &str, exes: &[(String
     let mut list_state = ListState::default();
     list_state.select(Some(selected));
     let list = List::new(items)
-        .highlight_style(Style::default().bg(c_select()).fg(Color::White).add_modifier(Modifier::BOLD))
+        .highlight_style(Style::default().bg(c_select()).fg(c_fg()).add_modifier(Modifier::BOLD))
         .highlight_symbol("▶ ");
     f.render_stateful_widget(list, chunks[1], &mut list_state);
 
@@ -2497,7 +2520,7 @@ fn draw_game_name_input(f: &mut Frame, area: Rect, game_dir: &str, exe: &str, va
         Paragraph::new(vec![
             Line::from(vec![
                 Span::styled("  Folder:  ", Style::default().fg(c_dim())),
-                Span::styled(game_dir, Style::default().fg(Color::White)),
+                Span::styled(game_dir, Style::default().fg(c_fg())),
             ]),
             Line::from(vec![
                 Span::styled("  Exe:     ", Style::default().fg(c_dim())),
@@ -2511,9 +2534,9 @@ fn draw_game_name_input(f: &mut Frame, area: Rect, game_dir: &str, exe: &str, va
         Paragraph::new(format!(" {value}█"))
             .block(Block::default().borders(Borders::ALL)
                 .title(" Name (~/.wryayer/<name>/ and ~/bin/<name>) ")
-                .title_style(Style::default().fg(Color::White))
+                .title_style(Style::default().fg(c_fg()))
                 .border_style(Style::default().fg(c_accent())))
-            .style(Style::default().fg(Color::White)),
+            .style(Style::default().fg(c_fg())),
         chunks[1],
     );
 
@@ -2562,7 +2585,7 @@ fn draw_game_confirm(
         Paragraph::new(vec![
             Line::from(vec![
                 Span::styled("  Name:    ", Style::default().fg(c_dim())),
-                Span::styled(app_name, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                Span::styled(app_name, Style::default().fg(c_fg()).add_modifier(Modifier::BOLD)),
             ]),
             Line::from(vec![
                 Span::styled("  Exe:     ", Style::default().fg(c_dim())),
@@ -2570,12 +2593,12 @@ fn draw_game_confirm(
             ]),
             Line::from(vec![
                 Span::styled("  Source:  ", Style::default().fg(c_dim())),
-                Span::styled(game_dir, Style::default().fg(Color::White)),
+                Span::styled(game_dir, Style::default().fg(c_fg())),
             ]),
             Line::raw(""),
             Line::from(vec![
                 Span::styled("  Dest:    ", Style::default().fg(c_dim())),
-                Span::styled(format!("~/.wryayer/{app_name}/games/{app_name}/"), Style::default().fg(Color::White)),
+                Span::styled(format!("~/.wryayer/{app_name}/games/{app_name}/"), Style::default().fg(c_fg())),
             ]),
             Line::from(vec![
                 Span::styled("  Wine:    ", Style::default().fg(c_dim())),
@@ -2650,8 +2673,15 @@ mod theme_tests {
         assert_eq!(c_accent(), PALETTE_AMBER.accent);
         assert_eq!(c_select(), PALETTE_AMBER.select);
 
+        set_active_theme(Theme::Matrix);
+        assert_eq!(c_accent(), PALETTE_MATRIX.accent);
+        // The defining trait of matrix: body text is green, not white.
+        assert_eq!(c_fg(), PALETTE_MATRIX.fg);
+        assert_ne!(c_fg(), Color::White);
+
         set_active_theme(Theme::Default);
         assert_eq!(c_accent(), PALETTE_DEFAULT.accent);
         assert_eq!(c_accent(), Color::Cyan);
+        assert_eq!(c_fg(), Color::White);
     }
 }

@@ -1962,7 +1962,7 @@ pub fn setting_options(idx: usize) -> Vec<&'static str> {
         CFG_AVAHI => vec!["stub", "host", "off"],
         CFG_CREATE_SHORTCUT => vec!["yes", "no"],
         CFG_CONFIRM_INSTALL | CFG_ASK_SHORTCUT | CFG_CLEAN_CACHE => vec!["on", "off"],
-        CFG_THEME => vec!["default", "amber"],
+        CFG_THEME => vec!["default", "amber", "matrix"],
         _ => vec![],
     }
 }
@@ -2018,7 +2018,7 @@ pub fn setting_description(idx: usize) -> &'static str {
         17 => "Whether to show the 'Install <pkg>?' confirmation before installing.\n\n• on  — ask for a y/n confirmation first (default)\n• off — start the install immediately, no prompt",
         18 => "Whether to ask about creating a ~/bin shortcut before installing.\n\n• on  — show the shortcut prompt (default)\n• off — skip it and use the 'Default shortcut' setting above without asking",
         19 => "Delete the shared download/build cache (~/.cache/wryayer) after each successful install.\n\n• on  — wipe the cache every install; leaves no record of installed packages outside ~/.wryayer (useful when that dir is an encrypted container)\n• off — keep the cache to speed up re-installs (default)",
-        20 => "Colour theme for the TUI. Applies immediately as you change it.\n\n• default — cool palette: cyan accent on a dark-blue selection\n• amber   — warm palette: amber accent on a dark-brown selection",
+        20 => "Colour theme for the TUI. Applies immediately as you change it.\n\n• default — cool palette: cyan accent on a dark-blue selection\n• amber   — warm palette: amber accent on a dark-brown selection\n• matrix  — green-phosphor terminal: the body text itself is green, not white",
         _ => "No description available.",
     }
 }
@@ -2107,6 +2107,7 @@ pub fn option_description(setting_idx: usize, choice_idx: usize) -> &'static str
         // TUI theme
         (20, 0) => "default — Cool palette: cyan accent, dark-blue selection, green/red status colours.",
         (20, 1) => "amber — Warm palette: amber accent, dark-brown selection, warm status colours.",
+        (20, 2) => "matrix — Green-phosphor terminal: green body text (not white) on a dark-green selection, for a monochrome CRT look.",
         _ => "No description available.",
     }
 }
@@ -2193,6 +2194,7 @@ pub fn setting_current(config: &AppConfig, idx: usize) -> usize {
         CFG_THEME => match config.theme {
             Theme::Default => 0,
             Theme::Amber => 1,
+            Theme::Matrix => 2,
         },
         _ => 0,
     }
@@ -2263,6 +2265,7 @@ pub fn apply_setting(config: &mut AppConfig, idx: usize, choice: usize) {
         (19, 1) => config.clean_cache = false,
         (20, 0) => config.theme = Theme::Default,
         (20, 1) => config.theme = Theme::Amber,
+        (20, 2) => config.theme = Theme::Matrix,
         _ => {}
     }
 }
