@@ -507,6 +507,15 @@ fn draw_installed(f: &mut Frame, app: &mut App, area: Rect) {
 fn read_sandbox_ram(fs_root: &str) -> Option<(u64, u64)> {
     let home = std::env::var("HOME").ok()?;
     let path = format!("{home}/.wryayer/{fs_root}/.spoof/meminfo");
+    // The overlay is only live while a ram-limited instance is running — the
+    // updater rewrites it ~twice a second. A stale file (the RAM limit was
+    // disabled, or the app has exited) keeps its old mtime, so ignore anything
+    // that hasn't been touched in the last few seconds. Without this, disabling
+    // the limit still shows a phantom RAM cap from the leftover file.
+    let modified = std::fs::metadata(&path).ok()?.modified().ok()?;
+    if modified.elapsed().map(|d| d.as_secs() >= 3).unwrap_or(true) {
+        return None;
+    }
     parse_meminfo(&std::fs::read_to_string(path).ok()?)
 }
 
