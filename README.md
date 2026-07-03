@@ -54,8 +54,9 @@ tagged `[repo]` or `[aur]`). Press `Space` to mark several packages, then
 ![wryayer TUI — Install tab](docs/screenshots/install.png)
 
 **Settings tab** — global defaults inherited by every newly installed app:
-network and device toggles, temp mode, identity spoofing, RAM limit, and the
-install-behaviour switches (**Confirm install** / **Ask shortcut**). Values are
+network and device toggles, temp mode, identity spoofing, RAM limit, the
+install-behaviour switches (**Confirm install** / **Ask shortcut** / **Clean
+cache**), and the **TUI theme** (`default` or `amber`, applied live). Values are
 colour-coded (green = on, red = off, yellow = other), with a live description
 and option list on the right.
 

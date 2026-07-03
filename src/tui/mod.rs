@@ -20,7 +20,7 @@ use ratatui::widgets::ListState;
 use ratatui::Terminal;
 
 use crate::commands::dedup::all_du;
-use crate::config::{read_config, read_global_config, write_config, write_global_config, AppConfig, AvahiMode, LocalDelete, TempMode};
+use crate::config::{read_config, read_global_config, write_config, write_global_config, AppConfig, AvahiMode, LocalDelete, TempMode, Theme};
 use crate::manifest::{list_all_apps, tree_order, Manifest};
 
 // ── Op messages ───────────────────────────────────────────────────────────────
@@ -1767,7 +1767,7 @@ fn on_op_done(app: &mut App, code: KeyCode) -> Result<()> {
 // Per-app Config (no wine_game):  16=Save
 // Per-app Config (wine_game):     16=game_exe 17=game_prefix 18=Save
 // Global Settings:                16=create_shortcut 17=confirm_install 18=ask_shortcut
-//                                 19=clean_cache 20=Save
+//                                 19=clean_cache 20=theme 21=Save
 pub const CFG_SHARES: usize = 6;
 pub const CFG_SPOOF_HOSTNAME: usize = 7;
 pub const CFG_SPOOF_USERNAME: usize = 8;
@@ -1789,8 +1789,9 @@ pub const CFG_CREATE_SHORTCUT: usize = 16;
 pub const CFG_CONFIRM_INSTALL: usize = 17;
 pub const CFG_ASK_SHORTCUT: usize = 18;
 pub const CFG_CLEAN_CACHE: usize = 19;
-pub const CFG_SAVE: usize = 20;
-pub const CFG_LEN: usize = 21;
+pub const CFG_THEME: usize = 20;
+pub const CFG_SAVE: usize = 21;
+pub const CFG_LEN: usize = 22;
 
 /// Index of the Save button in the per-app Config screen. Shifts down by 2 when
 /// the screen carries wine_game rows.
@@ -1961,6 +1962,7 @@ pub fn setting_options(idx: usize) -> Vec<&'static str> {
         CFG_AVAHI => vec!["stub", "host", "off"],
         CFG_CREATE_SHORTCUT => vec!["yes", "no"],
         CFG_CONFIRM_INSTALL | CFG_ASK_SHORTCUT | CFG_CLEAN_CACHE => vec!["on", "off"],
+        CFG_THEME => vec!["default", "amber"],
         _ => vec![],
     }
 }
@@ -1988,6 +1990,7 @@ pub fn setting_title(idx: usize) -> &'static str {
         17 => "Confirm install",
         18 => "Ask shortcut",
         19 => "Clean cache",
+        20 => "TUI theme",
         _ => "Option",
     }
 }
@@ -2015,6 +2018,7 @@ pub fn setting_description(idx: usize) -> &'static str {
         17 => "Whether to show the 'Install <pkg>?' confirmation before installing.\n\n• on  — ask for a y/n confirmation first (default)\n• off — start the install immediately, no prompt",
         18 => "Whether to ask about creating a ~/bin shortcut before installing.\n\n• on  — show the shortcut prompt (default)\n• off — skip it and use the 'Default shortcut' setting above without asking",
         19 => "Delete the shared download/build cache (~/.cache/wryayer) after each successful install.\n\n• on  — wipe the cache every install; leaves no record of installed packages outside ~/.wryayer (useful when that dir is an encrypted container)\n• off — keep the cache to speed up re-installs (default)",
+        20 => "Colour theme for the TUI. Applies immediately as you change it.\n\n• default — cool palette: cyan accent on a dark-blue selection\n• amber   — warm palette: amber accent on a dark-brown selection",
         _ => "No description available.",
     }
 }
@@ -2100,6 +2104,9 @@ pub fn option_description(setting_idx: usize, choice_idx: usize) -> &'static str
         // Clean cache
         (19, 0) => "on — Wipe ~/.cache/wryayer after every install. No record of installed packages is left outside ~/.wryayer.",
         (19, 1) => "off — Keep the download/build cache between installs to avoid re-downloading and re-building.",
+        // TUI theme
+        (20, 0) => "default — Cool palette: cyan accent, dark-blue selection, green/red status colours.",
+        (20, 1) => "amber — Warm palette: amber accent, dark-brown selection, warm status colours.",
         _ => "No description available.",
     }
 }
@@ -2183,6 +2190,10 @@ pub fn setting_current(config: &AppConfig, idx: usize) -> usize {
         CFG_CONFIRM_INSTALL => if config.confirm_install { 0 } else { 1 },
         CFG_ASK_SHORTCUT => if config.ask_shortcut { 0 } else { 1 },
         CFG_CLEAN_CACHE => if config.clean_cache { 0 } else { 1 },
+        CFG_THEME => match config.theme {
+            Theme::Default => 0,
+            Theme::Amber => 1,
+        },
         _ => 0,
     }
 }
@@ -2250,6 +2261,8 @@ pub fn apply_setting(config: &mut AppConfig, idx: usize, choice: usize) {
         (18, 1) => config.ask_shortcut = false,
         (19, 0) => config.clean_cache = true,
         (19, 1) => config.clean_cache = false,
+        (20, 0) => config.theme = Theme::Default,
+        (20, 1) => config.theme = Theme::Amber,
         _ => {}
     }
 }

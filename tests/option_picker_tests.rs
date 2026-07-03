@@ -28,10 +28,10 @@ fn options_for_temp_delete_has_three_choices() {
 
 #[test]
 fn options_for_non_picker_rows_are_empty() {
-    // CFG_SHARES (6) and CFG_SAVE (20) are handled by their own screens.
-    // (Row 15 = Avahi; 17/18 = Confirm-install / Ask-shortcut; 19 = Clean-cache.)
+    // CFG_SHARES (6) and CFG_SAVE (21) are handled by their own screens.
+    // (15 = Avahi; 17/18 = Confirm/Ask; 19 = Clean-cache; 20 = Theme.)
     assert!(setting_options(6).is_empty());
-    assert!(setting_options(20).is_empty());
+    assert!(setting_options(21).is_empty());
     assert!(setting_options(999).is_empty());
 }
 
@@ -223,7 +223,7 @@ fn cycle_on_empty_options_is_noop() {
     let mut c = AppConfig::default();
     let before = c.clone();
     cycle_setting(&mut c, 6, 1);  // CFG_SHARES — no options
-    cycle_setting(&mut c, 20, -1); // CFG_SAVE — no options
+    cycle_setting(&mut c, 21, -1); // CFG_SAVE — no options
     assert_eq!(c.network, before.network);
     assert_eq!(c.temp_mode, before.temp_mode);
     assert_eq!(c.temp_delete, before.temp_delete);

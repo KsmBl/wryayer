@@ -192,6 +192,7 @@ fn round_trip_all_non_default_values() {
         confirm_install:     false,
         ask_shortcut:        false,
         clean_cache:         true,
+        theme:               Theme::Amber,
         portal_filter:       false,
         avahi:               AvahiMode::Host,
     };
@@ -207,6 +208,7 @@ fn round_trip_all_non_default_values() {
     assert!(!parsed.confirm_install);
     assert!(!parsed.ask_shortcut);
     assert!(parsed.clean_cache);
+    assert_eq!(parsed.theme, Theme::Amber);
     assert!(!parsed.portal_filter);
 }
 

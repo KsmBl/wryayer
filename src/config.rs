@@ -15,6 +15,15 @@ pub enum TempMode {
     Uuid,
 }
 
+/// Colour theme for the interactive TUI (a global appearance preference).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Theme {
+    /// The original cool palette: cyan accent on a dark-blue selection.
+    Default,
+    /// A warm amber palette.
+    Amber,
+}
+
 /// How to satisfy sandboxed apps that probe Avahi/zeroconf at startup.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AvahiMode {
@@ -83,6 +92,8 @@ pub struct AppConfig {
     /// Whether to delete the shared download/build cache (~/.cache/wryayer)
     /// after each successful install (global only). Off by default.
     pub clean_cache: bool,
+    /// Colour theme for the TUI (global only).
+    pub theme: Theme,
     /// Route the sandbox's D-Bus session through a filter that hides the host
     /// desktop portal, so file pickers run in-sandbox and only show shared
     /// dirs instead of leaking host paths (default: true)
@@ -112,6 +123,7 @@ impl Default for AppConfig {
             confirm_install: true,
             ask_shortcut: true,
             clean_cache: false,
+            theme: Theme::Default,
             portal_filter: true,
         }
     }
@@ -326,6 +338,12 @@ pub fn parse_ini(content: &str) -> Result<AppConfig> {
             ("clean_cache", v) => {
                 config.clean_cache = matches!(v, "on" | "true" | "1" | "yes");
             }
+            ("theme", v) => {
+                config.theme = match v {
+                    "amber" => Theme::Amber,
+                    _ => Theme::Default,
+                };
+            }
             ("portal_filter", v) => {
                 config.portal_filter = !matches!(v, "off" | "false" | "0" | "no");
             }
@@ -442,7 +460,7 @@ pub fn format_ini(config: &AppConfig) -> String {
         s.push_str("; Screen resolution to report via xrandr and env vars (e.g. 1920x1080)\n");
         s.push_str(&format!("spoof_resolution = {res}\n"));
     }
-    if !config.create_shortcut || !config.confirm_install || !config.ask_shortcut || config.clean_cache || !config.portal_filter {
+    if !config.create_shortcut || !config.confirm_install || !config.ask_shortcut || config.clean_cache || config.theme != Theme::Default || !config.portal_filter {
         s.push_str("\n[behavior]\n");
         if !config.create_shortcut {
             s.push_str("; Create ~/bin/<name> shortcut by default when installing apps\n");
@@ -459,6 +477,11 @@ pub fn format_ini(config: &AppConfig) -> String {
         if config.clean_cache {
             s.push_str("; Delete the shared download/build cache (~/.cache/wryayer) after each install\n");
             s.push_str("clean_cache = on\n");
+        }
+        if config.theme != Theme::Default {
+            s.push_str("; TUI colour theme: default | amber\n");
+            let name = match config.theme { Theme::Amber => "amber", Theme::Default => "default" };
+            s.push_str(&format!("theme = {name}\n"));
         }
         if !config.portal_filter {
             s.push_str("; Hide the host desktop portal so file pickers only show shared dirs.\n");
