@@ -25,9 +25,10 @@ fn options_for_temp_delete_has_three_choices() {
 
 #[test]
 fn options_for_non_picker_rows_are_empty() {
-    // CFG_SHARES (6) and CFG_SAVE (16) are handled by their own screens.
+    // CFG_SHARES (6) and CFG_SAVE (18) are handled by their own screens.
+    // (Rows 16/17 are the Confirm-install / Ask-shortcut on/off pickers.)
     assert!(setting_options(6).is_empty());
-    assert!(setting_options(16).is_empty());
+    assert!(setting_options(18).is_empty());
     assert!(setting_options(999).is_empty());
 }
 
