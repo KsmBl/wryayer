@@ -6,12 +6,29 @@ use std::path::PathBuf;
 
 // ── Dep cache ──────────────────────────────────────────────────────────────────
 
-#[derive(serde::Serialize, serde::Deserialize)]
+/// How long a cached dependency resolution stays fresh. After this the entry is
+/// treated as a miss and re-queried, so a package cached long ago can't keep
+/// resolving to a stale version on a fresh install (the update path already
+/// invalidates explicitly; this makes plain installs self-healing too).
+const DEP_CACHE_TTL_SECS: u64 = 24 * 60 * 60;
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct PkgDepCache {
     source: String,   // "official" or "aur"
     resolved: String, // canonical name (may differ for virtual providers)
     version: String,
     deps: Vec<String>,
+    // Unix seconds when this entry was written. `default` (0) makes pre-TTL
+    // cache files parse and immediately read as expired, so they re-query once.
+    #[serde(default)]
+    cached_at: u64,
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 fn dep_cache_dir() -> Option<PathBuf> {
@@ -44,12 +61,20 @@ pub fn invalidate_dep_cache(pkg_names: &[String]) {
 
 fn read_dep_cache(pkg_name: &str) -> Option<PkgDepCache> {
     let content = std::fs::read_to_string(dep_cache_path(pkg_name)?).ok()?;
-    toml::from_str(&content).ok()
+    let entry: PkgDepCache = toml::from_str(&content).ok()?;
+    // Expired entries are reported as a miss so the caller re-queries.
+    if now_secs().saturating_sub(entry.cached_at) > DEP_CACHE_TTL_SECS {
+        return None;
+    }
+    Some(entry)
 }
 
 fn write_dep_cache(pkg_name: &str, entry: &PkgDepCache) {
     if let Some(path) = dep_cache_path(pkg_name) {
-        if let Ok(content) = toml::to_string_pretty(entry) {
+        // Stamp every write with the current time regardless of what the caller
+        // put in `cached_at`, so the TTL measures write time.
+        let stamped = PkgDepCache { cached_at: now_secs(), ..entry.clone() };
+        if let Ok(content) = toml::to_string_pretty(&stamped) {
             let _ = std::fs::write(path, content);
         }
     }
@@ -136,6 +161,7 @@ pub fn resolve_full_dep_tree(root_pkg: &str) -> Result<Vec<ResolvedPackage>> {
                             resolved: name.clone(),
                             version: info.version.clone(),
                             deps: info.depends.clone(),
+                            cached_at: 0, // stamped by write_dep_cache
                         });
                         aur_results.insert(name.clone(), AurInfo {
                             version: info.version.clone(),
@@ -199,6 +225,7 @@ fn query_official(pkg_name: &str) -> Result<Option<(String, String, Vec<String>)
             resolved: pkg_name.to_string(),
             version: ver.clone(),
             deps: deps.clone(),
+            cached_at: 0, // stamped by write_dep_cache
         });
         return Ok(Some((pkg_name.to_string(), ver, deps)));
     }
@@ -212,6 +239,7 @@ fn query_official(pkg_name: &str) -> Result<Option<(String, String, Vec<String>)
                     resolved: provider.clone(),
                     version: ver.clone(),
                     deps: deps.clone(),
+                    cached_at: 0, // stamped by write_dep_cache
                 });
                 return Ok(Some((provider, ver, deps)));
             }
@@ -227,6 +255,7 @@ fn query_official(pkg_name: &str) -> Result<Option<(String, String, Vec<String>)
                     resolved: owner.clone(),
                     version: ver.clone(),
                     deps: deps.clone(),
+                    cached_at: 0, // stamped by write_dep_cache
                 });
                 return Ok(Some((owner, ver, deps)));
             }
