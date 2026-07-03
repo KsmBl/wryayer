@@ -2,7 +2,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Gauge, List, ListItem, ListState, Paragraph, Tabs, Wrap},
+    widgets::{Block, BorderType, Borders, Clear, Gauge, List, ListItem, ListState, Paragraph, Tabs, Wrap},
     Frame,
 };
 
@@ -32,9 +32,14 @@ struct Palette {
     dim: Color,
     select: Color,
     running: Color,
+    // ── Structural chrome (not just colour) ──
+    /// Line-drawing style for every bordered panel.
+    border: BorderType,
+    /// The glyph printed to the left of the highlighted list row.
+    select_symbol: &'static str,
 }
 
-/// The original cool palette: white text, cyan accent, dark-blue selection.
+/// The original cool palette: white text, cyan accent, single-line borders.
 const PALETTE_DEFAULT: Palette = Palette {
     fg: Color::White,
     accent: Color::Cyan,
@@ -45,9 +50,11 @@ const PALETTE_DEFAULT: Palette = Palette {
     select: Color::Rgb(40, 60, 80),
     // Low-saturation green for the "running instances" badge.
     running: Color::Rgb(104, 148, 104),
+    border: BorderType::Plain,
+    select_symbol: "▶ ",
 };
 
-/// A warm amber palette (white text on warm accents).
+/// A warm amber palette — same construction as default, warmer colours.
 const PALETTE_AMBER: Palette = Palette {
     fg: Color::White,
     accent: Color::Rgb(224, 165, 74),
@@ -57,12 +64,14 @@ const PALETTE_AMBER: Palette = Palette {
     dim: Color::Rgb(124, 110, 92),
     select: Color::Rgb(74, 58, 34),
     running: Color::Rgb(158, 138, 96),
+    border: BorderType::Plain,
+    select_symbol: "▶ ",
 };
 
-/// A green-phosphor terminal palette — a fundamentally different construction:
-/// the body text itself is green (not white), so the whole UI reads as a
-/// monochrome CRT rather than a recolour of the default. A muted red/amber is
-/// kept for genuine error/warning legibility.
+/// A green-phosphor terminal — a fundamentally different construction, not a
+/// recolour: green body text (not white), double-line CRT borders, and a
+/// command-prompt "›" selection glyph instead of the solid arrow. A muted
+/// red/amber is kept for genuine error/warning legibility.
 const PALETTE_MATRIX: Palette = Palette {
     fg: Color::Rgb(122, 222, 130),
     accent: Color::Rgb(80, 250, 128),
@@ -72,6 +81,8 @@ const PALETTE_MATRIX: Palette = Palette {
     dim: Color::Rgb(70, 120, 78),
     select: Color::Rgb(20, 58, 28),
     running: Color::Rgb(96, 200, 112),
+    border: BorderType::Double,
+    select_symbol: "> ",
 };
 
 static ACTIVE_THEME: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
@@ -96,6 +107,10 @@ fn palette() -> &'static Palette {
 
 fn c_fg() -> Color { palette().fg }
 fn c_accent() -> Color { palette().accent }
+/// Line-drawing style for bordered panels (structural, theme-dependent).
+fn c_border_type() -> BorderType { palette().border }
+/// Glyph shown to the left of the highlighted list row.
+fn c_select_symbol() -> &'static str { palette().select_symbol }
 fn c_green() -> Color { palette().green }
 fn c_red() -> Color { palette().red }
 fn c_yellow() -> Color { palette().yellow }
@@ -298,7 +313,7 @@ fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
     let sel = match app.tab { Tab::Installed => 0, Tab::Install => 1, Tab::Import => 2, Tab::Games => 3, Tab::Space => 4, Tab::Settings => 5 };
     let tabs = Tabs::new(titles)
         .select(sel)
-        .block(Block::default().borders(Borders::ALL)
+        .block(Block::default().borders(Borders::ALL).border_type(c_border_type())
             .title(" wryayer ").title_style(Style::default().fg(c_accent()).add_modifier(Modifier::BOLD)))
         .highlight_style(Style::default().fg(c_fg()).add_modifier(Modifier::BOLD).bg(c_select()))
         .divider(Span::styled("|", Style::default().fg(c_dim())));
@@ -370,11 +385,11 @@ fn draw_installed(f: &mut Frame, app: &mut App, area: Rect) {
     }).collect();
 
     let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title(" Apps ")
+        .block(Block::default().borders(Borders::ALL).border_type(c_border_type()).title(" Apps ")
             .title_style(Style::default().fg(list_border))
             .border_style(Style::default().fg(list_border)))
         .highlight_style(Style::default().bg(c_select()).fg(c_fg()).add_modifier(Modifier::BOLD))
-        .highlight_symbol("▶ ");
+        .highlight_symbol(c_select_symbol());
 
     f.render_stateful_widget(list, chunks[0], &mut app.inst_state);
     draw_detail(f, app, chunks[1]);
@@ -384,7 +399,7 @@ fn draw_detail(f: &mut Frame, app: &mut App, area: Rect) {
     let focused = app.detail_focused;
     let border_color = if focused { c_accent() } else { c_dim() };
     let title_style = Style::default().fg(border_color);
-    let block = Block::default().borders(Borders::ALL)
+    let block = Block::default().borders(Borders::ALL).border_type(c_border_type())
         .title(" Details ").title_style(title_style)
         .border_style(Style::default().fg(border_color));
     let inner = block.inner(area);
@@ -545,7 +560,7 @@ fn draw_install(f: &mut Frame, app: &mut App, area: Rect) {
 
     f.render_widget(
         Paragraph::new(format!("{}{}", app.search_input, cursor))
-            .block(Block::default().borders(Borders::ALL).title(search_title)
+            .block(Block::default().borders(Borders::ALL).border_type(c_border_type()).title(search_title)
                 .title_style(Style::default().fg(if bar_active { c_fg() } else { c_dim() }))
                 .border_style(Style::default().fg(if bar_active { c_accent() } else { c_dim() })))
             .style(Style::default().fg(c_fg())),
@@ -595,9 +610,9 @@ fn draw_install(f: &mut Frame, app: &mut App, area: Rect) {
     };
 
     let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title(results_title).title_style(Style::default().fg(c_accent())))
+        .block(Block::default().borders(Borders::ALL).border_type(c_border_type()).title(results_title).title_style(Style::default().fg(c_accent())))
         .highlight_style(Style::default().bg(c_select()).fg(c_fg()).add_modifier(Modifier::BOLD))
-        .highlight_symbol("▶ ");
+        .highlight_symbol(c_select_symbol());
 
     f.render_stateful_widget(list, chunks[1], &mut app.avail_state);
 
@@ -637,7 +652,7 @@ fn draw_install(f: &mut Frame, app: &mut App, area: Rect) {
 // ── Import tab ────────────────────────────────────────────────────────────────
 
 fn draw_import(f: &mut Frame, app: &App, area: Rect) {
-    let block = Block::default().borders(Borders::ALL)
+    let block = Block::default().borders(Borders::ALL).border_type(c_border_type())
         .title(" Import Backup ").title_style(Style::default().fg(c_accent()).add_modifier(Modifier::BOLD));
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -667,7 +682,7 @@ fn draw_import(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(""), chunks[2]);
     f.render_widget(
         Paragraph::new(format!("  {}{}", app.import_input, "█"))
-            .block(Block::default().borders(Borders::ALL)
+            .block(Block::default().borders(Borders::ALL).border_type(c_border_type())
                 .title(" Path ").title_style(Style::default().fg(c_fg()))
                 .border_style(Style::default().fg(c_accent())))
             .style(Style::default().fg(c_fg())),
@@ -723,7 +738,7 @@ fn draw_confirm(f: &mut Frame, area: Rect, title: &str, body: &[String], danger:
     let lines: Vec<Line> = body.iter().map(|l| Line::from(format!("  {l}"))).collect();
     f.render_widget(
         Paragraph::new(lines)
-            .block(Block::default().borders(Borders::ALL)
+            .block(Block::default().borders(Borders::ALL).border_type(c_border_type())
                 .title(format!(" {title} "))
                 .title_style(Style::default().fg(title_color).add_modifier(Modifier::BOLD))
                 .border_style(Style::default().fg(border_color)))
@@ -865,7 +880,7 @@ fn draw_operation(
         f.render_widget(Clear, popup);
 
         let block = Block::default()
-            .borders(Borders::ALL)
+            .borders(Borders::ALL).border_type(c_border_type())
             .title(format!(" {title} "))
             .title_style(Style::default().fg(c_fg()).add_modifier(Modifier::BOLD))
             .border_style(Style::default().fg(border_color));
@@ -961,7 +976,7 @@ fn draw_operation(
 
 fn draw_space(f: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
-        .borders(Borders::ALL)
+        .borders(Borders::ALL).border_type(c_border_type())
         .title(" Disk Usage ")
         .title_style(Style::default().fg(c_accent()).add_modifier(Modifier::BOLD));
     let inner = block.inner(area);
@@ -1118,7 +1133,7 @@ fn draw_settings_tab(f: &mut Frame, app: &mut App, area: Rect) {
 
     // ── Left: settings list ───────────────────────────────────────────────────
     let list_block = Block::default()
-        .borders(Borders::ALL)
+        .borders(Borders::ALL).border_type(c_border_type())
         .title(" Default Settings ")
         .title_style(Style::default().fg(c_accent()).add_modifier(Modifier::BOLD))
         .border_style(Style::default().fg(c_accent()));
@@ -1258,7 +1273,7 @@ fn draw_settings_tab(f: &mut Frame, app: &mut App, area: Rect) {
 
     // ── Right: description + options ──────────────────────────────────────────
     let desc_block = Block::default()
-        .borders(Borders::ALL)
+        .borders(Borders::ALL).border_type(c_border_type())
         .title(format!(" {} ", setting_title(selected)))
         .title_style(Style::default().fg(c_fg()).add_modifier(Modifier::BOLD))
         .border_style(Style::default().fg(c_dim()));
@@ -1354,7 +1369,7 @@ fn draw_config(
     } else {
         format!(" Config — {app_name} ")
     };
-    let block = Block::default().borders(Borders::ALL)
+    let block = Block::default().borders(Borders::ALL).border_type(c_border_type())
         .title(title)
         .title_style(Style::default().fg(c_accent()).add_modifier(Modifier::BOLD))
         .border_style(Style::default().fg(c_accent()));
@@ -1550,7 +1565,7 @@ fn draw_text_input(f: &mut Frame, area: Rect, title: &str, value: &str) {
     let popup = centered_rect(54, 30, area);
     f.render_widget(Clear, popup);
 
-    let block = Block::default().borders(Borders::ALL)
+    let block = Block::default().borders(Borders::ALL).border_type(c_border_type())
         .title(format!(" {title} "))
         .title_style(Style::default().fg(c_accent()).add_modifier(Modifier::BOLD))
         .border_style(Style::default().fg(c_accent()));
@@ -1572,7 +1587,7 @@ fn draw_text_input(f: &mut Frame, area: Rect, title: &str, value: &str) {
 
     f.render_widget(
         Paragraph::new(format!(" {}█", value))
-            .block(Block::default().borders(Borders::ALL)
+            .block(Block::default().borders(Borders::ALL).border_type(c_border_type())
                 .border_style(Style::default().fg(c_accent())))
             .style(Style::default().fg(c_fg())),
         chunks[1],
@@ -1607,7 +1622,7 @@ fn draw_option_picker(
     let popup = centered_rect(36, h_pct, area);
     f.render_widget(Clear, popup);
 
-    let block = Block::default().borders(Borders::ALL)
+    let block = Block::default().borders(Borders::ALL).border_type(c_border_type())
         .title(format!(" {title} "))
         .title_style(Style::default().fg(c_accent()).add_modifier(Modifier::BOLD))
         .border_style(Style::default().fg(c_accent()));
@@ -1634,7 +1649,7 @@ fn draw_option_picker(
     list_state.select(Some(selected));
     let list = List::new(items)
         .highlight_style(Style::default().bg(c_select()).fg(c_fg()).add_modifier(Modifier::BOLD))
-        .highlight_symbol("▶ ");
+        .highlight_symbol(c_select_symbol());
     f.render_stateful_widget(list, chunks[0], &mut list_state);
 
     f.render_widget(
@@ -1655,7 +1670,7 @@ fn draw_setting_help(f: &mut Frame, area: Rect, setting_idx: usize) {
     let popup = centered_rect(54, 40, area);
     f.render_widget(Clear, popup);
 
-    let block = Block::default().borders(Borders::ALL)
+    let block = Block::default().borders(Borders::ALL).border_type(c_border_type())
         .title(format!(" ? {title} "))
         .title_style(Style::default().fg(c_yellow()).add_modifier(Modifier::BOLD))
         .border_style(Style::default().fg(c_yellow()));
@@ -1733,7 +1748,7 @@ fn draw_key_help(f: &mut Frame, area: Rect) {
     };
     f.render_widget(Clear, popup);
 
-    let block = Block::default().borders(Borders::ALL)
+    let block = Block::default().borders(Borders::ALL).border_type(c_border_type())
         .title(" ? Key bindings ")
         .title_style(Style::default().fg(c_yellow()).add_modifier(Modifier::BOLD))
         .border_style(Style::default().fg(c_yellow()));
@@ -1762,7 +1777,7 @@ fn draw_option_help(f: &mut Frame, area: Rect, setting_idx: usize, choice_idx: u
     let popup = centered_rect(54, 35, area);
     f.render_widget(Clear, popup);
 
-    let block = Block::default().borders(Borders::ALL)
+    let block = Block::default().borders(Borders::ALL).border_type(c_border_type())
         .title(format!(" ? {opt_name} "))
         .title_style(Style::default().fg(c_yellow()).add_modifier(Modifier::BOLD))
         .border_style(Style::default().fg(c_yellow()));
@@ -1797,7 +1812,7 @@ fn draw_shared_dirs(f: &mut Frame, area: Rect, app_name: &str, dirs: &[String], 
     f.render_widget(Clear, popup);
 
     let title_target = if app_name.is_empty() { "Defaults" } else { app_name };
-    let block = Block::default().borders(Borders::ALL)
+    let block = Block::default().borders(Borders::ALL).border_type(c_border_type())
         .title(format!(" Shared Folders — {title_target} "))
         .title_style(Style::default().fg(c_accent()).add_modifier(Modifier::BOLD))
         .border_style(Style::default().fg(c_accent()));
@@ -1855,7 +1870,7 @@ fn draw_install_target(f: &mut Frame, area: Rect, pkg: &str, targets: &[String],
     let popup = centered_rect(60, 70, area);
     f.render_widget(Clear, popup);
 
-    let block = Block::default().borders(Borders::ALL)
+    let block = Block::default().borders(Borders::ALL).border_type(c_border_type())
         .title(format!(" Install '{pkg}' "))
         .title_style(Style::default().fg(c_accent()).add_modifier(Modifier::BOLD))
         .border_style(Style::default().fg(c_accent()));
@@ -1903,7 +1918,7 @@ fn draw_install_target(f: &mut Frame, area: Rect, pkg: &str, targets: &[String],
     list_state.select(Some(selected));
     let list = List::new(items)
         .highlight_style(Style::default().bg(c_select()).fg(c_fg()).add_modifier(Modifier::BOLD))
-        .highlight_symbol("▶ ");
+        .highlight_symbol(c_select_symbol());
     f.render_stateful_widget(list, chunks[1], &mut list_state);
 
     f.render_widget(
@@ -1928,7 +1943,7 @@ fn draw_file_browser(
     let popup = centered_rect(70, 80, area);
     f.render_widget(Clear, popup);
 
-    let block = Block::default().borders(Borders::ALL)
+    let block = Block::default().borders(Borders::ALL).border_type(c_border_type())
         .title(format!(" Browse: {current_dir} "))
         .title_style(Style::default().fg(c_accent()).add_modifier(Modifier::BOLD))
         .border_style(Style::default().fg(c_accent()));
@@ -1966,7 +1981,7 @@ fn draw_file_browser(
     let list = List::new(items)
         .block(Block::default())
         .highlight_style(Style::default().bg(c_select()).fg(c_fg()).add_modifier(Modifier::BOLD))
-        .highlight_symbol("▶ ");
+        .highlight_symbol(c_select_symbol());
 
     f.render_stateful_widget(list, chunks[0], &mut list_state);
 
@@ -2035,7 +2050,7 @@ fn draw_rename_app(f: &mut Frame, area: Rect, app_name: &str, value: &str) {
     let popup = centered_rect(54, 30, area);
     f.render_widget(Clear, popup);
 
-    let block = Block::default().borders(Borders::ALL)
+    let block = Block::default().borders(Borders::ALL).border_type(c_border_type())
         .title(format!(" Rename '{app_name}' "))
         .title_style(Style::default().fg(c_accent()).add_modifier(Modifier::BOLD))
         .border_style(Style::default().fg(c_accent()));
@@ -2057,7 +2072,7 @@ fn draw_rename_app(f: &mut Frame, area: Rect, app_name: &str, value: &str) {
 
     f.render_widget(
         Paragraph::new(format!(" {}█", value))
-            .block(Block::default().borders(Borders::ALL)
+            .block(Block::default().borders(Borders::ALL).border_type(c_border_type())
                 .border_style(Style::default().fg(c_accent())))
             .style(Style::default().fg(c_fg())),
         chunks[1],
@@ -2078,7 +2093,7 @@ fn draw_already_installed(f: &mut Frame, area: Rect, pkg: &str, selected: usize)
     let popup = centered_rect(56, 40, area);
     f.render_widget(Clear, popup);
 
-    let block = Block::default().borders(Borders::ALL)
+    let block = Block::default().borders(Borders::ALL).border_type(c_border_type())
         .title(format!(" '{pkg}' is already installed "))
         .title_style(Style::default().fg(c_accent()).add_modifier(Modifier::BOLD))
         .border_style(Style::default().fg(c_accent()));
@@ -2136,7 +2151,7 @@ fn draw_outdated_packages(f: &mut Frame, area: Rect, pkg: &str, selected: usize)
     let popup = centered_rect(62, 40, area);
     f.render_widget(Clear, popup);
 
-    let block = Block::default().borders(Borders::ALL)
+    let block = Block::default().borders(Borders::ALL).border_type(c_border_type())
         .title(" Package databases may be out of date ")
         .title_style(Style::default().fg(c_yellow()).add_modifier(Modifier::BOLD))
         .border_style(Style::default().fg(c_yellow()));
@@ -2202,7 +2217,7 @@ fn draw_ask_shortcut(f: &mut Frame, area: Rect, pkg: &str, selected: usize) {
     f.render_widget(Clear, popup);
 
     let block = Block::default()
-        .borders(Borders::ALL)
+        .borders(Borders::ALL).border_type(c_border_type())
         .title(" Create shortcut? ")
         .title_style(Style::default().fg(c_accent()).add_modifier(Modifier::BOLD))
         .border_style(Style::default().fg(c_accent()));
@@ -2254,7 +2269,7 @@ fn draw_no_launcher_choice(f: &mut Frame, area: Rect, pkg: &str, available_bins:
     let popup = centered_rect(60, 50, area);
     f.render_widget(Clear, popup);
 
-    let block = Block::default().borders(Borders::ALL)
+    let block = Block::default().borders(Borders::ALL).border_type(c_border_type())
         .title(format!(" '{pkg}' — no launcher binary found "))
         .title_style(Style::default().fg(c_yellow()).add_modifier(Modifier::BOLD))
         .border_style(Style::default().fg(c_yellow()));
@@ -2328,7 +2343,7 @@ fn draw_duplicate_install(f: &mut Frame, area: Rect, pkg: &str, value: &str, int
     let popup = centered_rect(54, 30, area);
     f.render_widget(Clear, popup);
 
-    let block = Block::default().borders(Borders::ALL)
+    let block = Block::default().borders(Borders::ALL).border_type(c_border_type())
         .title(format!(" Install '{pkg}' again "))
         .title_style(Style::default().fg(c_accent()).add_modifier(Modifier::BOLD))
         .border_style(Style::default().fg(c_accent()));
@@ -2353,7 +2368,7 @@ fn draw_duplicate_install(f: &mut Frame, area: Rect, pkg: &str, value: &str, int
 
     f.render_widget(
         Paragraph::new(format!(" {}█", value))
-            .block(Block::default().borders(Borders::ALL)
+            .block(Block::default().borders(Borders::ALL).border_type(c_border_type())
                 .border_style(Style::default().fg(c_accent())))
             .style(Style::default().fg(c_fg())),
         chunks[1],
@@ -2380,7 +2395,7 @@ fn eta_seconds(done: u64, total: u64, elapsed: std::time::Duration) -> f64 {
 // ── Games tab ─────────────────────────────────────────────────────────────────
 
 fn draw_games(f: &mut Frame, app: &mut App, area: Rect) {
-    let block = Block::default().borders(Borders::ALL)
+    let block = Block::default().borders(Borders::ALL).border_type(c_border_type())
         .title(" Wine Games ").title_style(Style::default().fg(c_accent()).add_modifier(Modifier::BOLD));
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -2431,12 +2446,12 @@ fn draw_games(f: &mut Frame, app: &mut App, area: Rect) {
             ]))
         }).collect();
         let list = List::new(items)
-            .block(Block::default().borders(Borders::TOP)
+            .block(Block::default().borders(Borders::TOP).border_type(c_border_type())
                 .title(format!(" Imported games ({}) ", games.len()))
                 .title_style(Style::default().fg(c_accent()))
                 .border_style(Style::default().fg(c_dim())))
             .highlight_style(Style::default().bg(c_select()).fg(c_fg()).add_modifier(Modifier::BOLD))
-            .highlight_symbol("▶ ");
+            .highlight_symbol(c_select_symbol());
         f.render_stateful_widget(list, chunks[3], &mut app.games_state);
     }
 
@@ -2455,7 +2470,7 @@ fn draw_game_exe_pick(f: &mut Frame, area: Rect, game_dir: &str, exes: &[(String
     let popup = centered_rect(70, 70, area);
     f.render_widget(Clear, popup);
 
-    let block = Block::default().borders(Borders::ALL)
+    let block = Block::default().borders(Borders::ALL).border_type(c_border_type())
         .title(" 1/3 — Pick main .exe ")
         .title_style(Style::default().fg(c_accent()).add_modifier(Modifier::BOLD))
         .border_style(Style::default().fg(c_accent()));
@@ -2488,7 +2503,7 @@ fn draw_game_exe_pick(f: &mut Frame, area: Rect, game_dir: &str, exes: &[(String
     list_state.select(Some(selected));
     let list = List::new(items)
         .highlight_style(Style::default().bg(c_select()).fg(c_fg()).add_modifier(Modifier::BOLD))
-        .highlight_symbol("▶ ");
+        .highlight_symbol(c_select_symbol());
     f.render_stateful_widget(list, chunks[1], &mut list_state);
 
     f.render_widget(
@@ -2504,7 +2519,7 @@ fn draw_game_name_input(f: &mut Frame, area: Rect, game_dir: &str, exe: &str, va
     let popup = centered_rect(60, 40, area);
     f.render_widget(Clear, popup);
 
-    let block = Block::default().borders(Borders::ALL)
+    let block = Block::default().borders(Borders::ALL).border_type(c_border_type())
         .title(" 2/3 — Container name ")
         .title_style(Style::default().fg(c_accent()).add_modifier(Modifier::BOLD))
         .border_style(Style::default().fg(c_accent()));
@@ -2532,7 +2547,7 @@ fn draw_game_name_input(f: &mut Frame, area: Rect, game_dir: &str, exe: &str, va
 
     f.render_widget(
         Paragraph::new(format!(" {value}█"))
-            .block(Block::default().borders(Borders::ALL)
+            .block(Block::default().borders(Borders::ALL).border_type(c_border_type())
                 .title(" Name (~/.wryayer/<name>/ and ~/bin/<name>) ")
                 .title_style(Style::default().fg(c_fg()))
                 .border_style(Style::default().fg(c_accent())))
@@ -2569,7 +2584,7 @@ fn draw_game_confirm(
     let popup = centered_rect(64, 60, area);
     f.render_widget(Clear, popup);
 
-    let block = Block::default().borders(Borders::ALL)
+    let block = Block::default().borders(Borders::ALL).border_type(c_border_type())
         .title(" 3/3 — Confirm import ")
         .title_style(Style::default().fg(c_accent()).add_modifier(Modifier::BOLD))
         .border_style(Style::default().fg(c_accent()));
@@ -2675,13 +2690,17 @@ mod theme_tests {
 
         set_active_theme(Theme::Matrix);
         assert_eq!(c_accent(), PALETTE_MATRIX.accent);
-        // The defining trait of matrix: body text is green, not white.
+        // The defining traits of matrix are structural, not just colour:
         assert_eq!(c_fg(), PALETTE_MATRIX.fg);
-        assert_ne!(c_fg(), Color::White);
+        assert_ne!(c_fg(), Color::White); // green body text, not white
+        assert_eq!(c_border_type(), BorderType::Double); // double-line CRT borders
+        assert_eq!(c_select_symbol(), "> "); // prompt glyph, not the solid arrow
 
         set_active_theme(Theme::Default);
         assert_eq!(c_accent(), PALETTE_DEFAULT.accent);
         assert_eq!(c_accent(), Color::Cyan);
         assert_eq!(c_fg(), Color::White);
+        assert_eq!(c_border_type(), BorderType::Plain);
+        assert_eq!(c_select_symbol(), "▶ ");
     }
 }
