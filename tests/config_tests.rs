@@ -187,7 +187,6 @@ fn round_trip_all_non_default_values() {
         spoof_os:            None,
         spoof_terminal:      false,
         ram_limit:           None,
-        spoof_resolution:    None,
         create_shortcut:     true,
         confirm_install:     false,
         ask_shortcut:        false,

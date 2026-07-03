@@ -1361,14 +1361,6 @@ fn draw_settings_tab(f: &mut Frame, app: &mut App, area: Rect) {
             None      => "none".into(),
             Some(kib) => crate::config::format_ram_limit(kib),
         }),
-        ("Resolution",  match config.spoof_resolution.as_deref() {
-            None             => "system".into(),
-            Some("1280x720") => "1280×720".into(),
-            Some("1920x1080")=> "1920×1080".into(),
-            Some("2560x1440")=> "2560×1440".into(),
-            Some("3840x2160")=> "3840×2160".into(),
-            Some(s)          => s.chars().take(10).collect(),
-        }),
         ("Avahi",       match config.avahi {
             AvahiMode::Stub => "stub".into(),
             AvahiMode::Host => "host".into(),
@@ -1672,14 +1664,6 @@ fn draw_config(
         ("RAM limit  ", match config.ram_limit {
             None      => " none ".to_string(),
             Some(kib) => format!(" {} ", crate::config::format_ram_limit(kib)),
-        }),
-        ("Resolution ", match config.spoof_resolution.as_deref() {
-            None             => " system  ".to_string(),
-            Some("1280x720") => " 1280×720".to_string(),
-            Some("1920x1080")=> " 1920×1080".to_string(),
-            Some("2560x1440")=> " 2560×1440".to_string(),
-            Some("3840x2160")=> " 3840×2160".to_string(),
-            Some(s)          => { let t: String = s.chars().take(10).collect(); format!(" {t}") }
         }),
         ("Avahi      ", match config.avahi {
             AvahiMode::Stub => " stub ".to_string(),

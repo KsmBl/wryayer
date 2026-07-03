@@ -165,7 +165,8 @@ becomes `/`, and a curated set of host paths are bound in:
 ```
 
 `bwrap_cmd()` returns the assembled `Command` plus optional child handles
-(Xvfb, the D-Bus filter proxy) whose lifetimes are tied to the sandbox. The
+(the D-Bus filter proxy, the Avahi stub bus) whose lifetimes are tied to the
+sandbox. The
 launcher forks bwrap, waits, and on abnormal exit re-scans the sandbox `home/`
 for missing sonames (self-updating apps like Discord write new ELF binaries
 there) and retries once.
@@ -183,7 +184,6 @@ bound read-only over the corresponding sandbox path:
 | cpuinfo | file bound over `/proc/cpuinfo` (`sample` preset or a user-edited file) |
 | os-release | file bound over `/etc/os-release` **and** `/usr/lib/os-release` |
 | terminal | walk the process tree to find the real terminal, set its env var (`TERM_PROGRAM`, `KITTY_WINDOW_ID`, …) |
-| resolution | run under an Xvfb virtual display + a fake `xrandr` shim + `RESOLUTION` env |
 
 ### RAM limit and spoofed meminfo
 

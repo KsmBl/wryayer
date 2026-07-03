@@ -28,10 +28,10 @@ fn options_for_temp_delete_has_three_choices() {
 
 #[test]
 fn options_for_non_picker_rows_are_empty() {
-    // CFG_SHARES (6) and CFG_SAVE (22) are handled by their own screens.
-    // (15 = Avahi; 19 = Clean-cache; 20 = Theme; 21 = Layout.)
+    // CFG_SHARES (6) and CFG_SAVE (21) are handled by their own screens.
+    // (14 = Avahi; 18 = Clean-cache; 19 = Theme; 20 = Layout.)
     assert!(setting_options(6).is_empty());
-    assert!(setting_options(22).is_empty());
+    assert!(setting_options(21).is_empty());
     assert!(setting_options(999).is_empty());
 }
 
@@ -52,11 +52,11 @@ fn title_for_unknown_row_falls_back() {
     assert_eq!(setting_title(99), "Option");
 }
 
-// ── Avahi row (shared row 15) ────────────────────────────────────────────────
+// ── Avahi row (shared row 14) ────────────────────────────────────────────────
 
 #[test]
 fn avahi_row_options_and_roundtrip() {
-    let row = 15;
+    let row = 14;
     assert_eq!(setting_options(row), vec!["stub", "host", "off"]);
     assert_eq!(setting_title(row), "Avahi mode");
 
@@ -223,7 +223,7 @@ fn cycle_on_empty_options_is_noop() {
     let mut c = AppConfig::default();
     let before = c.clone();
     cycle_setting(&mut c, 6, 1);  // CFG_SHARES — no options
-    cycle_setting(&mut c, 22, -1); // CFG_SAVE — no options
+    cycle_setting(&mut c, 21, -1); // CFG_SAVE — no options
     assert_eq!(c.network, before.network);
     assert_eq!(c.temp_mode, before.temp_mode);
     assert_eq!(c.temp_delete, before.temp_delete);

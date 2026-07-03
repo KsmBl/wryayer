@@ -93,8 +93,6 @@ pub struct AppConfig {
     /// Maximum RAM the app may use, in KiB — enforced via systemd-run (None = no limit).
     /// Stored in KiB so limits can be set in KB/MB/GB with full precision.
     pub ram_limit: Option<u64>,
-    /// Spoof screen resolution reported by xrandr and via env vars — e.g. "1920x1080"
-    pub spoof_resolution: Option<String>,
     /// Whether to create a ~/bin shortcut by default when installing (global only)
     pub create_shortcut: bool,
     /// Whether the TUI shows the "Install '<pkg>'?" confirmation before an
@@ -134,7 +132,6 @@ impl Default for AppConfig {
             spoof_os: None,
             spoof_terminal: false,
             ram_limit: None,
-            spoof_resolution: None,
             create_shortcut: true,
             confirm_install: true,
             ask_shortcut: true,
@@ -242,7 +239,6 @@ fn sync_container_aliases(root_name: &str, root_config: &AppConfig) -> Result<()
         alias_cfg.spoof_os         = root_config.spoof_os.clone();
         alias_cfg.spoof_terminal   = root_config.spoof_terminal;
         alias_cfg.ram_limit        = root_config.ram_limit;
-        alias_cfg.spoof_resolution = root_config.spoof_resolution.clone();
         alias_cfg.portal_filter    = root_config.portal_filter;
         let alias_path = config_path(alias)?;
         fs::write(&alias_path, format_ini(&alias_cfg))
@@ -331,13 +327,6 @@ pub fn parse_ini(content: &str) -> Result<AppConfig> {
             }
             ("ram_limit", v) => {
                 config.ram_limit = parse_ram_limit(v);
-            }
-            ("spoof_resolution", v) => {
-                config.spoof_resolution = if v.is_empty() || v == "off" || v == "system" {
-                    None
-                } else {
-                    Some(v.to_owned())
-                };
             }
             ("create_shortcut", v) => {
                 config.create_shortcut = !matches!(v, "off" | "false" | "0" | "no");
@@ -522,11 +511,6 @@ pub fn format_ini(config: &AppConfig) -> String {
         s.push_str("; Maximum RAM (RAM + swap). Enforced via systemd-run MemoryMax+MemorySwapMax.\n");
         s.push_str("; Accepts a unit: KB / MB / GB (e.g. 512MB, 2GB). A bare number means MiB.\n");
         s.push_str(&format!("ram_limit = {}\n", format_ram_limit(kib)));
-    }
-    if let Some(ref res) = config.spoof_resolution {
-        s.push_str("\n[spoof]\n");
-        s.push_str("; Screen resolution to report via xrandr and env vars (e.g. 1920x1080)\n");
-        s.push_str(&format!("spoof_resolution = {res}\n"));
     }
     if !config.create_shortcut || !config.confirm_install || !config.ask_shortcut || config.clean_cache || config.theme != Theme::Default || config.layout != Layout::Default || !config.portal_filter {
         s.push_str("\n[behavior]\n");

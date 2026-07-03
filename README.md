@@ -153,7 +153,6 @@ wryayer auto-detects your distro from `/etc/os-release` and uses the appropriate
 | `update-mime-database` | `sudo pacman -S shared-mime-info` | Optional — needed for GTK MIME detection (color pickers, etc.) |
 | `gtk-update-icon-cache` | `sudo pacman -S gtk-update-icon-cache` | Optional — needed for icon themes (Adwaita, hicolor) |
 | `gdk-pixbuf-query-loaders` | `sudo pacman -S gdk-pixbuf2` | Optional — pixbuf loader cache |
-| `xorg-server-xvfb` | `sudo pacman -S xorg-server-xvfb` | Optional — required for browser screen resolution spoofing |
 | `xdg-dbus-proxy` | `sudo pacman -S xdg-dbus-proxy` | Optional — required for the file-picker portal filter (on by default) |
 | `dbus-daemon` | Bundled with `dbus` | Optional — runs the private per-sandbox Avahi stub bus (`avahi = stub`, the default) that silences zeroconf errors in Electron/KDE apps without touching the host |
 
@@ -167,7 +166,6 @@ wryayer auto-detects your distro from `/etc/os-release` and uses the appropriate
 | **dpkg** | Pre-installed | Package extraction (`dpkg-deb`) |
 | **apt** | Pre-installed | Dep resolution and download |
 | `ldconfig` | `sudo apt install libc-bin` | Library cache rebuild after install |
-| `xvfb` | `sudo apt install xvfb` | Optional — required for browser screen resolution spoofing |
 | `xdg-dbus-proxy` | `sudo apt install xdg-dbus-proxy` | Optional — required for the file-picker portal filter (on by default) |
 
 > **AUR packages are Arch-only.** On Debian/Ubuntu, only packages from `apt` repos are available. Attempting to install an AUR-only package will print a warning and skip that dep.
@@ -182,7 +180,6 @@ wryayer auto-detects your distro from `/etc/os-release` and uses the appropriate
 | **dnf** | Pre-installed | Dep resolution and download |
 | **rpm2cpio** | `sudo dnf install rpm` | Package extraction |
 | `ldconfig` | Pre-installed | Library cache rebuild after install |
-| `xorg-x11-server-Xvfb` | `sudo dnf install xorg-x11-server-Xvfb` | Optional — required for browser screen resolution spoofing |
 | `xdg-dbus-proxy` | `sudo dnf install xdg-dbus-proxy` | Optional — required for the file-picker portal filter (on by default) |
 
 ---
@@ -555,15 +552,6 @@ Press `?` on the **installed** tab for a full key-bindings reference.
 | `spoof-os <ubuntu\|arch\|windows\|arduinoide\|name\|system\|off>` | Preset or any OS name | Writes `/etc/os-release` and `/usr/lib/os-release` |
 | `spoof-terminal <on\|off>` | `on` or `off` | Detects real terminal via process tree and sets `TERM_PROGRAM` inside sandbox |
 
-**Screen resolution spoofing** (`spoof_resolution`) has no CLI subcommand yet — set it from the TUI Settings tab / per-app config screen (`s`), or by editing `~/.wryayer/<app>/config.ini` directly:
-
-```ini
-[spoof]
-spoof_resolution = 1920x1080   ; or 1280x720, 2560x1440, 3840x2160, off
-```
-
-It runs the app inside an Xvfb virtual display at the target resolution and spoofs `xrandr` plus the `RESOLUTION` / `SCREEN_RESOLUTION` env vars. `xorg-server-xvfb` is required for the Xvfb-backed browser path; without it only the xrandr/env-var spoofing applies.
-
 **Sample values:**
 
 | Setting | Sample value |
@@ -632,7 +620,6 @@ The config is stored as a human-readable INI file at `~/.wryayer/<app>/config.in
 - [x] **Identity spoofing** — spoof hostname, username, machine-id, and cpuinfo per app
 - [x] **Global default settings** — Settings tab in TUI and `~/.wryayer/defaults.ini` set defaults inherited by all new apps
 - [x] **Multi-select install** — mark multiple search results with `Space`, install them all sequentially with `Enter`; marks persist across searches
-- [x] **Screen resolution spoofing** — run the app inside an Xvfb virtual display at the target resolution so `window.screen.width/height` reports the spoofed value in browsers
 - [x] **Update all** — check every app for updates on TUI start and update the out-of-date ones with `Shift+U`
 - [ ] **Per-app env var overrides** — let users set `LANG`, `QT_SCALE_FACTOR`, etc. in `config.ini`
 - [ ] **Dependency graph viewer** — TUI screen showing the full package tree for an installed app

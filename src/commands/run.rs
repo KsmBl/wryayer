@@ -159,11 +159,9 @@ pub fn run(app_name: &str, bin: Option<&str>, args: &[String]) -> Result<()> {
     } else if repaired {
         // Replace this process with a fresh bwrap so the retry gets a clean
         // exec() hand-off (correct signal disposition, no extra wryayer in the
-        // process tree).
-        // xvfb dropped here; Xvfb launched with -terminate exits automatically
-        // when the sandboxed app (its last client) exits after exec().  The
-        // dbus proxy carries PR_SET_PDEATHSIG, so it also dies with the app.
-        let (mut cmd, _, _xvfb, _dbus, _avahi) = bwrap_cmd(&app_root_str, &binary, &effective_args, &temp, &config, wine_ctx.as_ref());
+        // process tree). The dbus proxy carries PR_SET_PDEATHSIG, so it dies
+        // with the app.
+        let (mut cmd, _, _dbus, _avahi) = bwrap_cmd(&app_root_str, &binary, &effective_args, &temp, &config, wine_ctx.as_ref());
         set_bwrap_env(&mut cmd);
         if let Some(mib) = config.ram_limit {
             if has_systemd_run() {
@@ -227,7 +225,7 @@ fn launch_bwrap(
     config: &AppConfig,
     wine: Option<&WineCtx>,
 ) -> Result<ExitStatus> {
-    let (mut cmd, spoof_dir, mut xvfb, mut dbus_proxy, mut avahi_stub) = bwrap_cmd(app_root_str, binary, args, temp, config, wine);
+    let (mut cmd, spoof_dir, mut dbus_proxy, mut avahi_stub) = bwrap_cmd(app_root_str, binary, args, temp, config, wine);
     set_bwrap_env(&mut cmd);
     let ram_mib = if let Some(mib) = config.ram_limit {
         if has_systemd_run() {
@@ -262,13 +260,6 @@ fn launch_bwrap(
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     if let Some(u) = updater {
         let _ = u.join();
-    }
-    // Xvfb was launched with -terminate so it exits when its last client
-    // (the sandboxed app) disconnects.  Kill it explicitly as a safety net
-    // in case the app crashed without cleanly closing its X connection.
-    if let Some(ref mut child) = xvfb {
-        let _ = child.kill();
-        let _ = child.wait();
     }
     // The dbus proxy has no self-terminate flag; stop it now that the app is gone.
     if let Some(ref mut child) = dbus_proxy {
@@ -661,18 +652,8 @@ fn short_hash(p: &Path) -> u64 {
 
 // ── bwrap command builder ─────────────────────────────────────────────────────
 
-fn find_free_xdisplay() -> Option<u32> {
-    for n in 20..100u32 {
-        if !std::path::Path::new(&format!("/tmp/.X{n}-lock")).exists()
-            && !std::path::Path::new(&format!("/tmp/.X11-unix/X{n}")).exists()
-        {
-            return Some(n);
-        }
-    }
-    None
-}
 
-fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, config: &AppConfig, wine: Option<&WineCtx>) -> (Command, Option<PathBuf>, Option<std::process::Child>, Option<std::process::Child>, Option<std::process::Child>) {
+fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, config: &AppConfig, wine: Option<&WineCtx>) -> (Command, Option<PathBuf>, Option<std::process::Child>, Option<std::process::Child>) {
     // Terminal spoofing: exec bwrap through a symlink named after the detected
     // terminal. Linux sets task->comm from the exec basename, so fastfetch's
     // process-tree walk sees the terminal name instead of "bwrap".
@@ -1013,71 +994,6 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
         }
     }
 
-    // ── Resolution spoofing ───────────────────────────────────────────────────
-    let mut xvfb_child: Option<std::process::Child> = None;
-    if let Some(ref res) = config.spoof_resolution {
-        if let Some((w, h)) = parse_resolution(res) {
-            // Browsers query screen dimensions via the X server directly (libxrandr
-            // syscall), not by running /usr/bin/xrandr.  The only reliable way to
-            // make window.screen.width/height report a spoofed value is to run the
-            // app on a virtual X display (Xvfb) whose screen is sized accordingly.
-            if let Some(display_num) = find_free_xdisplay() {
-                let display_str = format!(":{display_num}");
-                if let Ok(child) = std::process::Command::new("Xvfb")
-                    .args([
-                        &display_str,
-                        "-screen", "0",
-                        &format!("{w}x{h}x24"),
-                        "-terminate",       // auto-exit when last client disconnects
-                        "-nolisten", "tcp", // no TCP listener needed
-                    ])
-                    .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .spawn()
-                {
-                    // Poll for the socket (up to 1 s) before bwrap binds it.
-                    let sock = format!("/tmp/.X11-unix/X{display_num}");
-                    for _ in 0..20 {
-                        if std::path::Path::new(&sock).exists() { break; }
-                        std::thread::sleep(std::time::Duration::from_millis(50));
-                    }
-                    cmd.args(["--bind-try", &sock, &sock]);
-                    cmd.args(["--setenv", "DISPLAY", &display_str]);
-                    // Unset WAYLAND_DISPLAY so the app routes through Xvfb, not
-                    // the compositor; --setenv overrides any cmd.env() set later.
-                    cmd.args(["--unsetenv", "WAYLAND_DISPLAY"]);
-                    xvfb_child = Some(child);
-                }
-            }
-
-            if xvfb_child.is_none() {
-                eprintln!(
-                    "warning: Xvfb not found — resolution spoofing will not affect browsers.\n\
-                     Install xorg-server-xvfb for full browser resolution spoofing."
-                );
-            }
-
-            // Fake xrandr binary covers apps that exec xrandr as a subprocess.
-            let xrandr_script = format!(
-                "#!/bin/sh\n\
-                 echo 'Screen 0: minimum 320 x 200, current {w} x {h}, maximum 16384 x 16384'\n\
-                 echo 'Virtual-1 connected primary {w}x{h}+0+0 (normal left inverted right x axis y axis) 527mm x 296mm'\n\
-                 echo '   {w}x{h}     60.00*+'\n"
-            );
-            let xf = spoof_dir.join("xrandr");
-            if std::fs::write(&xf, &xrandr_script).is_ok() {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(&xf, std::fs::Permissions::from_mode(0o755));
-                if let Some(s) = xf.to_str() {
-                    cmd.args(["--ro-bind", s, "/usr/bin/xrandr"]);
-                }
-            }
-            let res_str = format!("{w}x{h}");
-            cmd.args(["--setenv", "RESOLUTION", &res_str]);
-            cmd.args(["--setenv", "SCREEN_RESOLUTION", &res_str]);
-        }
-    }
 
     // ── Isolated XDG_RUNTIME_DIR ───────────────────────────────────────────────
     //
@@ -1180,7 +1096,7 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
 
     cmd.args(["--", binary]);
     cmd.args(args);
-    (cmd, term_spoof_dir, xvfb_child, dbus_proxy_child, avahi_stub_child)
+    (cmd, term_spoof_dir, dbus_proxy_child, avahi_stub_child)
 }
 
 /// Scan the sandbox's `home/` subtree for ELF files with missing soname
@@ -1276,14 +1192,6 @@ fn detect_terminal_name() -> Option<String> {
         pid = ppid;
     }
     None
-}
-
-/// Parse "WxH" or "W×H" into (width, height).
-fn parse_resolution(s: &str) -> Option<(u32, u32)> {
-    // Accept both ASCII 'x' and Unicode '×'
-    let sep = if s.contains('×') { '×' } else { 'x' };
-    let (w, h) = s.split_once(sep)?;
-    Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
 }
 
 /// Find the absolute path to bwrap by searching PATH.
