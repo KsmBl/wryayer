@@ -193,6 +193,7 @@ fn round_trip_all_non_default_values() {
         ask_shortcut:        false,
         clean_cache:         true,
         theme:               Theme::Amber,
+        layout:              Layout::Sidebar,
         portal_filter:       false,
         avahi:               AvahiMode::Host,
     };
@@ -209,6 +210,7 @@ fn round_trip_all_non_default_values() {
     assert!(!parsed.ask_shortcut);
     assert!(parsed.clean_cache);
     assert_eq!(parsed.theme, Theme::Amber);
+    assert_eq!(parsed.layout, Layout::Sidebar);
     assert!(!parsed.portal_filter);
 }
 

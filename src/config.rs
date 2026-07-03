@@ -22,8 +22,17 @@ pub enum Theme {
     Default,
     /// A warm amber palette.
     Amber,
-    /// A green-phosphor terminal palette (green body text, not white).
+    /// A green-phosphor palette (green body text, not white).
     Matrix,
+}
+
+/// Structural layout for the TUI, independent of the colour theme.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Layout {
+    /// Horizontal tab strip on top, single-line borders, solid-arrow cursor.
+    Default,
+    /// Vertical tab sidebar on the left, double-line borders, prompt cursor.
+    Sidebar,
 }
 
 /// How to satisfy sandboxed apps that probe Avahi/zeroconf at startup.
@@ -96,6 +105,8 @@ pub struct AppConfig {
     pub clean_cache: bool,
     /// Colour theme for the TUI (global only).
     pub theme: Theme,
+    /// Structural layout for the TUI, independent of the colour theme (global only).
+    pub layout: Layout,
     /// Route the sandbox's D-Bus session through a filter that hides the host
     /// desktop portal, so file pickers run in-sandbox and only show shared
     /// dirs instead of leaking host paths (default: true)
@@ -126,6 +137,7 @@ impl Default for AppConfig {
             ask_shortcut: true,
             clean_cache: false,
             theme: Theme::Default,
+            layout: Layout::Default,
             portal_filter: true,
         }
     }
@@ -347,6 +359,12 @@ pub fn parse_ini(content: &str) -> Result<AppConfig> {
                     _ => Theme::Default,
                 };
             }
+            ("layout", v) => {
+                config.layout = match v {
+                    "sidebar" => Layout::Sidebar,
+                    _ => Layout::Default,
+                };
+            }
             ("portal_filter", v) => {
                 config.portal_filter = !matches!(v, "off" | "false" | "0" | "no");
             }
@@ -463,7 +481,7 @@ pub fn format_ini(config: &AppConfig) -> String {
         s.push_str("; Screen resolution to report via xrandr and env vars (e.g. 1920x1080)\n");
         s.push_str(&format!("spoof_resolution = {res}\n"));
     }
-    if !config.create_shortcut || !config.confirm_install || !config.ask_shortcut || config.clean_cache || config.theme != Theme::Default || !config.portal_filter {
+    if !config.create_shortcut || !config.confirm_install || !config.ask_shortcut || config.clean_cache || config.theme != Theme::Default || config.layout != Layout::Default || !config.portal_filter {
         s.push_str("\n[behavior]\n");
         if !config.create_shortcut {
             s.push_str("; Create ~/bin/<name> shortcut by default when installing apps\n");
@@ -489,6 +507,14 @@ pub fn format_ini(config: &AppConfig) -> String {
                 Theme::Default => "default",
             };
             s.push_str(&format!("theme = {name}\n"));
+        }
+        if config.layout != Layout::Default {
+            s.push_str("; TUI layout: default (top tabs) | sidebar (left tabs)\n");
+            let name = match config.layout {
+                Layout::Sidebar => "sidebar",
+                Layout::Default => "default",
+            };
+            s.push_str(&format!("layout = {name}\n"));
         }
         if !config.portal_filter {
             s.push_str("; Hide the host desktop portal so file pickers only show shared dirs.\n");

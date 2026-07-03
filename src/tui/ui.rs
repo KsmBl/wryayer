@@ -17,10 +17,11 @@ use super::{
 
 // ── Theming ──────────────────────────────────────────────────────────────────
 //
-// The palette is selected at draw time from the global config, so switching
-// themes in Settings updates the whole UI live. Colours are read through the
-// `c_*()` accessors (never the struct directly) so every widget follows the
-// active theme.
+// Appearance is two orthogonal choices, both selected at draw time from the
+// global config so they update live: the colour `Palette` (theme) and the
+// structural `LayoutStyle` (layout — tab placement, borders, selection glyph).
+// Any theme can be combined with any layout. Everything is read through the
+// `c_*()` accessors so every widget follows the active choices.
 
 struct Palette {
     /// Primary foreground for body text, labels, and selected rows.
@@ -32,17 +33,9 @@ struct Palette {
     dim: Color,
     select: Color,
     running: Color,
-    // ── Structural chrome (not just colour) ──
-    /// Line-drawing style for every bordered panel.
-    border: BorderType,
-    /// The glyph printed to the left of the highlighted list row.
-    select_symbol: &'static str,
-    /// When true the tab bar is a vertical sidebar on the left (a different
-    /// layout construction) instead of a horizontal strip across the top.
-    sidebar: bool,
 }
 
-/// The original cool palette: white text, cyan accent, single-line borders.
+/// The original cool palette: white text, cyan accent.
 const PALETTE_DEFAULT: Palette = Palette {
     fg: Color::White,
     accent: Color::Cyan,
@@ -53,12 +46,9 @@ const PALETTE_DEFAULT: Palette = Palette {
     select: Color::Rgb(40, 60, 80),
     // Low-saturation green for the "running instances" badge.
     running: Color::Rgb(104, 148, 104),
-    border: BorderType::Plain,
-    select_symbol: "▶ ",
-    sidebar: false,
 };
 
-/// A warm amber palette — same construction as default, warmer colours.
+/// A warm amber palette.
 const PALETTE_AMBER: Palette = Palette {
     fg: Color::White,
     accent: Color::Rgb(224, 165, 74),
@@ -68,15 +58,10 @@ const PALETTE_AMBER: Palette = Palette {
     dim: Color::Rgb(124, 110, 92),
     select: Color::Rgb(74, 58, 34),
     running: Color::Rgb(158, 138, 96),
-    border: BorderType::Plain,
-    select_symbol: "▶ ",
-    sidebar: false,
 };
 
-/// A green-phosphor terminal — a fundamentally different construction, not a
-/// recolour: green body text (not white), double-line CRT borders, and a
-/// command-prompt "›" selection glyph instead of the solid arrow. A muted
-/// red/amber is kept for genuine error/warning legibility.
+/// A green-phosphor palette: green body text (not white), for a monochrome CRT
+/// feel. A muted red/amber is kept for genuine error/warning legibility.
 const PALETTE_MATRIX: Palette = Palette {
     fg: Color::Rgb(122, 222, 130),
     accent: Color::Rgb(80, 250, 128),
@@ -86,14 +71,38 @@ const PALETTE_MATRIX: Palette = Palette {
     dim: Color::Rgb(70, 120, 78),
     select: Color::Rgb(20, 58, 28),
     running: Color::Rgb(96, 200, 112),
+};
+
+/// The non-colour construction: where the tab bar sits and how panels are drawn.
+struct LayoutStyle {
+    /// Line-drawing style for every bordered panel.
+    border: BorderType,
+    /// The glyph printed to the left of the highlighted list row.
+    select_symbol: &'static str,
+    /// When true the tab bar is a vertical sidebar on the left instead of a
+    /// horizontal strip across the top.
+    sidebar: bool,
+}
+
+/// Classic construction: top tab strip, single-line borders, a solid arrow.
+const LAYOUT_DEFAULT: LayoutStyle = LayoutStyle {
+    border: BorderType::Plain,
+    select_symbol: "▶ ",
+    sidebar: false,
+};
+
+/// Terminal construction: left tab sidebar, double-line CRT borders, a
+/// command-prompt selection glyph.
+const LAYOUT_SIDEBAR: LayoutStyle = LayoutStyle {
     border: BorderType::Double,
     select_symbol: "> ",
     sidebar: true,
 };
 
 static ACTIVE_THEME: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+static ACTIVE_LAYOUT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
-/// Select the palette used by subsequent draws. Called each frame from `draw`.
+/// Select the colour palette used by subsequent draws. Called each frame.
 pub fn set_active_theme(theme: crate::config::Theme) {
     let idx = match theme {
         crate::config::Theme::Default => 0,
@@ -101,6 +110,15 @@ pub fn set_active_theme(theme: crate::config::Theme) {
         crate::config::Theme::Matrix => 2,
     };
     ACTIVE_THEME.store(idx, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Select the structural layout used by subsequent draws. Called each frame.
+pub fn set_active_layout(layout: crate::config::Layout) {
+    let idx = match layout {
+        crate::config::Layout::Default => 0,
+        crate::config::Layout::Sidebar => 1,
+    };
+    ACTIVE_LAYOUT.store(idx, std::sync::atomic::Ordering::Relaxed);
 }
 
 fn palette() -> &'static Palette {
@@ -111,24 +129,32 @@ fn palette() -> &'static Palette {
     }
 }
 
+fn layout_style() -> &'static LayoutStyle {
+    match ACTIVE_LAYOUT.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => &LAYOUT_SIDEBAR,
+        _ => &LAYOUT_DEFAULT,
+    }
+}
+
 fn c_fg() -> Color { palette().fg }
 fn c_accent() -> Color { palette().accent }
-/// Line-drawing style for bordered panels (structural, theme-dependent).
-fn c_border_type() -> BorderType { palette().border }
-/// Glyph shown to the left of the highlighted list row.
-fn c_select_symbol() -> &'static str { palette().select_symbol }
-/// Whether the tab bar is a left sidebar (true) or a top strip (false).
-fn c_sidebar_layout() -> bool { palette().sidebar }
 fn c_green() -> Color { palette().green }
 fn c_red() -> Color { palette().red }
 fn c_yellow() -> Color { palette().yellow }
 fn c_dim() -> Color { palette().dim }
 fn c_select() -> Color { palette().select }
 fn c_running() -> Color { palette().running }
+/// Line-drawing style for bordered panels (structural, layout-dependent).
+fn c_border_type() -> BorderType { layout_style().border }
+/// Glyph shown to the left of the highlighted list row.
+fn c_select_symbol() -> &'static str { layout_style().select_symbol }
+/// Whether the tab bar is a left sidebar (true) or a top strip (false).
+fn c_sidebar_layout() -> bool { layout_style().sidebar }
 
 pub fn draw(f: &mut Frame, app: &mut App) {
-    // Apply the chosen theme before anything is drawn this frame.
+    // Apply the chosen colour theme and layout before anything is drawn.
     set_active_theme(app.global_config.theme);
+    set_active_layout(app.global_config.layout);
     let area = f.area();
 
     // Two constructions: the default top strip, or (matrix) a left sidebar.
@@ -2779,27 +2805,53 @@ mod theme_tests {
     use crate::config::Theme;
 
     #[test]
-    fn active_theme_selects_the_matching_palette() {
+    fn active_theme_selects_colours_only() {
+        use crate::config::Layout;
+        // The colour theme controls colours; layout is separate, so pin it.
+        set_active_layout(Layout::Default);
+
         set_active_theme(Theme::Amber);
         assert_eq!(c_accent(), PALETTE_AMBER.accent);
         assert_eq!(c_select(), PALETTE_AMBER.select);
 
         set_active_theme(Theme::Matrix);
         assert_eq!(c_accent(), PALETTE_MATRIX.accent);
-        // The defining traits of matrix are structural, not just colour:
         assert_eq!(c_fg(), PALETTE_MATRIX.fg);
-        assert_ne!(c_fg(), Color::White); // green body text, not white
-        assert_eq!(c_border_type(), BorderType::Double); // double-line CRT borders
-        assert_eq!(c_select_symbol(), "> "); // prompt glyph, not the solid arrow
-        assert!(c_sidebar_layout()); // tabs move to a left sidebar
+        assert_ne!(c_fg(), Color::White); // green body text
 
         set_active_theme(Theme::Default);
-        assert_eq!(c_accent(), PALETTE_DEFAULT.accent);
         assert_eq!(c_accent(), Color::Cyan);
         assert_eq!(c_fg(), Color::White);
+    }
+
+    #[test]
+    fn active_layout_selects_construction_only() {
+        set_active_layout(crate::config::Layout::Sidebar);
+        assert_eq!(c_border_type(), BorderType::Double);
+        assert_eq!(c_select_symbol(), "> ");
+        assert!(c_sidebar_layout());
+
+        set_active_layout(crate::config::Layout::Default);
         assert_eq!(c_border_type(), BorderType::Plain);
         assert_eq!(c_select_symbol(), "▶ ");
-        assert!(!c_sidebar_layout()); // default keeps the top tab strip
+        assert!(!c_sidebar_layout());
+    }
+
+    #[test]
+    fn theme_and_layout_are_independent() {
+        // Matrix colours with the default (top-bar) layout: green text, but
+        // single-line borders and no sidebar.
+        set_active_theme(Theme::Matrix);
+        set_active_layout(crate::config::Layout::Default);
+        assert_eq!(c_fg(), PALETTE_MATRIX.fg);
+        assert_eq!(c_border_type(), BorderType::Plain);
+        assert!(!c_sidebar_layout());
+
+        // Default colours with the sidebar layout: white text, double borders.
+        set_active_theme(Theme::Default);
+        set_active_layout(crate::config::Layout::Sidebar);
+        assert_eq!(c_fg(), Color::White);
+        assert!(c_sidebar_layout());
     }
 
     #[test]
