@@ -1349,55 +1349,89 @@ fn draw_settings_tab(f: &mut Frame, app: &mut App, area: Rect) {
 
     // The list is split into two labelled sections: "Default settings" (the
     // per-app sandbox defaults, rows 0..CFG_CREATE_SHORTCUT) and "Application
-    // settings" (wryayer's own behaviour/appearance, the rest). The headers are
-    // non-selectable lines drawn between the rows, so each row is pushed down by
-    // the number of headers above it while keeping its CFG_ selection index.
-    let app_section_start = CFG_CREATE_SHORTCUT;
-    let sep_y = list_inner.y + list_inner.height.saturating_sub(2);
+    // settings" (wryayer's own behaviour/appearance, the rest). Section headers
+    // are non-selectable lines between the rows. When the panel is too short to
+    // show everything, the list scrolls to keep the selected row visible; the
+    // separator + Save button stay pinned at the bottom.
+    let app_section_start = CFG_CREATE_SHORTCUT.min(rows.len());
 
-    let header = |f: &mut Frame, y: u16, label: &str| {
-        if y >= sep_y {
-            return;
+    // The visual sequence of headers and rows.
+    enum Item<'a> { Header(&'a str), Row(usize) }
+    let mut items: Vec<Item> = Vec::with_capacity(rows.len() + 2);
+    items.push(Item::Header("Default settings"));
+    for idx in 0..app_section_start {
+        items.push(Item::Row(idx));
+    }
+    if app_section_start < rows.len() {
+        items.push(Item::Header("Application settings"));
+        for idx in app_section_start..rows.len() {
+            items.push(Item::Row(idx));
         }
-        let used = label.chars().count() + 1;
-        let fill = (list_inner.width as usize).saturating_sub(used);
+    }
+
+    // Rows area = everything above the pinned separator + save (2 lines).
+    let visible_h = (list_inner.height as usize).saturating_sub(2);
+    let sel_visual = items
+        .iter()
+        .position(|it| matches!(it, Item::Row(i) if *i == selected))
+        .unwrap_or(items.len().saturating_sub(1));
+    let max_offset = items.len().saturating_sub(visible_h);
+    let mut offset = if sel_visual >= visible_h { sel_visual + 1 - visible_h } else { 0 };
+    offset = offset.min(max_offset);
+
+    for (vis, item) in items.iter().enumerate() {
+        if vis < offset || vis >= offset + visible_h {
+            continue;
+        }
+        let y = list_inner.y + (vis - offset) as u16;
+        match item {
+            Item::Header(label) => {
+                let used = label.chars().count() + 1;
+                let fill = (list_inner.width as usize).saturating_sub(used);
+                f.render_widget(
+                    Paragraph::new(Line::from(vec![
+                        Span::styled(format!("{label} "), Style::default().fg(c_accent()).add_modifier(Modifier::BOLD)),
+                        Span::styled("─".repeat(fill), Style::default().fg(c_dim())),
+                    ])),
+                    Rect { x: list_inner.x, y, width: list_inner.width, height: 1 },
+                );
+            }
+            Item::Row(idx) => {
+                let (label, value) = &rows[*idx];
+                let is_sel = *idx == selected;
+                let bg = if is_sel { c_select() } else { Color::Reset };
+                let val_color = match value.trim() {
+                    "on" => c_green(),
+                    "off" => c_red(),
+                    _ => c_yellow(),
+                };
+                let padded_label: String = format!("{:width$}", label, width = 12);
+                f.render_widget(
+                    Paragraph::new(Line::from(vec![
+                        Span::styled(if is_sel { "▶ " } else { "  " }, Style::default().fg(c_accent()).bg(bg)),
+                        Span::styled(padded_label, Style::default().fg(if is_sel { c_fg() } else { c_dim() }).bg(bg)),
+                        Span::styled(" ", Style::default().bg(bg)),
+                        Span::styled(format!("[{}]", value),
+                            Style::default().fg(val_color).bg(bg)
+                                .add_modifier(if is_sel { Modifier::BOLD } else { Modifier::empty() })),
+                    ])),
+                    Rect { x: list_inner.x, y, width: list_inner.width, height: 1 },
+                );
+            }
+        }
+    }
+
+    // Scroll indicators at the right edge when content is clipped above/below.
+    if visible_h > 0 && offset > 0 {
         f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(format!("{label} "), Style::default().fg(c_accent()).add_modifier(Modifier::BOLD)),
-                Span::styled("─".repeat(fill), Style::default().fg(c_dim())),
-            ])),
-            Rect { x: list_inner.x, y, width: list_inner.width, height: 1 },
+            Paragraph::new(Span::styled("▲", Style::default().fg(c_dim()))),
+            Rect { x: list_inner.x + list_inner.width.saturating_sub(1), y: list_inner.y, width: 1, height: 1 },
         );
-    };
-    header(f, list_inner.y, "Default settings");
-    header(f, list_inner.y + app_section_start as u16 + 1, "Application settings");
-
-    for (idx, (label, value)) in rows.iter().enumerate() {
-        // One header sits above the default section; a second above the app one.
-        let header_offset = if idx < app_section_start { 1 } else { 2 };
-        let y = list_inner.y + idx as u16 + header_offset;
-        if y >= sep_y {
-            continue; // ran out of room before the separator/save row
-        }
-        let is_sel = idx == selected;
-        let bg = if is_sel { c_select() } else { Color::Reset };
-        let val_color = match value.trim() {
-            "on" => c_green(),
-            "off" => c_red(),
-            _ => c_yellow(),
-        };
-        let label_w = 12usize;
-        let padded_label: String = format!("{:width$}", label, width = label_w);
+    }
+    if visible_h > 0 && offset + visible_h < items.len() {
         f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(if is_sel { "▶ " } else { "  " }, Style::default().fg(c_accent()).bg(bg)),
-                Span::styled(padded_label, Style::default().fg(if is_sel { c_fg() } else { c_dim() }).bg(bg)),
-                Span::styled(" ", Style::default().bg(bg)),
-                Span::styled(format!("[{}]", value),
-                    Style::default().fg(val_color).bg(bg)
-                        .add_modifier(if is_sel { Modifier::BOLD } else { Modifier::empty() })),
-            ])),
-            Rect { x: list_inner.x, y, width: list_inner.width, height: 1 },
+            Paragraph::new(Span::styled("▼", Style::default().fg(c_dim()))),
+            Rect { x: list_inner.x + list_inner.width.saturating_sub(1), y: list_inner.y + visible_h as u16 - 1, width: 1, height: 1 },
         );
     }
 
@@ -1420,7 +1454,7 @@ fn draw_settings_tab(f: &mut Frame, app: &mut App, area: Rect) {
     f.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(if is_save { "▶ " } else { "  " }, Style::default().fg(c_accent())),
-            Span::styled("[ Save defaults ]", save_style),
+            Span::styled("[ Save settings ]", save_style),
         ])),
         Rect { x: list_inner.x, y: save_y, width: list_inner.width, height: 1 },
     );
