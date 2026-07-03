@@ -1,4 +1,4 @@
-use wryayer::config::{AppConfig, LocalDelete, TempMode};
+use wryayer::config::{AppConfig, AvahiMode, LocalDelete, TempMode};
 use wryayer::tui::{
     apply_setting, cycle_setting, option_description, setting_current, setting_description,
     setting_options, setting_title,
@@ -25,10 +25,10 @@ fn options_for_temp_delete_has_three_choices() {
 
 #[test]
 fn options_for_non_picker_rows_are_empty() {
-    // CFG_SHARES (6) and CFG_SAVE (18) are handled by their own screens.
-    // (Rows 16/17 are the Confirm-install / Ask-shortcut on/off pickers.)
+    // CFG_SHARES (6) and CFG_SAVE (20) are handled by their own screens.
+    // (Row 15 = Avahi; 17/18 = Confirm-install / Ask-shortcut; 19 = Clean-cache.)
     assert!(setting_options(6).is_empty());
-    assert!(setting_options(18).is_empty());
+    assert!(setting_options(20).is_empty());
     assert!(setting_options(999).is_empty());
 }
 
@@ -47,6 +47,24 @@ fn titles_match_known_rows() {
 #[test]
 fn title_for_unknown_row_falls_back() {
     assert_eq!(setting_title(99), "Option");
+}
+
+// ── Avahi row (shared row 15) ────────────────────────────────────────────────
+
+#[test]
+fn avahi_row_options_and_roundtrip() {
+    let row = 15;
+    assert_eq!(setting_options(row), vec!["stub", "host", "off"]);
+    assert_eq!(setting_title(row), "Avahi mode");
+
+    let mut cfg = AppConfig::default();
+    // Default is Stub -> option index 0.
+    assert_eq!(setting_current(&cfg, row), 0);
+    for (choice, expected) in [(1, AvahiMode::Host), (2, AvahiMode::Off), (0, AvahiMode::Stub)] {
+        apply_setting(&mut cfg, row, choice);
+        assert_eq!(cfg.avahi, expected);
+        assert_eq!(setting_current(&cfg, row), choice);
+    }
 }
 
 // ── setting_current: round-trips with the underlying enum ────────────────────

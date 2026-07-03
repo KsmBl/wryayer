@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 use crate::commands::dedup::format_bytes;
-use crate::config::{AppConfig, LocalDelete, TempMode};
+use crate::config::{AppConfig, AvahiMode, LocalDelete, TempMode};
 
 use super::{
     App, Screen, Tab, CFG_SAVE, CFG_SHARES, CFG_GAME_EXE, CFG_GAME_PREFIX,
@@ -1109,9 +1109,15 @@ fn draw_settings_tab(f: &mut Frame, app: &mut App, area: Rect) {
             Some("3840x2160")=> "3840×2160".into(),
             Some(s)          => s.chars().take(10).collect(),
         }),
+        ("Avahi",       match config.avahi {
+            AvahiMode::Stub => "stub".into(),
+            AvahiMode::Host => "host".into(),
+            AvahiMode::Off  => "off".into(),
+        }),
         ("Shortcut",    if config.create_shortcut { "yes".into() } else { "no".into() }),
         ("Confirm inst",if config.confirm_install { "on".into() } else { "off".into() }),
         ("Ask shortcut",if config.ask_shortcut { "on".into() } else { "off".into() }),
+        ("Clean cache", if config.clean_cache { "on".into() } else { "off".into() }),
     ];
 
     // Reserve last 2 rows for separator + save
@@ -1343,6 +1349,11 @@ fn draw_config(
             Some("2560x1440")=> " 2560×1440".to_string(),
             Some("3840x2160")=> " 3840×2160".to_string(),
             Some(s)          => { let t: String = s.chars().take(10).collect(); format!(" {t}") }
+        }),
+        ("Avahi      ", match config.avahi {
+            AvahiMode::Stub => " stub ".to_string(),
+            AvahiMode::Host => " host ".to_string(),
+            AvahiMode::Off  => "  off ".to_string(),
         }),
     ];
 

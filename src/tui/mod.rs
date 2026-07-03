@@ -20,7 +20,7 @@ use ratatui::widgets::ListState;
 use ratatui::Terminal;
 
 use crate::commands::dedup::all_du;
-use crate::config::{read_config, read_global_config, write_config, write_global_config, AppConfig, LocalDelete, TempMode};
+use crate::config::{read_config, read_global_config, write_config, write_global_config, AppConfig, AvahiMode, LocalDelete, TempMode};
 use crate::manifest::{list_all_apps, tree_order, Manifest};
 
 // ── Op messages ───────────────────────────────────────────────────────────────
@@ -1766,10 +1766,11 @@ fn on_op_done(app: &mut App, code: KeyCode) -> Result<()> {
 
 // Rows: 0=network 1=camera 2=microphone 3=audio 4=temp_mode 5=temp_delete 6=shared_dirs
 //       7=spoof_hostname 8=spoof_username 9=spoof_machine_id 10=spoof_cpuinfo 11=spoof_os
-//       12=spoof_terminal 13=ram_limit 14=spoof_resolution
-// Per-app Config (no wine_game):  15=Save
-// Per-app Config (wine_game):     15=game_exe 16=game_prefix 17=Save
-// Global Settings:                15=create_shortcut 16=confirm_install 17=ask_shortcut 18=Save
+//       12=spoof_terminal 13=ram_limit 14=spoof_resolution 15=avahi
+// Per-app Config (no wine_game):  16=Save
+// Per-app Config (wine_game):     16=game_exe 17=game_prefix 18=Save
+// Global Settings:                16=create_shortcut 17=confirm_install 18=ask_shortcut
+//                                 19=clean_cache 20=Save
 pub const CFG_SHARES: usize = 6;
 pub const CFG_SPOOF_HOSTNAME: usize = 7;
 pub const CFG_SPOOF_USERNAME: usize = 8;
@@ -1779,27 +1780,30 @@ pub const CFG_SPOOF_OS: usize = 11;
 pub const CFG_SPOOF_TERMINAL: usize = 12;
 pub const CFG_RAM_LIMIT: usize = 13;
 pub const CFG_SPOOF_RESOLUTION: usize = 14;
+/// Avahi mode — a shared row shown in both per-app Config and global Settings.
+pub const CFG_AVAHI: usize = 15;
 /// Wine-game rows (only present when the Config screen carries `wine_game = Some`).
-pub const CFG_GAME_EXE: usize = 15;
-pub const CFG_GAME_PREFIX: usize = 16;
+pub const CFG_GAME_EXE: usize = 16;
+pub const CFG_GAME_PREFIX: usize = 17;
 /// The following three are only shown in the global Settings tab, not per-app
-/// Config. Their indices sit past the per-app rows (which top out at 17 = wine
+/// Config. Their indices sit past the per-app rows (which top out at 18 = wine
 /// save), so the shared setting_* helpers never see them from a per-app screen.
-pub const CFG_CREATE_SHORTCUT: usize = 15;
-pub const CFG_CONFIRM_INSTALL: usize = 16;
-pub const CFG_ASK_SHORTCUT: usize = 17;
-pub const CFG_SAVE: usize = 18;
-pub const CFG_LEN: usize = 19;
+pub const CFG_CREATE_SHORTCUT: usize = 16;
+pub const CFG_CONFIRM_INSTALL: usize = 17;
+pub const CFG_ASK_SHORTCUT: usize = 18;
+pub const CFG_CLEAN_CACHE: usize = 19;
+pub const CFG_SAVE: usize = 20;
+pub const CFG_LEN: usize = 21;
 
 /// Index of the Save button in the per-app Config screen. Shifts down by 2 when
 /// the screen carries wine_game rows.
 pub fn app_cfg_save_idx(has_wine_game: bool) -> usize {
-    if has_wine_game { 17 } else { 15 }
+    if has_wine_game { 18 } else { 16 }
 }
 
 /// Total navigable rows in the per-app Config screen.
 pub fn app_cfg_total_rows(has_wine_game: bool) -> usize {
-    if has_wine_game { 18 } else { 16 }
+    if has_wine_game { 19 } else { 17 }
 }
 
 /// A fixed 32-char hex machine-id that apps can use as a plausible-looking ID.
@@ -1957,8 +1961,9 @@ pub fn setting_options(idx: usize) -> Vec<&'static str> {
         CFG_SPOOF_TERMINAL => vec!["off", "detect"],
         CFG_RAM_LIMIT => vec!["none", "512 MiB", "1 GiB", "2 GiB", "4 GiB", "8 GiB"],
         CFG_SPOOF_RESOLUTION => vec!["system", "1280×720", "1920×1080", "2560×1440", "3840×2160", "input"],
+        CFG_AVAHI => vec!["stub", "host", "off"],
         CFG_CREATE_SHORTCUT => vec!["yes", "no"],
-        CFG_CONFIRM_INSTALL | CFG_ASK_SHORTCUT => vec!["on", "off"],
+        CFG_CONFIRM_INSTALL | CFG_ASK_SHORTCUT | CFG_CLEAN_CACHE => vec!["on", "off"],
         _ => vec![],
     }
 }
@@ -1981,9 +1986,11 @@ pub fn setting_title(idx: usize) -> &'static str {
         12 => "Spoof terminal name",
         13 => "RAM limit",
         14 => "Spoof resolution",
-        15 => "Default shortcut",
-        16 => "Confirm install",
-        17 => "Ask shortcut",
+        15 => "Avahi mode",
+        16 => "Default shortcut",
+        17 => "Confirm install",
+        18 => "Ask shortcut",
+        19 => "Clean cache",
         _ => "Option",
     }
 }
@@ -2006,9 +2013,11 @@ pub fn setting_description(idx: usize) -> &'static str {
         12 => "Detect your real terminal emulator and pass its identity into the sandbox.\n\nWalks the process tree to find kitty, foot, alacritty, WezTerm, etc., then sets the matching env var (KITTY_WINDOW_ID, WEZTERM_PANE, …).\n\nFixes fastfetch / neofetch showing 'bwrap' instead of your real terminal.",
         13 => "Maximum RAM the app may use (RAM + swap both capped).\n\nEnforced via systemd-run MemoryMax + MemorySwapMax=0.\n'none' disables the limit. Requires systemd.",
         14 => "Spoof the screen resolution reported to the app.\n\nCreates a fake xrandr binary inside the sandbox and sets resolution env vars. Works for apps that call xrandr as a subprocess.\n\nNote: Chromium/Electron apps query the display server directly (X11/Wayland) and are not affected by this setting.",
-        15 => "Whether to pre-select 'Yes' or 'No' in the shortcut prompt shown before each install.\n\nThe prompt always appears — this only controls which answer is highlighted by default.",
-        16 => "Whether to show the 'Install <pkg>?' confirmation before installing.\n\n• on  — ask for a y/n confirmation first (default)\n• off — start the install immediately, no prompt",
-        17 => "Whether to ask about creating a ~/bin shortcut before installing.\n\n• on  — show the shortcut prompt (default)\n• off — skip it and use the 'Default shortcut' setting above without asking",
+        15 => "How to answer apps that probe Avahi/zeroconf at startup (Electron/Chromium, KDE, CUPS-linked).\n\n• stub — private in-sandbox stub bus; no host change, no LAN broadcast (default)\n• host — start the host avahi-daemon if it's installed but stopped\n• off  — leave the harmless 'Daemon not running' warning as-is",
+        16 => "Whether to pre-select 'Yes' or 'No' in the shortcut prompt shown before each install.\n\nThe prompt always appears — this only controls which answer is highlighted by default.",
+        17 => "Whether to show the 'Install <pkg>?' confirmation before installing.\n\n• on  — ask for a y/n confirmation first (default)\n• off — start the install immediately, no prompt",
+        18 => "Whether to ask about creating a ~/bin shortcut before installing.\n\n• on  — show the shortcut prompt (default)\n• off — skip it and use the 'Default shortcut' setting above without asking",
+        19 => "Delete the shared download/build cache (~/.cache/wryayer) after each successful install.\n\n• on  — wipe the cache every install; leaves no record of installed packages outside ~/.wryayer (useful when that dir is an encrypted container)\n• off — keep the cache to speed up re-installs (default)",
         _ => "No description available.",
     }
 }
@@ -2078,15 +2087,22 @@ pub fn option_description(setting_idx: usize, choice_idx: usize) -> &'static str
         (14, 3) => "2560×1440 — Report QHD (2560×1440) to xrandr and via env vars.",
         (14, 4) => "3840×2160 — Report 4K (3840×2160) to xrandr and via env vars.",
         (14, 5) => "input — Type a custom resolution (e.g. 1600x900). Stored as WxH.",
+        // Avahi mode
+        (15, 0) => "stub — Private in-sandbox stub bus answers avahi-client so apps don't error, with no host change and no LAN broadcast. Everything lives under ~/.wryayer/<app>/.",
+        (15, 1) => "host — Start the host avahi-daemon if it's installed but stopped. A host-wide change that also advertises this machine on the local network.",
+        (15, 2) => "off — Do nothing; apps that probe Avahi print a harmless 'Daemon not running' warning.",
         // Default shortcut
-        (15, 0) => "yes — Pre-select 'Yes' in the shortcut prompt. The prompt still appears; press Enter to confirm quickly.",
-        (15, 1) => "no — Pre-select 'No' in the shortcut prompt. Useful if you rarely want ~/bin shortcuts.",
+        (16, 0) => "yes — Pre-select 'Yes' in the shortcut prompt. The prompt still appears; press Enter to confirm quickly.",
+        (16, 1) => "no — Pre-select 'No' in the shortcut prompt. Useful if you rarely want ~/bin shortcuts.",
         // Confirm install
-        (16, 0) => "on — Show the 'Install <pkg>?' confirmation before every install.",
-        (16, 1) => "off — Skip the confirmation and start installing right away.",
+        (17, 0) => "on — Show the 'Install <pkg>?' confirmation before every install.",
+        (17, 1) => "off — Skip the confirmation and start installing right away.",
         // Ask shortcut
-        (17, 0) => "on — Ask whether to create a ~/bin shortcut before each install.",
-        (17, 1) => "off — Don't ask; silently apply the 'Default shortcut' setting.",
+        (18, 0) => "on — Ask whether to create a ~/bin shortcut before each install.",
+        (18, 1) => "off — Don't ask; silently apply the 'Default shortcut' setting.",
+        // Clean cache
+        (19, 0) => "on — Wipe ~/.cache/wryayer after every install. No record of installed packages is left outside ~/.wryayer.",
+        (19, 1) => "off — Keep the download/build cache between installs to avoid re-downloading and re-building.",
         _ => "No description available.",
     }
 }
@@ -2161,9 +2177,15 @@ pub fn setting_current(config: &AppConfig, idx: usize) -> usize {
             Some("3840x2160")=> 4,
             _                => 5,
         },
+        CFG_AVAHI => match config.avahi {
+            AvahiMode::Stub => 0,
+            AvahiMode::Host => 1,
+            AvahiMode::Off  => 2,
+        },
         CFG_CREATE_SHORTCUT => if config.create_shortcut { 0 } else { 1 },
         CFG_CONFIRM_INSTALL => if config.confirm_install { 0 } else { 1 },
         CFG_ASK_SHORTCUT => if config.ask_shortcut { 0 } else { 1 },
+        CFG_CLEAN_CACHE => if config.clean_cache { 0 } else { 1 },
         _ => 0,
     }
 }
@@ -2220,12 +2242,17 @@ pub fn apply_setting(config: &mut AppConfig, idx: usize, choice: usize) {
         (14, 3) => config.spoof_resolution = Some("2560x1440".to_string()),
         (14, 4) => config.spoof_resolution = Some("3840x2160".to_string()),
         // (14, 5) = "input" — handled by on_option_picker which opens TextInput
-        (15, 0) => config.create_shortcut = true,
-        (15, 1) => config.create_shortcut = false,
-        (16, 0) => config.confirm_install = true,
-        (16, 1) => config.confirm_install = false,
-        (17, 0) => config.ask_shortcut = true,
-        (17, 1) => config.ask_shortcut = false,
+        (15, 0) => config.avahi = AvahiMode::Stub,
+        (15, 1) => config.avahi = AvahiMode::Host,
+        (15, 2) => config.avahi = AvahiMode::Off,
+        (16, 0) => config.create_shortcut = true,
+        (16, 1) => config.create_shortcut = false,
+        (17, 0) => config.confirm_install = true,
+        (17, 1) => config.confirm_install = false,
+        (18, 0) => config.ask_shortcut = true,
+        (18, 1) => config.ask_shortcut = false,
+        (19, 0) => config.clean_cache = true,
+        (19, 1) => config.clean_cache = false,
         _ => {}
     }
 }
