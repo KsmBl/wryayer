@@ -537,6 +537,11 @@ fn spawn_dbus_proxy(host_bus: &str, socket_path: &str) -> Option<std::process::C
     }
     // Apps register their own MPRIS name to expose media controls.
     proxy.arg("--own=org.mpris.MediaPlayer2.*");
+    // Steam's pressure-vessel launcher-service owns names under its own
+    // namespace so it can place launched games into the right runtime; without
+    // this it crash-loops ("Unable to acquire bus name …") and Steam disables
+    // it, breaking game launches. These are Steam's own names, not the portal.
+    proxy.arg("--own=com.steampowered.*");
 
     proxy
         .stdin(std::process::Stdio::null())
@@ -1161,16 +1166,30 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
         // Uses --setenv (not cmd.env) for the same reason as XDG_RUNTIME_DIR:
         // the systemd-run --scope wrapper must keep the real user bus to create
         // the scope, so the filtered address may only exist inside the sandbox.
+        //
+        // The proxy socket lives under the isolated runtime dir, but the address
+        // we advertise is the *standard* `$host_runtime/bus`, with the proxy
+        // bind-mounted over it inside the sandbox. Apps that nest their own
+        // container (Steam's pressure-vessel/RunImage) tmpfs `/run`, rebind the
+        // bus to the canonical `/run/user/<uid>/bus`, and reset XDG_RUNTIME_DIR —
+        // but they inherit DBUS_SESSION_BUS_ADDRESS unchanged. Pointing it at a
+        // path under the private runtime dir leaves it dangling in the nested
+        // namespace ("Can't find source path …/.wryayer-<app>/bus"); the
+        // canonical path survives that remapping.
         if config.portal_filter {
             let host_bus = std::env::var("DBUS_SESSION_BUS_ADDRESS")
                 .unwrap_or_else(|_| format!("unix:path={host_rt}/bus"));
             let proxy_sock = format!("{isolated_rt}/bus");
             if let Some(child) = spawn_dbus_proxy(&host_bus, &proxy_sock) {
                 dbus_proxy_child = Some(child);
+                let canonical_bus = format!("{host_rt}/bus");
+                // Shadow the host session bus with our filtered proxy (sandbox
+                // only). Lands after `--bind /run /run`, so it wins.
+                cmd.args(["--bind", &proxy_sock, &canonical_bus]);
                 cmd.args([
                     "--setenv",
                     "DBUS_SESSION_BUS_ADDRESS",
-                    &format!("unix:path={proxy_sock}"),
+                    &format!("unix:path={canonical_bus}"),
                 ]);
             }
         }
