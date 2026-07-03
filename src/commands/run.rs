@@ -110,6 +110,16 @@ pub fn run(app_name: &str, bin: Option<&str>, args: &[String]) -> Result<()> {
                 )
             }
         })?;
+
+    // AppImage packages ship a shell wrapper the extracted tree can't run (no
+    // interpreter, no FUSE). Redirect the launch straight at the bundled
+    // AppImage when that's the case. Wine games have their own fixed entry.
+    let (binary, appimage_env) = if wine_ctx.is_none() {
+        resolve_appimage_wrapper(&app_root, &binary).unwrap_or((binary, Vec::new()))
+    } else {
+        (binary, Vec::new())
+    };
+
     let app_root_str = app_root.to_string_lossy().into_owned();
 
     // Pre-launch: repair any missing sonames in the sandbox home/ tree.
@@ -141,7 +151,7 @@ pub fn run(app_name: &str, bin: Option<&str>, args: &[String]) -> Result<()> {
         None => args.to_vec(),
     };
 
-    let status = launch_bwrap(&app_root_str, &binary, &effective_args, &temp, &config, wine_ctx.as_ref())?;
+    let status = launch_bwrap(&app_root_str, &binary, &effective_args, &temp, &config, wine_ctx.as_ref(), &appimage_env)?;
 
     // Post-launch: if bwrap exited abnormally, the app may have written a new
     // self-updated ELF binary (e.g. Discord bootstrapping app-X.Y.Z/Discord)
@@ -152,7 +162,7 @@ pub fn run(app_name: &str, bin: Option<&str>, args: &[String]) -> Result<()> {
 
     if let Some(cleanup_path) = cleanup {
         if repaired {
-            let _ = launch_bwrap(&app_root_str, &binary, &effective_args, &temp, &config, wine_ctx.as_ref());
+            let _ = launch_bwrap(&app_root_str, &binary, &effective_args, &temp, &config, wine_ctx.as_ref(), &appimage_env);
         }
         let _ = std::fs::remove_dir_all(&cleanup_path);
         std::process::exit(status.code().unwrap_or(1));
@@ -161,7 +171,7 @@ pub fn run(app_name: &str, bin: Option<&str>, args: &[String]) -> Result<()> {
         // exec() hand-off (correct signal disposition, no extra wryayer in the
         // process tree). The dbus proxy carries PR_SET_PDEATHSIG, so it dies
         // with the app.
-        let (mut cmd, _, _dbus, _avahi) = bwrap_cmd(&app_root_str, &binary, &effective_args, &temp, &config, wine_ctx.as_ref());
+        let (mut cmd, _, _dbus, _avahi) = bwrap_cmd(&app_root_str, &binary, &effective_args, &temp, &config, wine_ctx.as_ref(), &appimage_env);
         set_bwrap_env(&mut cmd);
         if let Some(mib) = config.ram_limit {
             if has_systemd_run() {
@@ -224,8 +234,9 @@ fn launch_bwrap(
     temp: &TempBind,
     config: &AppConfig,
     wine: Option<&WineCtx>,
+    appimage_env: &[(String, String)],
 ) -> Result<ExitStatus> {
-    let (mut cmd, spoof_dir, mut dbus_proxy, mut avahi_stub) = bwrap_cmd(app_root_str, binary, args, temp, config, wine);
+    let (mut cmd, spoof_dir, mut dbus_proxy, mut avahi_stub) = bwrap_cmd(app_root_str, binary, args, temp, config, wine, appimage_env);
     set_bwrap_env(&mut cmd);
     let ram_mib = if let Some(mib) = config.ram_limit {
         if has_systemd_run() {
@@ -650,10 +661,96 @@ fn short_hash(p: &Path) -> u64 {
     h.finish()
 }
 
+/// AUR `*-appimage` packages ship a tiny `#!/bin/sh` wrapper in `usr/bin` plus
+/// the real `.AppImage` under `/opt`, but declare no shell (or FUSE)
+/// dependency — so the extracted tree has no interpreter for the wrapper
+/// (`execvp` → ENOENT, the "No such file or directory" launch failure) and no
+/// FUSE for the AppImage to self-mount.
+///
+/// When the resolved launcher is such an unrunnable wrapper, point the launch
+/// at the AppImage directly (a static-pie ELF that needs neither a shell nor,
+/// with `APPIMAGE_EXTRACT_AND_RUN` set, FUSE) and carry over any `export
+/// VAR=VALUE` the wrapper set. Returns `None` when `binary` isn't a shebang
+/// wrapper whose interpreter is missing from the tree — i.e. leave normal
+/// launchers untouched.
+fn resolve_appimage_wrapper(app_root: &Path, binary: &str) -> Option<(String, Vec<(String, String)>)> {
+    let wrapper = app_root.join(binary.trim_start_matches('/'));
+    let bytes = std::fs::read(&wrapper).ok()?;
+    let text = std::str::from_utf8(&bytes).ok()?;
+    let shebang = text.strip_prefix("#!")?.lines().next()?;
+    let interp = shebang.split_whitespace().next().unwrap_or("");
+    // If the interpreter is present inside the tree the wrapper runs fine as-is.
+    if interp.is_empty()
+        || app_root
+            .join(interp.trim_start_matches('/'))
+            .symlink_metadata()
+            .is_ok()
+    {
+        return None;
+    }
+
+    // Interpreter missing: pull the AppImage path and any exported env out of
+    // the wrapper, falling back to a tree scan if the script doesn't name it.
+    let mut env = Vec::new();
+    let mut appimage = None;
+    for line in text.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("export ") {
+            if let Some((k, v)) = rest.split_once('=') {
+                let v = v.trim().trim_matches(['"', '\'']);
+                // Skip values that reference other shell vars — we can't expand
+                // them here and a literal `$FOO` would only mislead the app.
+                if !v.contains('$') {
+                    env.push((k.trim().to_string(), v.to_string()));
+                }
+            }
+        }
+        for tok in line.split_whitespace() {
+            let tok = tok.trim_matches(['"', '\'']);
+            if tok.ends_with(".AppImage") {
+                appimage = Some(tok.to_string());
+            }
+        }
+    }
+
+    let appimage = match appimage {
+        Some(p) if app_root.join(p.trim_start_matches('/')).is_file() => p,
+        _ => find_appimage_in_tree(app_root)?,
+    };
+    let sandbox_path = format!("/{}", appimage.trim_start_matches('/').trim_start_matches("./"));
+    Some((sandbox_path, env))
+}
+
+/// Recursively locate the first `*.AppImage` under the app tree (bounded depth
+/// — these packages drop it in `/opt/<App>/…`). Used as a fallback when the
+/// wrapper script doesn't spell out the AppImage path.
+fn find_appimage_in_tree(app_root: &Path) -> Option<String> {
+    fn walk(dir: &Path, root: &Path, depth: u32) -> Option<String> {
+        if depth > 6 {
+            return None;
+        }
+        for entry in std::fs::read_dir(dir).ok()?.flatten() {
+            let path = entry.path();
+            let ft = entry.file_type().ok()?;
+            if ft.is_file() && path.extension().is_some_and(|e| e == "AppImage") {
+                let rel = path.strip_prefix(root).ok()?;
+                return Some(format!("/{}", rel.to_string_lossy()));
+            }
+            if ft.is_dir() {
+                if let Some(hit) = walk(&path, root, depth + 1) {
+                    return Some(hit);
+                }
+            }
+        }
+        None
+    }
+    walk(app_root, app_root, 0)
+}
+
 // ── bwrap command builder ─────────────────────────────────────────────────────
 
 
-fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, config: &AppConfig, wine: Option<&WineCtx>) -> (Command, Option<PathBuf>, Option<std::process::Child>, Option<std::process::Child>) {
+fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, config: &AppConfig, wine: Option<&WineCtx>, appimage_env: &[(String, String)]) -> (Command, Option<PathBuf>, Option<std::process::Child>, Option<std::process::Child>) {
     // Terminal spoofing: exec bwrap through a symlink named after the detected
     // terminal. Linux sets task->comm from the exec basename, so fastfetch's
     // process-tree walk sees the terminal name instead of "bwrap".
@@ -1094,6 +1191,16 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
         }
     }
 
+    // AppImages self-mount through FUSE by default, which isn't present in the
+    // sandbox tree; extract-and-run makes them unpack into $TMPDIR instead.
+    // Set unconditionally — it's ignored by non-AppImage binaries.
+    cmd.args(["--setenv", "APPIMAGE_EXTRACT_AND_RUN", "1"]);
+    // Env exported by an AppImage wrapper we bypassed (e.g. `HOME=/opt/Steam`).
+    // Applied last so it wins over any earlier --setenv, matching the wrapper.
+    for (k, v) in appimage_env {
+        cmd.args(["--setenv", k, v]);
+    }
+
     cmd.args(["--", binary]);
     cmd.args(args);
     (cmd, term_spoof_dir, dbus_proxy_child, avahi_stub_child)
@@ -1262,5 +1369,79 @@ fn mask_audio_sockets(cmd: &mut Command) {
         if std::path::Path::new(&path).exists() {
             cmd.args(["--bind", "/dev/null", &path]);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a throwaway app tree under a unique temp dir; caller populates it.
+    fn tmp_tree(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "wryayer-run-test-{tag}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("usr/bin")).unwrap();
+        dir
+    }
+
+    #[test]
+    fn appimage_wrapper_without_interpreter_redirects_to_appimage() {
+        let root = tmp_tree("noshell");
+        std::fs::create_dir_all(root.join("opt/Steam/appimage")).unwrap();
+        std::fs::write(root.join("opt/Steam/appimage/Steam.AppImage"), b"ELF").unwrap();
+        std::fs::write(
+            root.join("usr/bin/steam"),
+            "#!/bin/sh\nexport HOME=/opt/Steam\nexec /opt/Steam/appimage/Steam.AppImage\n",
+        )
+        .unwrap();
+        // No /bin/sh (or usr/bin/sh) in the tree → wrapper is unrunnable.
+
+        let (bin, env) = resolve_appimage_wrapper(&root, "/usr/bin/steam").expect("redirect");
+        assert_eq!(bin, "/opt/Steam/appimage/Steam.AppImage");
+        assert_eq!(env, vec![("HOME".to_string(), "/opt/Steam".to_string())]);
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn wrapper_with_interpreter_present_is_left_alone() {
+        let root = tmp_tree("hasshell");
+        std::fs::write(root.join("usr/bin/sh"), b"binary").unwrap();
+        std::os::unix::fs::symlink("usr/bin", root.join("bin")).unwrap();
+        std::fs::write(root.join("usr/bin/app"), "#!/bin/sh\nexec /usr/bin/real\n").unwrap();
+
+        // /bin/sh resolves through the bin→usr/bin symlink, so don't redirect.
+        assert!(resolve_appimage_wrapper(&root, "/usr/bin/app").is_none());
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn falls_back_to_tree_scan_when_wrapper_omits_path() {
+        let root = tmp_tree("scan");
+        std::fs::create_dir_all(root.join("opt/foo")).unwrap();
+        std::fs::write(root.join("opt/foo/Foo.AppImage"), b"ELF").unwrap();
+        // Wrapper launches via a variable, so no literal *.AppImage token.
+        std::fs::write(
+            root.join("usr/bin/foo"),
+            "#!/bin/sh\nAI=/opt/foo/Foo.AppImage\nexec \"$AI\"\n",
+        )
+        .unwrap();
+
+        let (bin, _) = resolve_appimage_wrapper(&root, "/usr/bin/foo").expect("scan redirect");
+        assert_eq!(bin, "/opt/foo/Foo.AppImage");
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn plain_elf_launcher_is_not_touched() {
+        let root = tmp_tree("elf");
+        std::fs::write(root.join("usr/bin/app"), b"\x7fELF binary").unwrap();
+        assert!(resolve_appimage_wrapper(&root, "/usr/bin/app").is_none());
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }
