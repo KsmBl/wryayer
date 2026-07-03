@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable + clippy)
+        run: |
+          rustup toolchain install stable --component clippy --no-self-update
+          rustup default stable
+
+      - name: Cache cargo + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Build
+        run: cargo build --release --all-targets
+
+      # Deny warnings so lint regressions fail the build. Formatting is not
+      # checked: the codebase uses deliberate manual alignment that rustfmt
+      # would flatten.
+      - name: Clippy
+        run: cargo clippy --release --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --release
