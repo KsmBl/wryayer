@@ -1,3 +1,4 @@
+pub mod avahi_stub;
 pub mod commands;
 pub mod config;
 pub mod distro;

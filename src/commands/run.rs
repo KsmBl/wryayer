@@ -1,5 +1,5 @@
 use crate::commands::install::run_ldconfig;
-use crate::config::{read_config, AppConfig, LocalDelete, TempMode};
+use crate::config::{read_config, AppConfig, AvahiMode, LocalDelete, TempMode};
 use crate::manifest::{app_dir, read_manifest};
 use crate::package::{download_official, extract_package, find_missing_sonames_in};
 use anyhow::{bail, Context, Result};
@@ -119,11 +119,11 @@ pub fn run(app_name: &str, bin: Option<&str>, args: &[String]) -> Result<()> {
     fix_home_sonames(&app_root);
 
     // Apps that probe zeroconf (Electron/Chromium, KDE, CUPS-linked, etc.) print
-    // "Failed to connect to Avahi server: Daemon not running" when avahi-daemon
-    // is installed but stopped — the default on Arch. We expose the host system
-    // bus (--bind /run), so the fix is to make the daemon reachable rather than
-    // to hide the bus (hiding it yields the exact same error). Best-effort.
-    if config.network {
+    // "Failed to connect to Avahi server: Daemon not running" when no Avahi is
+    // reachable. The default `stub` mode answers them from a private in-sandbox
+    // bus (set up in bwrap_cmd) with no host change; `host` starts the real
+    // daemon; `off` leaves the harmless warning. Only the host path acts here.
+    if config.network && config.avahi == AvahiMode::Host {
         ensure_avahi_daemon();
     }
 
@@ -163,7 +163,7 @@ pub fn run(app_name: &str, bin: Option<&str>, args: &[String]) -> Result<()> {
         // xvfb dropped here; Xvfb launched with -terminate exits automatically
         // when the sandboxed app (its last client) exits after exec().  The
         // dbus proxy carries PR_SET_PDEATHSIG, so it also dies with the app.
-        let (mut cmd, _, _xvfb, _dbus) = bwrap_cmd(&app_root_str, &binary, &effective_args, &temp, &config, wine_ctx.as_ref());
+        let (mut cmd, _, _xvfb, _dbus, _avahi) = bwrap_cmd(&app_root_str, &binary, &effective_args, &temp, &config, wine_ctx.as_ref());
         set_bwrap_env(&mut cmd);
         if let Some(mib) = config.ram_limit {
             if has_systemd_run() {
@@ -227,7 +227,7 @@ fn launch_bwrap(
     config: &AppConfig,
     wine: Option<&WineCtx>,
 ) -> Result<ExitStatus> {
-    let (mut cmd, spoof_dir, mut xvfb, mut dbus_proxy) = bwrap_cmd(app_root_str, binary, args, temp, config, wine);
+    let (mut cmd, spoof_dir, mut xvfb, mut dbus_proxy, mut avahi_stub) = bwrap_cmd(app_root_str, binary, args, temp, config, wine);
     set_bwrap_env(&mut cmd);
     let ram_mib = if let Some(mib) = config.ram_limit {
         if has_systemd_run() {
@@ -272,6 +272,11 @@ fn launch_bwrap(
     }
     // The dbus proxy has no self-terminate flag; stop it now that the app is gone.
     if let Some(ref mut child) = dbus_proxy {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    // Tear down the Avahi stub (and, via PDEATHSIG, its private dbus-daemon).
+    if let Some(ref mut child) = avahi_stub {
         let _ = child.kill();
         let _ = child.wait();
     }
@@ -557,6 +562,84 @@ fn spawn_dbus_proxy(host_bus: &str, socket_path: &str) -> Option<std::process::C
     None
 }
 
+/// Bring up the per-sandbox Avahi stub (see `avahi_stub.rs`): a private system
+/// bus plus an in-process owner of `org.freedesktop.Avahi`, so avahi-client apps
+/// don't fail with "Daemon not running" — without starting the host daemon or
+/// putting anything on the network.  Returns the managed child (which owns the
+/// dbus-daemon) and the host path of the bus socket, or None if it didn't come
+/// up in time.
+///
+/// The bus socket, its dbus-daemon config, and the readiness marker all live in
+/// the app's own `.spoof` dir under `~/.wryayer`, so nothing identifying is
+/// written outside the container.  The child carries PR_SET_PDEATHSIG so it (and
+/// its dbus-daemon) die with the sandbox even on the exec() retry path.
+fn spawn_avahi_stub(spoof_dir: &Path) -> Option<(std::process::Child, String)> {
+    let sock = spoof_dir.join(".avahi-bus");
+    let conf = spoof_dir.join(".avahi-bus.conf");
+    let sock_str = sock.to_str()?.to_string();
+    let conf_str = conf.to_str()?.to_string();
+    let ready = format!("{sock_str}.ready");
+
+    // A leftover socket makes dbus-daemon's bind() fail; a leftover marker would
+    // make us treat the bus as up before it is.
+    let _ = std::fs::remove_file(&sock);
+    let _ = std::fs::remove_file(&ready);
+
+    let config = format!(
+        "<!DOCTYPE busconfig PUBLIC \"-//freedesktop//DTD D-Bus Bus Configuration 1.0//EN\" \
+           \"http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd\">\n\
+         <busconfig>\n\
+         \x20 <type>system</type>\n\
+         \x20 <listen>unix:path={sock_str}</listen>\n\
+         \x20 <auth>EXTERNAL</auth>\n\
+         \x20 <policy context=\"default\">\n\
+         \x20   <allow user=\"*\"/>\n\
+         \x20   <allow own=\"*\"/>\n\
+         \x20   <allow send_type=\"method_call\"/>\n\
+         \x20   <allow send_type=\"method_return\"/>\n\
+         \x20   <allow send_type=\"error\"/>\n\
+         \x20   <allow send_type=\"signal\"/>\n\
+         \x20   <allow send_requested_reply=\"true\"/>\n\
+         \x20   <allow receive_requested_reply=\"true\"/>\n\
+         \x20   <allow receive_type=\"method_call\"/>\n\
+         \x20   <allow receive_type=\"method_return\"/>\n\
+         \x20   <allow receive_type=\"error\"/>\n\
+         \x20   <allow receive_type=\"signal\"/>\n\
+         \x20 </policy>\n\
+         </busconfig>\n"
+    );
+    if std::fs::write(&conf, config).is_err() {
+        return None;
+    }
+
+    let exe = std::env::current_exe().ok()?;
+    let mut c = Command::new(exe);
+    c.arg("avahi-stub").arg(&sock_str).arg(&conf_str);
+    c.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    unsafe {
+        c.pre_exec(|| {
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+            Ok(())
+        });
+    }
+    let mut child = c.spawn().ok()?;
+
+    // Wait (up to ~3 s) for the stub to actually own the name — it writes the
+    // marker only after RequestName returns — so the app never races an
+    // unowned bus and sees a spurious "Daemon not running".
+    for _ in 0..200 {
+        if Path::new(&ready).exists() {
+            return Some((child, sock_str));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(15));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    None
+}
+
 // ── bwrap command builder ─────────────────────────────────────────────────────
 
 fn find_free_xdisplay() -> Option<u32> {
@@ -570,7 +653,7 @@ fn find_free_xdisplay() -> Option<u32> {
     None
 }
 
-fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, config: &AppConfig, wine: Option<&WineCtx>) -> (Command, Option<PathBuf>, Option<std::process::Child>, Option<std::process::Child>) {
+fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, config: &AppConfig, wine: Option<&WineCtx>) -> (Command, Option<PathBuf>, Option<std::process::Child>, Option<std::process::Child>, Option<std::process::Child>) {
     // Terminal spoofing: exec bwrap through a symlink named after the detected
     // terminal. Linux sets task->comm from the exec basename, so fastfetch's
     // process-tree walk sees the terminal name instead of "bwrap".
@@ -673,6 +756,20 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
     // ── Identity spoofing ─────────────────────────────────────────────────────────
     let spoof_dir = std::path::Path::new(app_root).join(".spoof");
     let _ = std::fs::create_dir_all(&spoof_dir);
+
+    // ── Avahi stub ────────────────────────────────────────────────────────────────
+    // Give the sandbox a private system bus answering org.freedesktop.Avahi so
+    // avahi-client apps don't print "Daemon not running", without starting the
+    // host daemon.  This --bind lands after the `--bind /run /run` above, so it
+    // overrides the host system-bus socket the sandbox would otherwise inherit.
+    let mut avahi_stub_child: Option<std::process::Child> = None;
+    if config.network && config.avahi == AvahiMode::Stub {
+        if let Some((child, sock)) = spawn_avahi_stub(&spoof_dir) {
+            avahi_stub_child = Some(child);
+            cmd.args(["--bind-try", &sock, "/run/dbus/system_bus_socket"]);
+            cmd.args(["--setenv", "DBUS_SYSTEM_BUS_ADDRESS", "unix:path=/run/dbus/system_bus_socket"]);
+        }
+    }
 
     if let Some(ref hostname) = config.spoof_hostname {
         // --unshare-uts gives the sandbox its own UTS namespace; --hostname sets
@@ -1060,7 +1157,7 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
 
     cmd.args(["--", binary]);
     cmd.args(args);
-    (cmd, term_spoof_dir, xvfb_child, dbus_proxy_child)
+    (cmd, term_spoof_dir, xvfb_child, dbus_proxy_child, avahi_stub_child)
 }
 
 /// Scan the sandbox's `home/` subtree for ELF files with missing soname

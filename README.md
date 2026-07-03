@@ -141,7 +141,7 @@ wryayer auto-detects your distro from `/etc/os-release` and uses the appropriate
 | `gdk-pixbuf-query-loaders` | `sudo pacman -S gdk-pixbuf2` | Optional — pixbuf loader cache |
 | `xorg-server-xvfb` | `sudo pacman -S xorg-server-xvfb` | Optional — required for browser screen resolution spoofing |
 | `xdg-dbus-proxy` | `sudo pacman -S xdg-dbus-proxy` | Optional — required for the file-picker portal filter (on by default) |
-| `avahi` | `sudo pacman -S avahi` | Optional — silences zeroconf errors in Electron/KDE apps |
+| `dbus-daemon` | Bundled with `dbus` | Optional — runs the private per-sandbox Avahi stub bus (`avahi = stub`, the default) that silences zeroconf errors in Electron/KDE apps without touching the host |
 
 ### Debian / Ubuntu
 

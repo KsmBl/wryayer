@@ -1,4 +1,4 @@
-use wryayer::{commands, tui};
+use wryayer::{avahi_stub, commands, tui};
 
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{generate, Shell};
@@ -155,6 +155,14 @@ enum Commands {
     Completions {
         /// Shell to generate completions for (bash, fish, zsh, elvish, powershell)
         shell: Shell,
+    },
+    /// Internal: run the private-bus Avahi stub for a sandbox (not for direct use)
+    #[command(hide = true)]
+    AvahiStub {
+        /// Path the private dbus-daemon listens on
+        socket: String,
+        /// Path to the generated dbus-daemon config file
+        config: String,
     },
 }
 
@@ -352,6 +360,7 @@ fn main() {
             generate(shell, &mut Cli::command(), "wryayer", &mut std::io::stdout());
             Ok(())
         }
+        Commands::AvahiStub { socket, config } => avahi_stub::run(&socket, &config),
     };
 
     if let Err(e) = result {

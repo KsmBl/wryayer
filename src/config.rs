@@ -15,6 +15,20 @@ pub enum TempMode {
     Uuid,
 }
 
+/// How to satisfy sandboxed apps that probe Avahi/zeroconf at startup.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AvahiMode {
+    /// Give the sandbox a private system bus with an in-process stub that owns
+    /// org.freedesktop.Avahi, so avahi-client succeeds without touching the host
+    /// or advertising anything on the LAN (default). Everything it uses lives
+    /// under ~/.wryayer/<app>/.
+    Stub,
+    /// Best-effort start of the host avahi-daemon if it's installed but stopped.
+    Host,
+    /// Do nothing; apps that probe Avahi print a harmless "Daemon not running".
+    Off,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum LocalDelete {
     /// Keep temp dir across restarts
@@ -31,6 +45,8 @@ pub struct AppConfig {
     pub temp_delete: LocalDelete,
     /// Allow outgoing network access inside bwrap (default: true)
     pub network: bool,
+    /// How to answer sandboxed apps that probe Avahi at startup (default: Stub)
+    pub avahi: AvahiMode,
     /// Allow access to /dev/video* camera devices (default: true)
     pub camera: bool,
     /// Allow ALSA capture devices + PipeWire/PulseAudio mic (default: true)
@@ -76,6 +92,7 @@ impl Default for AppConfig {
             temp_mode: TempMode::System,
             temp_delete: LocalDelete::OnStart,
             network: true,
+            avahi: AvahiMode::Stub,
             camera: true,
             microphone: true,
             audio: true,
@@ -180,6 +197,7 @@ fn sync_container_aliases(root_name: &str, root_config: &AppConfig) -> Result<()
         alias_cfg.temp_mode        = root_config.temp_mode.clone();
         alias_cfg.temp_delete      = root_config.temp_delete.clone();
         alias_cfg.network          = root_config.network;
+        alias_cfg.avahi            = root_config.avahi.clone();
         alias_cfg.camera           = root_config.camera;
         alias_cfg.microphone       = root_config.microphone;
         alias_cfg.audio            = root_config.audio;
@@ -229,6 +247,13 @@ pub fn parse_ini(content: &str) -> Result<AppConfig> {
             ("network", v) => {
                 config.network = parse_bool(v)
                     .map_err(|_| anyhow::anyhow!("unknown network value '{v}' — valid: on, off"))?;
+            }
+            ("avahi", v) => {
+                config.avahi = match v {
+                    "host" => AvahiMode::Host,
+                    "off" | "false" | "0" | "no" => AvahiMode::Off,
+                    _ => AvahiMode::Stub,
+                };
             }
             ("camera", v) => {
                 config.camera = parse_bool(v)
@@ -341,6 +366,11 @@ pub fn format_ini(config: &AppConfig) -> String {
          [network]\n\
          ; on = allow internet access (default), off = block all network\n\
          network = {}\n\
+         ; avahi = how to answer apps that probe Avahi/zeroconf at startup:\n\
+         ;   stub = private in-sandbox stub bus (no host change, no LAN broadcast)\n\
+         ;   host = start the host avahi-daemon if installed but stopped\n\
+         ;   off  = leave the harmless \"Daemon not running\" warning as-is\n\
+         avahi = {}\n\
          \n\
          [devices]\n\
          ; on = allow access, off = mask device inside sandbox\n\
@@ -350,6 +380,11 @@ pub fn format_ini(config: &AppConfig) -> String {
          microphone = {}\n\
          audio = {}\n",
         b(config.network),
+        match config.avahi {
+            AvahiMode::Stub => "stub",
+            AvahiMode::Host => "host",
+            AvahiMode::Off  => "off",
+        },
         b(config.camera),
         b(config.microphone),
         b(config.audio),

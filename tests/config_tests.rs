@@ -189,6 +189,10 @@ fn round_trip_all_non_default_values() {
         ram_limit:           None,
         spoof_resolution:    None,
         create_shortcut:     true,
+        confirm_install:     false,
+        ask_shortcut:        false,
+        portal_filter:       false,
+        avahi:               AvahiMode::Host,
     };
     let parsed = parse_ini(&format_ini(&original)).unwrap();
     assert_eq!(parsed.temp_mode,   TempMode::Ramdisk);
@@ -198,6 +202,26 @@ fn round_trip_all_non_default_values() {
     assert!(!parsed.microphone);
     assert!(!parsed.audio);
     assert_eq!(parsed.shared_dirs, vec!["/tmp/foo", "/opt/bar"]);
+    assert_eq!(parsed.avahi, AvahiMode::Host);
+    assert!(!parsed.confirm_install);
+    assert!(!parsed.ask_shortcut);
+    assert!(!parsed.portal_filter);
+}
+
+// ── parse_ini — avahi mode ────────────────────────────────────────────────────
+
+#[test]
+fn parse_ini_avahi_absent_defaults_to_stub() {
+    assert_eq!(parse_ini("").unwrap().avahi, AvahiMode::Stub);
+}
+
+#[test]
+fn parse_ini_avahi_modes() {
+    assert_eq!(parse_ini("avahi = stub").unwrap().avahi, AvahiMode::Stub);
+    assert_eq!(parse_ini("avahi = host").unwrap().avahi, AvahiMode::Host);
+    assert_eq!(parse_ini("avahi = off").unwrap().avahi, AvahiMode::Off);
+    // Unknown/garbage values fall back to the safe default rather than erroring.
+    assert_eq!(parse_ini("avahi = wat").unwrap().avahi, AvahiMode::Stub);
 }
 
 // ── parse_ini — ram_limit — aliases that disable ──────────────────────────────

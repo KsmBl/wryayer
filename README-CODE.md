@@ -207,13 +207,32 @@ real home tree. The proxy carries `PR_SET_PDEATHSIG` so it dies with the app.
 ### Avahi / zeroconf
 
 Electron/Chromium, KDE and CUPS-linked apps probe Avahi over the system bus.
-When `avahi-daemon` is installed but stopped (the Arch default), `avahi-client`
-prints *"Failed to connect to Avahi server: Daemon not running"* — and it emits
-that same message whether the daemon or the bus is missing, so hiding the bus
-does not silence it. On launch (when networking is enabled) `run.rs` therefore
-starts the daemon best-effort (`systemctl start avahi-daemon`, falling back to a
-non-interactive `sudo`), and does nothing if the unit is absent, already active,
-or the start is not permitted.
+When no Avahi is reachable, `avahi-client` prints *"Failed to connect to Avahi
+server: Daemon not running"* — and `avahi_client_new()` reaches that failure by
+*blocking* on `Server.GetAPIVersion` / `Server.GetState` at startup, so merely
+owning the name is not enough to silence it; something has to answer those calls.
+
+The `avahi` setting (in `[network]`, default `stub`) picks how that happens:
+
+- **`stub`** — each sandbox gets a *private* system bus: `run.rs` writes a
+  throwaway `dbus-daemon` config into the app's `.spoof/` dir, spawns the daemon,
+  and runs `wryayer avahi-stub` (see `avahi_stub.rs`) as a client that claims
+  `org.freedesktop.Avahi` and answers the handful of `Server` methods
+  `avahi_client_new()` needs (`GetAPIVersion → 516`, `GetState → RUNNING`, …).
+  The private socket is bind-mounted over `/run/dbus/system_bus_socket` (after the
+  `--bind /run /run`, so it overrides the host bus) and `DBUS_SYSTEM_BUS_ADDRESS`
+  is pointed at it. The stub has no networking code, so it can never advertise the
+  machine on the LAN, and the bus socket / config / readiness marker all live
+  under `~/.wryayer/<app>/.spoof/` — nothing identifying is written outside the
+  container. The stub process (and, via `PR_SET_PDEATHSIG`, its `dbus-daemon`)
+  die with the sandbox. Actual browsing returns "nothing found", the honest
+  answer for an isolated sandbox. The D-Bus wire protocol is marshaled by hand in
+  `avahi_stub.rs` to avoid pulling in a D-Bus client crate.
+- **`host`** — start the real host `avahi-daemon` best-effort
+  (`systemctl start avahi-daemon`, falling back to a non-interactive `sudo`);
+  does nothing if the unit is absent, already active, or the start is not
+  permitted. This is a host-wide change and advertises the host on the LAN.
+- **`off`** — do nothing; the harmless warning remains.
 
 ---
 
