@@ -1964,7 +1964,7 @@ pub fn setting_options(idx: usize) -> Vec<&'static str> {
         CFG_CREATE_SHORTCUT => vec!["yes", "no"],
         CFG_CONFIRM_INSTALL | CFG_ASK_SHORTCUT | CFG_CLEAN_CACHE => vec!["on", "off"],
         CFG_THEME => vec!["default", "amber", "matrix"],
-        CFG_LAYOUT => vec!["default", "sidebar"],
+        CFG_LAYOUT => vec!["default", "sidebar", "bottom"],
         _ => vec![],
     }
 }
@@ -2022,7 +2022,7 @@ pub fn setting_description(idx: usize) -> &'static str {
         18 => "Whether to ask about creating a ~/bin shortcut before installing.\n\n• on  — show the shortcut prompt (default)\n• off — skip it and use the 'Default shortcut' setting above without asking",
         19 => "Delete the shared download/build cache (~/.cache/wryayer) after each successful install.\n\n• on  — wipe the cache every install; leaves no record of installed packages outside ~/.wryayer (useful when that dir is an encrypted container)\n• off — keep the cache to speed up re-installs (default)",
         20 => "Colour palette for the TUI (independent of Layout). Applies immediately.\n\n• default — cool: cyan accent on a dark-blue selection\n• amber   — warm: amber accent on a dark-brown selection\n• matrix  — green-phosphor: the body text itself is green, not white",
-        21 => "Structural layout for the TUI (independent of Colour theme). Applies immediately.\n\n• default — horizontal tab strip on top, single-line borders\n• sidebar — vertical tab bar down the left, double-line borders, prompt-style cursor",
+        21 => "Structural layout for the TUI (independent of Colour theme). Applies immediately.\n\n• default — horizontal tab strip on top, single-line borders\n• sidebar — vertical tab bar down the left, double-line borders, prompt-style cursor\n• bottom  — horizontal tab strip along the bottom, rounded borders, chevron cursor",
         _ => "No description available.",
     }
 }
@@ -2115,6 +2115,7 @@ pub fn option_description(setting_idx: usize, choice_idx: usize) -> &'static str
         // Layout
         (21, 0) => "default — Horizontal tab strip across the top with single-line panel borders.",
         (21, 1) => "sidebar — Vertical tab bar down the left edge, double-line borders and a '> ' cursor, for a terminal feel.",
+        (21, 2) => "bottom — Horizontal tab strip along the bottom edge, rounded panel borders and a '» ' cursor.",
         _ => "No description available.",
     }
 }
@@ -2206,6 +2207,7 @@ pub fn setting_current(config: &AppConfig, idx: usize) -> usize {
         CFG_LAYOUT => match config.layout {
             Layout::Default => 0,
             Layout::Sidebar => 1,
+            Layout::Bottom => 2,
         },
         _ => 0,
     }
@@ -2279,6 +2281,7 @@ pub fn apply_setting(config: &mut AppConfig, idx: usize, choice: usize) {
         (20, 2) => config.theme = Theme::Matrix,
         (21, 0) => config.layout = Layout::Default,
         (21, 1) => config.layout = Layout::Sidebar,
+        (21, 2) => config.layout = Layout::Bottom,
         _ => {}
     }
 }

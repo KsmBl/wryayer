@@ -33,6 +33,8 @@ pub enum Layout {
     Default,
     /// Vertical tab sidebar on the left, double-line borders, prompt cursor.
     Sidebar,
+    /// Horizontal tab strip along the bottom, rounded borders, chevron cursor.
+    Bottom,
 }
 
 /// How to satisfy sandboxed apps that probe Avahi/zeroconf at startup.
@@ -362,6 +364,7 @@ pub fn parse_ini(content: &str) -> Result<AppConfig> {
             ("layout", v) => {
                 config.layout = match v {
                     "sidebar" => Layout::Sidebar,
+                    "bottom" => Layout::Bottom,
                     _ => Layout::Default,
                 };
             }
@@ -509,9 +512,10 @@ pub fn format_ini(config: &AppConfig) -> String {
             s.push_str(&format!("theme = {name}\n"));
         }
         if config.layout != Layout::Default {
-            s.push_str("; TUI layout: default (top tabs) | sidebar (left tabs)\n");
+            s.push_str("; TUI layout: default (top tabs) | sidebar (left tabs) | bottom (bottom tabs)\n");
             let name = match config.layout {
                 Layout::Sidebar => "sidebar",
+                Layout::Bottom => "bottom",
                 Layout::Default => "default",
             };
             s.push_str(&format!("layout = {name}\n"));

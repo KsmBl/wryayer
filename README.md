@@ -59,9 +59,10 @@ tagged `[repo]` or `[aur]`). Press `Space` to mark several packages, then
 network and device toggles, temp mode, identity spoofing, RAM limit, the
 install-behaviour switches (**Confirm install** / **Ask shortcut** / **Clean
 cache**), and the **TUI theme** (`default`, `amber`, or `matrix` colours) and **layout**
-(`default` top tab strip, or `sidebar` — a vertical tab bar with double-line
-borders and a prompt-style cursor). Theme and layout are independent, so any
-colour combines with any layout, applied live. Values are
+(`default` top tab strip; `sidebar` — a vertical tab bar with double-line
+borders and a prompt cursor; or `bottom` — a bottom tab strip with rounded
+borders). Theme and layout are independent, so any colour combines with any
+layout, applied live. Values are
 colour-coded (green = on, red = off, yellow = other), with a live description
 and option list on the right.
 

@@ -73,22 +73,32 @@ const PALETTE_MATRIX: Palette = Palette {
     running: Color::Rgb(96, 200, 112),
 };
 
+/// Where the tab bar sits.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum TabSide {
+    /// Horizontal strip across the top.
+    Top,
+    /// Vertical bar down the left edge.
+    Left,
+    /// Horizontal strip along the bottom, above the status bar.
+    Bottom,
+}
+
 /// The non-colour construction: where the tab bar sits and how panels are drawn.
 struct LayoutStyle {
     /// Line-drawing style for every bordered panel.
     border: BorderType,
     /// The glyph printed to the left of the highlighted list row.
     select_symbol: &'static str,
-    /// When true the tab bar is a vertical sidebar on the left instead of a
-    /// horizontal strip across the top.
-    sidebar: bool,
+    /// Where the tab bar is placed.
+    tabs: TabSide,
 }
 
 /// Classic construction: top tab strip, single-line borders, a solid arrow.
 const LAYOUT_DEFAULT: LayoutStyle = LayoutStyle {
     border: BorderType::Plain,
     select_symbol: "▶ ",
-    sidebar: false,
+    tabs: TabSide::Top,
 };
 
 /// Terminal construction: left tab sidebar, double-line CRT borders, a
@@ -96,7 +106,14 @@ const LAYOUT_DEFAULT: LayoutStyle = LayoutStyle {
 const LAYOUT_SIDEBAR: LayoutStyle = LayoutStyle {
     border: BorderType::Double,
     select_symbol: "> ",
-    sidebar: true,
+    tabs: TabSide::Left,
+};
+
+/// Soft construction: tabs along the bottom, rounded borders, a chevron cursor.
+const LAYOUT_BOTTOM: LayoutStyle = LayoutStyle {
+    border: BorderType::Rounded,
+    select_symbol: "» ",
+    tabs: TabSide::Bottom,
 };
 
 static ACTIVE_THEME: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
@@ -117,6 +134,7 @@ pub fn set_active_layout(layout: crate::config::Layout) {
     let idx = match layout {
         crate::config::Layout::Default => 0,
         crate::config::Layout::Sidebar => 1,
+        crate::config::Layout::Bottom => 2,
     };
     ACTIVE_LAYOUT.store(idx, std::sync::atomic::Ordering::Relaxed);
 }
@@ -132,6 +150,7 @@ fn palette() -> &'static Palette {
 fn layout_style() -> &'static LayoutStyle {
     match ACTIVE_LAYOUT.load(std::sync::atomic::Ordering::Relaxed) {
         1 => &LAYOUT_SIDEBAR,
+        2 => &LAYOUT_BOTTOM,
         _ => &LAYOUT_DEFAULT,
     }
 }
@@ -148,8 +167,8 @@ fn c_running() -> Color { palette().running }
 fn c_border_type() -> BorderType { layout_style().border }
 /// Glyph shown to the left of the highlighted list row.
 fn c_select_symbol() -> &'static str { layout_style().select_symbol }
-/// Whether the tab bar is a left sidebar (true) or a top strip (false).
-fn c_sidebar_layout() -> bool { layout_style().sidebar }
+/// Where the active layout places the tab bar.
+fn c_tab_side() -> TabSide { layout_style().tabs }
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     // Apply the chosen colour theme and layout before anything is drawn.
@@ -157,26 +176,32 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     set_active_layout(app.global_config.layout);
     let area = f.area();
 
-    // Two constructions: the default top strip, or (matrix) a left sidebar.
-    // Both resolve to a body area for the active tab and a full-width status bar.
-    let (body, status) = if c_sidebar_layout() {
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(0), Constraint::Length(1)])
-            .split(area);
-        let cols = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(16), Constraint::Min(0)])
-            .split(rows[0]);
-        draw_side_tabs(f, app, cols[0]);
-        (cols[1], rows[1])
-    } else {
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(3), Constraint::Min(0), Constraint::Length(1)])
-            .split(area);
-        draw_tabs(f, app, chunks[0]);
-        (chunks[1], chunks[2])
+    // Three constructions: top strip (default), left sidebar, or bottom strip.
+    // Each resolves to a body area for the active tab and a full-width status bar.
+    let vert = |cs: [Constraint; 3]| Layout::default().direction(Direction::Vertical).constraints(cs).split(area);
+    let (body, status) = match c_tab_side() {
+        TabSide::Left => {
+            let rows = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(0), Constraint::Length(1)])
+                .split(area);
+            let cols = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Length(16), Constraint::Min(0)])
+                .split(rows[0]);
+            draw_side_tabs(f, app, cols[0]);
+            (cols[1], rows[1])
+        }
+        TabSide::Bottom => {
+            let chunks = vert([Constraint::Min(0), Constraint::Length(3), Constraint::Length(1)]);
+            draw_tabs(f, app, chunks[1]);
+            (chunks[0], chunks[2])
+        }
+        TabSide::Top => {
+            let chunks = vert([Constraint::Length(3), Constraint::Min(0), Constraint::Length(1)]);
+            draw_tabs(f, app, chunks[0]);
+            (chunks[1], chunks[2])
+        }
     };
 
     match app.tab {
@@ -1344,6 +1369,7 @@ fn draw_settings_tab(f: &mut Frame, app: &mut App, area: Rect) {
         ("Layout",      match config.layout {
             crate::config::Layout::Default => "default".into(),
             crate::config::Layout::Sidebar => "sidebar".into(),
+            crate::config::Layout::Bottom  => "bottom".into(),
         }),
     ];
 
@@ -2892,15 +2918,22 @@ mod theme_tests {
 
     #[test]
     fn active_layout_selects_construction_only() {
-        set_active_layout(crate::config::Layout::Sidebar);
+        use crate::config::Layout;
+
+        set_active_layout(Layout::Sidebar);
         assert_eq!(c_border_type(), BorderType::Double);
         assert_eq!(c_select_symbol(), "> ");
-        assert!(c_sidebar_layout());
+        assert_eq!(c_tab_side(), TabSide::Left);
 
-        set_active_layout(crate::config::Layout::Default);
+        set_active_layout(Layout::Bottom);
+        assert_eq!(c_border_type(), BorderType::Rounded);
+        assert_eq!(c_select_symbol(), "» ");
+        assert_eq!(c_tab_side(), TabSide::Bottom);
+
+        set_active_layout(Layout::Default);
         assert_eq!(c_border_type(), BorderType::Plain);
         assert_eq!(c_select_symbol(), "▶ ");
-        assert!(!c_sidebar_layout());
+        assert_eq!(c_tab_side(), TabSide::Top);
     }
 
     #[test]
@@ -2911,13 +2944,13 @@ mod theme_tests {
         set_active_layout(crate::config::Layout::Default);
         assert_eq!(c_fg(), PALETTE_MATRIX.fg);
         assert_eq!(c_border_type(), BorderType::Plain);
-        assert!(!c_sidebar_layout());
+        assert_eq!(c_tab_side(), TabSide::Top);
 
         // Default colours with the sidebar layout: white text, double borders.
         set_active_theme(Theme::Default);
         set_active_layout(crate::config::Layout::Sidebar);
         assert_eq!(c_fg(), Color::White);
-        assert!(c_sidebar_layout());
+        assert_eq!(c_tab_side(), TabSide::Left);
     }
 
     #[test]
