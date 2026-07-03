@@ -90,7 +90,8 @@ pub struct AppConfig {
     /// Detect the real terminal emulator and pass it into the sandbox via TERM_PROGRAM
     /// so tools like fastfetch report the correct terminal instead of "bwrap".
     pub spoof_terminal: bool,
-    /// Maximum RAM the app may use in MiB — enforced via systemd-run (None = no limit)
+    /// Maximum RAM the app may use, in KiB — enforced via systemd-run (None = no limit).
+    /// Stored in KiB so limits can be set in KB/MB/GB with full precision.
     pub ram_limit: Option<u64>,
     /// Spoof screen resolution reported by xrandr and via env vars — e.g. "1920x1080"
     pub spoof_resolution: Option<String>,
@@ -329,11 +330,7 @@ pub fn parse_ini(content: &str) -> Result<AppConfig> {
                 config.spoof_terminal = matches!(v, "on" | "true" | "1");
             }
             ("ram_limit", v) => {
-                config.ram_limit = if v.is_empty() || v == "0" || v == "off" || v == "none" {
-                    None
-                } else {
-                    v.parse::<u64>().ok().filter(|&n| n > 0)
-                };
+                config.ram_limit = parse_ram_limit(v);
             }
             ("spoof_resolution", v) => {
                 config.spoof_resolution = if v.is_empty() || v == "off" || v == "system" {
@@ -375,6 +372,43 @@ pub fn parse_ini(content: &str) -> Result<AppConfig> {
         }
     }
     Ok(config)
+}
+
+/// Parse a RAM-limit string into KiB, or None for "no limit".
+///
+/// Accepts a number with an optional unit — `K`/`KB`/`KiB`, `M`/`MB`/`MiB`,
+/// `G`/`GB`/`GiB` (case-insensitive, 1024-based to match systemd). A bare number
+/// is treated as MiB for backward compatibility with older config files. A
+/// fractional value is allowed (e.g. `1.5G`). "none"/"off"/"0"/"" → None.
+pub fn parse_ram_limit(v: &str) -> Option<u64> {
+    let s = v.trim().to_lowercase();
+    if s.is_empty() || matches!(s.as_str(), "0" | "off" | "none" | "no") {
+        return None;
+    }
+    let split = s.find(|c: char| !(c.is_ascii_digit() || c == '.')).unwrap_or(s.len());
+    let (num_str, unit) = s.split_at(split);
+    let num: f64 = num_str.parse().ok()?;
+    let kib = match unit.trim() {
+        "k" | "kb" | "kib" => num,
+        "m" | "mb" | "mib" => num * 1024.0,
+        "g" | "gb" | "gib" => num * 1024.0 * 1024.0,
+        "" => num * 1024.0, // bare number = MiB (legacy configs)
+        _ => return None,
+    };
+    let kib = kib.round() as u64;
+    (kib > 0).then_some(kib)
+}
+
+/// Render a KiB RAM limit as the largest whole unit (GiB / MiB / KiB). The
+/// result round-trips through [`parse_ram_limit`].
+pub fn format_ram_limit(kib: u64) -> String {
+    if kib.is_multiple_of(1024 * 1024) {
+        format!("{} GiB", kib / (1024 * 1024))
+    } else if kib.is_multiple_of(1024) {
+        format!("{} MiB", kib / 1024)
+    } else {
+        format!("{} KiB", kib)
+    }
 }
 
 #[allow(clippy::result_unit_err)] // callers only care whether it parsed; the unit err is the signal
@@ -474,10 +508,11 @@ pub fn format_ini(config: &AppConfig) -> String {
             s.push_str("spoof_terminal = on\n");
         }
     }
-    if let Some(mib) = config.ram_limit {
+    if let Some(kib) = config.ram_limit {
         s.push_str("\n[resources]\n");
-        s.push_str("; Maximum RAM in MiB (RAM + swap). Enforced via systemd-run MemoryMax+MemorySwapMax.\n");
-        s.push_str(&format!("ram_limit = {mib}\n"));
+        s.push_str("; Maximum RAM (RAM + swap). Enforced via systemd-run MemoryMax+MemorySwapMax.\n");
+        s.push_str("; Accepts a unit: KB / MB / GB (e.g. 512MB, 2GB). A bare number means MiB.\n");
+        s.push_str(&format!("ram_limit = {}\n", format_ram_limit(kib)));
     }
     if let Some(ref res) = config.spoof_resolution {
         s.push_str("\n[spoof]\n");

@@ -387,12 +387,12 @@ pub fn has_systemd_run() -> bool {
 /// interactive programs get a proper terminal and full job control.  A service
 /// unit separates the process from the TTY and requires --pipe / --setenv
 /// workarounds that still don't give the child a real PTY.
-pub fn wrap_with_ram_limit(inner: Command, mib: u64) -> Command {
+pub fn wrap_with_ram_limit(inner: Command, kib: u64) -> Command {
     let mut outer = Command::new("systemd-run");
     outer.arg("--user")
          .arg("--scope")
          .arg("--quiet")
-         .arg("-p").arg(format!("MemoryMax={mib}M"))
+         .arg("-p").arg(format!("MemoryMax={kib}K"))
          .arg("-p").arg("MemorySwapMax=0")
          .arg("--");
     outer.arg(inner.get_program());
@@ -436,8 +436,8 @@ fn format_meminfo(total_kb: u64, free_kb: u64) -> String {
 /// systemd, so the process spends a brief window in the parent's cgroup.
 /// Accept only a cgroup whose `memory.max` equals the configured limit — that
 /// unambiguously identifies our scope and rejects the outer session's cgroup.
-fn find_scope_memory_current(pid: u32, mib: u64) -> Option<PathBuf> {
-    let want_max = mib.saturating_mul(1024 * 1024);
+fn find_scope_memory_current(pid: u32, kib: u64) -> Option<PathBuf> {
+    let want_max = kib.saturating_mul(1024);
     for _ in 0..40 {
         if let Ok(content) = std::fs::read_to_string(format!("/proc/{pid}/cgroup")) {
             for line in content.lines() {
@@ -466,13 +466,13 @@ fn find_scope_memory_current(pid: u32, mib: u64) -> Option<PathBuf> {
 /// `stop` is set or the memory file disappears (scope ended).
 fn meminfo_updater_loop(
     pid: u32,
-    mib: u64,
+    kib: u64,
     meminfo_path: PathBuf,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     use std::sync::atomic::Ordering;
-    let Some(mem_current) = find_scope_memory_current(pid, mib) else { return };
-    let total_kb = mib.saturating_mul(1024);
+    let Some(mem_current) = find_scope_memory_current(pid, kib) else { return };
+    let total_kb = kib; // /proc/meminfo counts in KiB, which is our unit
     while !stop.load(Ordering::Relaxed) {
         let Ok(s) = std::fs::read_to_string(&mem_current) else { break };
         if let Ok(used_bytes) = s.trim().parse::<u64>() {
@@ -919,14 +919,18 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
     // The initial contents assume zero usage; launch_bwrap starts an updater
     // thread that rewrites this file with the cgroup's live memory.current so
     // MemFree/MemAvailable shrink as the app allocates.
-    if let Some(mib) = config.ram_limit {
-        let total_kb = mib.saturating_mul(1024);
-        let mf = spoof_dir.join("meminfo");
-        if std::fs::write(&mf, format_meminfo(total_kb, total_kb)).is_ok() {
+    let meminfo_file = spoof_dir.join("meminfo");
+    if let Some(kib) = config.ram_limit {
+        let mf = &meminfo_file;
+        if std::fs::write(mf, format_meminfo(kib, kib)).is_ok() {
             if let Some(s) = mf.to_str() {
                 cmd.args(["--ro-bind", s, "/proc/meminfo"]);
             }
         }
+    } else {
+        // No limit this launch: remove any overlay left behind by a previous
+        // ram-limited run so the TUI doesn't keep reporting a phantom RAM cap.
+        let _ = std::fs::remove_file(&meminfo_file);
     }
 
     // ── XDG file-picker filtering ────────────────────────────────────────────

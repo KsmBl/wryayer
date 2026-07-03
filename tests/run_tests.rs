@@ -139,7 +139,7 @@ fn wrap_contains_user_scope_quiet_flags() {
 fn wrap_contains_memorymax_arg() {
     let args = args_of(&wrap_with_ram_limit(inner_cmd("bwrap"), 512));
     let p_idx = args.iter().position(|a| a == "-p").expect("-p flag missing");
-    assert_eq!(args[p_idx + 1], "MemoryMax=512M", "MemoryMax value must follow -p");
+    assert_eq!(args[p_idx + 1], "MemoryMax=512K", "MemoryMax value must follow -p");
 }
 
 #[test]
@@ -151,12 +151,12 @@ fn wrap_contains_memoryswapmax_zero() {
 }
 
 #[test]
-fn wrap_memorymax_reflects_mib_parameter() {
-    for mib in [256u64, 1024, 4096, 8192] {
-        let args = args_of(&wrap_with_ram_limit(inner_cmd("bwrap"), mib));
-        let expected = format!("MemoryMax={mib}M");
+fn wrap_memorymax_reflects_kib_parameter() {
+    for kib in [256u64, 1024, 4096, 8388608] {
+        let args = args_of(&wrap_with_ram_limit(inner_cmd("bwrap"), kib));
+        let expected = format!("MemoryMax={kib}K");
         let found = args.windows(2).any(|w| w[0] == "-p" && w[1] == expected);
-        assert!(found, "expected {expected} in args for {mib} MiB");
+        assert!(found, "expected {expected} in args for {kib} KiB");
     }
 }
 

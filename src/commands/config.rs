@@ -85,13 +85,14 @@ pub fn run(
     }
 
     if let Some(v) = ram_limit {
-        config.ram_limit = match v {
-            "none" | "off" | "0" | "" => None,
-            other => match other.parse::<u64>() {
-                Ok(n) if n > 0 => Some(n),
-                _ => bail!("invalid ram_limit '{other}' — expected MiB integer or 'none'"),
-            },
-        };
+        if matches!(v, "none" | "off" | "0" | "") {
+            config.ram_limit = None;
+        } else {
+            match crate::config::parse_ram_limit(v) {
+                Some(kib) => config.ram_limit = Some(kib),
+                None => bail!("invalid ram_limit '{v}' — expected a size like 512MB, 2GB, 500000KB, or 'none'"),
+            }
+        }
     }
 
     if changed {
@@ -201,6 +202,6 @@ fn print_config(app_name: &str, config: &AppConfig) {
     }
     match config.ram_limit {
         None      => eprintln!("  ram_limit   = none"),
-        Some(mib) => eprintln!("  ram_limit   = {mib} MiB"),
+        Some(kib) => eprintln!("  ram_limit   = {}", crate::config::format_ram_limit(kib)),
     }
 }

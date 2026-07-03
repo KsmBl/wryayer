@@ -328,12 +328,13 @@ fn option_descriptions_within_same_setting_are_distinct() {
 // ── RAM limit row (index 13 = CFG_RAM_LIMIT) ──────────────────────────────────
 
 #[test]
-fn options_for_ram_limit_row_has_six_choices() {
+fn options_for_ram_limit_row_has_presets_plus_custom() {
     let opts = setting_options(13);
-    assert_eq!(opts.len(), 6, "expected 6 choices for RAM limit row");
+    assert_eq!(opts.len(), 7, "expected 6 presets + custom for RAM limit row");
     assert_eq!(opts[0], "none");
     assert_eq!(opts[1], "512 MiB");
     assert_eq!(opts[5], "8 GiB");
+    assert_eq!(opts[6], "custom");
 }
 
 #[test]
@@ -350,7 +351,7 @@ fn description_for_ram_limit_row_is_nonempty() {
 
 #[test]
 fn option_descriptions_for_ram_limit_all_nonempty() {
-    for choice in 0..6 {
+    for choice in 0..7 {
         let d = option_description(13, choice);
         assert!(!d.is_empty(), "choice {choice} must have a description");
         assert!(d.len() > 10, "choice {choice} description is too short: {d:?}");
@@ -359,7 +360,7 @@ fn option_descriptions_for_ram_limit_all_nonempty() {
 
 #[test]
 fn option_descriptions_for_ram_limit_are_distinct() {
-    let descs: Vec<&str> = (0..6).map(|c| option_description(13, c)).collect();
+    let descs: Vec<&str> = (0..7).map(|c| option_description(13, c)).collect();
     for i in 0..descs.len() {
         for j in (i + 1)..descs.len() {
             assert_ne!(descs[i], descs[j], "choices {i} and {j} share a description");
@@ -377,46 +378,46 @@ fn current_index_for_ram_limit_none_is_0() {
 }
 
 #[test]
-fn current_index_for_ram_limit_each_mib_value() {
-    let cases = [(512u64, 1), (1024, 2), (2048, 3), (4096, 4), (8192, 5)];
-    for (mib, expected_idx) in cases {
-        let c = AppConfig { ram_limit: Some(mib), ..AppConfig::default() };
-        assert_eq!(setting_current(&c, 13), expected_idx, "{mib} MiB → index {expected_idx}");
+fn current_index_for_ram_limit_each_preset_value() {
+    // Preset values are KiB.
+    let cases = [(524288u64, 1), (1048576, 2), (2097152, 3), (4194304, 4), (8388608, 5)];
+    for (kib, expected_idx) in cases {
+        let c = AppConfig { ram_limit: Some(kib), ..AppConfig::default() };
+        assert_eq!(setting_current(&c, 13), expected_idx, "{kib} KiB → index {expected_idx}");
     }
 }
 
 #[test]
-fn current_index_for_ram_limit_clamped_for_unusual_values() {
-    // Values not in the preset list fall back to the nearest tier ≥ the value.
-    // The important invariant is that the index stays in [0, 5].
+fn current_index_for_ram_limit_non_preset_is_custom() {
+    // Any value that isn't a preset maps to the "custom" index (6).
     let c = AppConfig { ram_limit: Some(99999), ..AppConfig::default() };
-    let idx = setting_current(&c, 13);
-    assert!(idx <= 5, "index must be within the option list, got {idx}");
+    assert_eq!(setting_current(&c, 13), 6);
 }
 
 // ── apply_setting for RAM limit ───────────────────────────────────────────────
 
 #[test]
 fn apply_ram_limit_choice_0_sets_none() {
-    let mut c = AppConfig { ram_limit: Some(2048), ..AppConfig::default() };
+    let mut c = AppConfig { ram_limit: Some(2097152), ..AppConfig::default() };
     apply_setting(&mut c, 13, 0);
     assert_eq!(c.ram_limit, None);
 }
 
 #[test]
 fn apply_ram_limit_all_preset_choices() {
+    // Preset values are KiB. "custom" (6) is a no-op here (it opens a text input).
     let expected: &[(usize, Option<u64>)] = &[
         (0, None),
-        (1, Some(512)),
-        (2, Some(1024)),
-        (3, Some(2048)),
-        (4, Some(4096)),
-        (5, Some(8192)),
+        (1, Some(524288)),
+        (2, Some(1048576)),
+        (3, Some(2097152)),
+        (4, Some(4194304)),
+        (5, Some(8388608)),
     ];
-    for &(choice, mib) in expected {
+    for &(choice, kib) in expected {
         let mut c = AppConfig::default();
         apply_setting(&mut c, 13, choice);
-        assert_eq!(c.ram_limit, mib, "choice {choice} → {mib:?}");
+        assert_eq!(c.ram_limit, kib, "choice {choice} → {kib:?}");
     }
 }
 
@@ -424,7 +425,7 @@ fn apply_ram_limit_all_preset_choices() {
 
 #[test]
 fn cycle_ram_limit_forward_then_back_is_identity() {
-    let mut c = AppConfig { ram_limit: Some(2048), ..AppConfig::default() };
+    let mut c = AppConfig { ram_limit: Some(2097152), ..AppConfig::default() }; // 2 GiB
     let before = setting_current(&c, 13);
     cycle_setting(&mut c, 13, 1);
     cycle_setting(&mut c, 13, -1);
@@ -432,30 +433,30 @@ fn cycle_ram_limit_forward_then_back_is_identity() {
 }
 
 #[test]
-fn cycle_ram_limit_wraps_forward_at_end() {
-    // index 5 = 8192 MiB is the last choice; cycling forward wraps to 0 (none)
-    let mut c = AppConfig { ram_limit: Some(8192), ..AppConfig::default() };
+fn cycle_ram_limit_wraps_forward_past_custom_to_none() {
+    // 8 GiB is the last preset; cycling forward skips "custom" and wraps to none.
+    let mut c = AppConfig { ram_limit: Some(8388608), ..AppConfig::default() };
     cycle_setting(&mut c, 13, 1);
-    assert_eq!(c.ram_limit, None, "8192 MiB → wrap → none");
+    assert_eq!(c.ram_limit, None, "8 GiB → (skip custom) → none");
 }
 
 #[test]
-fn cycle_ram_limit_wraps_backward_at_start() {
-    // index 0 = none; cycling backward wraps to 5 (8192 MiB)
+fn cycle_ram_limit_wraps_backward_past_custom_to_8gib() {
+    // From none, cycling backward skips "custom" and lands on 8 GiB.
     let mut c = AppConfig { ram_limit: None, ..AppConfig::default() };
     cycle_setting(&mut c, 13, -1);
-    assert_eq!(c.ram_limit, Some(8192), "none → wrap back → 8192 MiB");
+    assert_eq!(c.ram_limit, Some(8388608), "none → (skip custom) → 8 GiB");
 }
 
 #[test]
 fn cycle_ram_limit_forward_steps_through_all_tiers() {
     let mut c = AppConfig { ram_limit: None, ..AppConfig::default() };
-    cycle_setting(&mut c, 13, 1); assert_eq!(c.ram_limit, Some(512));
-    cycle_setting(&mut c, 13, 1); assert_eq!(c.ram_limit, Some(1024));
-    cycle_setting(&mut c, 13, 1); assert_eq!(c.ram_limit, Some(2048));
-    cycle_setting(&mut c, 13, 1); assert_eq!(c.ram_limit, Some(4096));
-    cycle_setting(&mut c, 13, 1); assert_eq!(c.ram_limit, Some(8192));
-    cycle_setting(&mut c, 13, 1); assert_eq!(c.ram_limit, None, "wrap back to none");
+    cycle_setting(&mut c, 13, 1); assert_eq!(c.ram_limit, Some(524288));  // 512 MiB
+    cycle_setting(&mut c, 13, 1); assert_eq!(c.ram_limit, Some(1048576)); // 1 GiB
+    cycle_setting(&mut c, 13, 1); assert_eq!(c.ram_limit, Some(2097152)); // 2 GiB
+    cycle_setting(&mut c, 13, 1); assert_eq!(c.ram_limit, Some(4194304)); // 4 GiB
+    cycle_setting(&mut c, 13, 1); assert_eq!(c.ram_limit, Some(8388608)); // 8 GiB
+    cycle_setting(&mut c, 13, 1); assert_eq!(c.ram_limit, None, "skip custom, wrap to none");
 }
 
 // ── Exhaustive cross-function consistency ────────────────────────────────────
@@ -494,9 +495,10 @@ fn every_picker_row_is_cross_function_consistent() {
                 "No description available.",
                 "row {idx}: option {choice} ({opt}) is undocumented",
             );
-            // 'input' / 'edit' choices defer to a text editor, so apply_setting
-            // deliberately leaves the value unchanged — skip their round-trip.
-            if *opt == "input" || *opt == "edit" {
+            // 'input' / 'edit' / 'custom' choices defer to a text editor, so
+            // apply_setting deliberately leaves the value unchanged — skip their
+            // round-trip.
+            if matches!(*opt, "input" | "edit" | "custom") {
                 continue;
             }
             // apply_setting(idx, choice) then setting_current(idx) must return

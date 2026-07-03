@@ -1341,8 +1341,7 @@ fn draw_settings_tab(f: &mut Frame, app: &mut App, area: Rect) {
         ("Spoof term.", if config.spoof_terminal { "detect".into() } else { "off".into() }),
         ("RAM limit",   match config.ram_limit {
             None      => "none".into(),
-            Some(mib) if mib % 1024 == 0 => format!("{} GiB", mib / 1024),
-            Some(mib) => format!("{} MiB", mib),
+            Some(kib) => crate::config::format_ram_limit(kib),
         }),
         ("Resolution",  match config.spoof_resolution.as_deref() {
             None             => "system".into(),

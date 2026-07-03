@@ -256,17 +256,36 @@ fn parse_ini_ram_limit_empty_value_yields_none() {
 // ── parse_ini — ram_limit — valid integer values ──────────────────────────────
 
 #[test]
-fn parse_ini_ram_limit_valid_integers() {
-    for (s, expected) in [
-        ("ram_limit = 512",  512u64),
-        ("ram_limit = 1024", 1024),
-        ("ram_limit = 2048", 2048),
-        ("ram_limit = 4096", 4096),
-        ("ram_limit = 8192", 8192),
-        ("ram_limit = 1",    1),
+fn parse_ini_ram_limit_bare_number_is_mib_in_kib() {
+    // Bare numbers keep their legacy MiB meaning, now stored as KiB (×1024).
+    for (s, expected_kib) in [
+        ("ram_limit = 512",  512u64 * 1024),
+        ("ram_limit = 2048", 2048 * 1024),
+        ("ram_limit = 1",    1024),
     ] {
         let cfg = parse_ini(s).unwrap();
-        assert_eq!(cfg.ram_limit, Some(expected), "input '{s}'");
+        assert_eq!(cfg.ram_limit, Some(expected_kib), "input '{s}'");
+    }
+}
+
+#[test]
+fn parse_ram_limit_units() {
+    assert_eq!(parse_ram_limit("512KB"), Some(512));
+    assert_eq!(parse_ram_limit("512 kib"), Some(512));
+    assert_eq!(parse_ram_limit("512MB"), Some(512 * 1024));
+    assert_eq!(parse_ram_limit("2GB"), Some(2 * 1024 * 1024));
+    assert_eq!(parse_ram_limit("1.5G"), Some(1024 * 1024 + 512 * 1024));
+    assert_eq!(parse_ram_limit("2048"), Some(2048 * 1024)); // bare = MiB
+    assert_eq!(parse_ram_limit("none"), None);
+    assert_eq!(parse_ram_limit("0"), None);
+    assert_eq!(parse_ram_limit("garbage"), None);
+}
+
+#[test]
+fn ram_limit_round_trips_through_format() {
+    for s in ["512KB", "512MB", "2GB", "1.5G"] {
+        let kib = parse_ram_limit(s).unwrap();
+        assert_eq!(parse_ram_limit(&format_ram_limit(kib)), Some(kib), "round-trip {s}");
     }
 }
 
@@ -281,20 +300,22 @@ fn format_ini_omits_resources_section_when_no_limit() {
 
 #[test]
 fn format_ini_includes_resources_section_when_limit_set() {
-    let cfg = AppConfig { ram_limit: Some(2048), ..AppConfig::default() };
+    let cfg = AppConfig { ram_limit: Some(2 * 1024 * 1024), ..AppConfig::default() }; // 2 GiB in KiB
     let ini = format_ini(&cfg);
     assert!(ini.contains("[resources]"),    "must emit [resources] section");
-    assert!(ini.contains("ram_limit = 2048"), "must emit the MiB value");
+    assert!(ini.contains("ram_limit = 2 GiB"), "must emit the human value");
 }
 
 // ── round-trip — ram_limit ────────────────────────────────────────────────────
 
 #[test]
 fn round_trip_ram_limit_some_value() {
-    for mib in [512u64, 1024, 2048, 4096, 8192] {
-        let cfg = AppConfig { ram_limit: Some(mib), ..AppConfig::default() };
+    // Values are KiB; format_ini renders the largest whole unit and parse_ini
+    // reads it back.
+    for kib in [512u64, 1024, 524288, 2097152, 8388608] {
+        let cfg = AppConfig { ram_limit: Some(kib), ..AppConfig::default() };
         let parsed = parse_ini(&format_ini(&cfg)).unwrap();
-        assert_eq!(parsed.ram_limit, Some(mib), "round-trip failed for {mib} MiB");
+        assert_eq!(parsed.ram_limit, Some(kib), "round-trip failed for {kib} KiB");
     }
 }
 

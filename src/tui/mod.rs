@@ -1958,7 +1958,7 @@ pub fn setting_options(idx: usize) -> Vec<&'static str> {
         CFG_SPOOF_CPUINFO => vec!["system", "sample", "edit"],
         CFG_SPOOF_MACHINE_ID => vec!["system", "random", "sample", "input"],
         CFG_SPOOF_TERMINAL => vec!["off", "detect"],
-        CFG_RAM_LIMIT => vec!["none", "512 MiB", "1 GiB", "2 GiB", "4 GiB", "8 GiB"],
+        CFG_RAM_LIMIT => vec!["none", "512 MiB", "1 GiB", "2 GiB", "4 GiB", "8 GiB", "custom"],
         CFG_SPOOF_RESOLUTION => vec!["system", "1280×720", "1920×1080", "2560×1440", "3840×2160", "input"],
         CFG_AVAHI => vec!["stub", "host", "off"],
         CFG_CREATE_SHORTCUT => vec!["yes", "no"],
@@ -2014,7 +2014,7 @@ pub fn setting_description(idx: usize) -> &'static str {
         10 => "Override /proc/cpuinfo inside the sandbox.\n\n• system — expose the real CPU\n• sample — generic Intel i7 cpuinfo\n• edit   — open a text editor to write a fully custom file (pre-filled with your real CPU data)",
         11 => "Override /etc/os-release inside the sandbox.\n\nChoose a preset (Ubuntu, Arch, Windows 11, ArduinoIDE) or 'input' to type any OS name.\n'system' exposes the real OS release.",
         12 => "Detect your real terminal emulator and pass its identity into the sandbox.\n\nWalks the process tree to find kitty, foot, alacritty, WezTerm, etc., then sets the matching env var (KITTY_WINDOW_ID, WEZTERM_PANE, …).\n\nFixes fastfetch / neofetch showing 'bwrap' instead of your real terminal.",
-        13 => "Maximum RAM the app may use (RAM + swap both capped).\n\nEnforced via systemd-run MemoryMax + MemorySwapMax=0.\n'none' disables the limit. Requires systemd.",
+        13 => "Maximum RAM the app may use (RAM + swap both capped).\n\nEnforced via systemd-run MemoryMax + MemorySwapMax=0.\n'none' disables the limit. Requires systemd.\n\nPick a preset or 'custom' to type any size with a unit — e.g. 512MB, 1.5GB, 500000KB (KB/MB/GB, 1024-based).",
         14 => "Spoof the screen resolution reported to the app.\n\nCreates a fake xrandr binary inside the sandbox and sets resolution env vars. Works for apps that call xrandr as a subprocess.\n\nNote: Chromium/Electron apps query the display server directly (X11/Wayland) and are not affected by this setting.",
         15 => "How to answer apps that probe Avahi/zeroconf at startup (Electron/Chromium, KDE, CUPS-linked).\n\n• stub — private in-sandbox stub bus; no host change, no LAN broadcast (default)\n• host — start the host avahi-daemon if it's installed but stopped\n• off  — leave the harmless 'Daemon not running' warning as-is",
         16 => "Whether to pre-select 'Yes' or 'No' in the shortcut prompt shown before each install.\n\nThe prompt always appears — this only controls which answer is highlighted by default.",
@@ -2085,6 +2085,7 @@ pub fn option_description(setting_idx: usize, choice_idx: usize) -> &'static str
         (13, 3) => "2 GiB — Cap the app at 2 GiB (2048 MiB) of RAM. Good default for everyday apps.",
         (13, 4) => "4 GiB — Cap the app at 4 GiB (4096 MiB) of RAM.",
         (13, 5) => "8 GiB — Cap the app at 8 GiB (8192 MiB) of RAM.",
+        (13, 6) => "custom — Type any size with a unit: KB, MB or GB (e.g. 512MB, 1.5GB, 500000KB). 1024-based.",
         // Spoof resolution
         (14, 0) => "system — No resolution spoofing. The app sees the real screen dimensions.",
         (14, 1) => "1280×720 — Report HD (1280×720) to xrandr and via env vars.",
@@ -2169,18 +2170,15 @@ pub fn setting_current(config: &AppConfig, idx: usize) -> usize {
             _                  => 5,
         },
         CFG_SPOOF_TERMINAL => usize::from(config.spoof_terminal),
+        // Values are KiB. Exact preset -> its index; any other value -> "custom".
         CFG_RAM_LIMIT => match config.ram_limit {
-            None        => 0,
-            Some(512)   => 1,
-            Some(1024)  => 2,
-            Some(2048)  => 3,
-            Some(4096)  => 4,
-            Some(8192)  => 5,
-            Some(n) if n <= 512  => 1,
-            Some(n) if n <= 1024 => 2,
-            Some(n) if n <= 2048 => 3,
-            Some(n) if n <= 4096 => 4,
-            _           => 5,
+            None             => 0,
+            Some(524288)     => 1, // 512 MiB
+            Some(1048576)    => 2, // 1 GiB
+            Some(2097152)    => 3, // 2 GiB
+            Some(4194304)    => 4, // 4 GiB
+            Some(8388608)    => 5, // 8 GiB
+            Some(_)          => 6, // custom
         },
         CFG_SPOOF_RESOLUTION => match config.spoof_resolution.as_deref() {
             None             => 0,
@@ -2253,12 +2251,14 @@ pub fn apply_setting(config: &mut AppConfig, idx: usize, choice: usize) {
         // (11, 5) = "input" — handled by on_option_picker which opens TextInput
         (12, 0) => config.spoof_terminal = false,
         (12, 1) => config.spoof_terminal = true,
+        // RAM-limit values are KiB. "custom" (13, 6) opens a text input instead.
         (13, 0) => config.ram_limit = None,
-        (13, 1) => config.ram_limit = Some(512),
-        (13, 2) => config.ram_limit = Some(1024),
-        (13, 3) => config.ram_limit = Some(2048),
-        (13, 4) => config.ram_limit = Some(4096),
-        (13, 5) => config.ram_limit = Some(8192),
+        (13, 1) => config.ram_limit = Some(524288),  // 512 MiB
+        (13, 2) => config.ram_limit = Some(1048576), // 1 GiB
+        (13, 3) => config.ram_limit = Some(2097152), // 2 GiB
+        (13, 4) => config.ram_limit = Some(4194304), // 4 GiB
+        (13, 5) => config.ram_limit = Some(8388608), // 8 GiB
+        // (13, 6) = "custom" — handled by on_option_picker which opens TextInput
         (14, 0) => config.spoof_resolution = None,
         (14, 1) => config.spoof_resolution = Some("1280x720".to_string()),
         (14, 2) => config.spoof_resolution = Some("1920x1080".to_string()),
@@ -2289,14 +2289,21 @@ pub fn apply_setting(config: &mut AppConfig, idx: usize, choice: usize) {
 /// Cycle the setting at `idx` forward (`dir == 1`) or backward (`dir == -1`).
 /// Wraps at the ends of the option list.
 pub fn cycle_setting(config: &mut AppConfig, idx: usize, dir: i32) {
-    let n = setting_options(idx).len();
+    let opts = setting_options(idx);
+    let n = opts.len();
     if n == 0 { return; }
     let cur = setting_current(config, idx);
-    let next = if dir > 0 {
-        (cur + 1) % n
-    } else {
-        (cur + n - 1) % n
-    };
+    // "input" / "edit" / "custom" open an editor and can't be applied by cycling,
+    // so skip over them — ←/→ moves among the concrete choices and wraps past the
+    // deferred ones instead of getting stuck on them.
+    let step = if dir > 0 { 1 } else { n - 1 };
+    let mut next = (cur + step) % n;
+    for _ in 0..n {
+        if !matches!(opts[next], "input" | "edit" | "custom") {
+            break;
+        }
+        next = (next + step) % n;
+    }
     apply_setting(config, idx, next);
 }
 
@@ -2364,6 +2371,7 @@ fn on_option_picker(app: &mut App, code: KeyCode) {
                 CFG_SPOOF_OS => choice == 5,
                 CFG_SPOOF_MACHINE_ID => choice == 3,
                 CFG_SPOOF_RESOLUTION => choice == 5,
+                CFG_RAM_LIMIT => choice == 6, // "custom"
                 _ => false,
             };
             if is_input_choice {
@@ -2373,6 +2381,8 @@ fn on_option_picker(app: &mut App, code: KeyCode) {
                     CFG_SPOOF_MACHINE_ID  => cfg.spoof_machine_id.clone().unwrap_or_default(),
                     CFG_SPOOF_OS          => cfg.spoof_os.clone().unwrap_or_default(),
                     CFG_SPOOF_RESOLUTION  => cfg.spoof_resolution.clone().unwrap_or_default(),
+                    // Pre-fill the RAM input with the current limit as e.g. "2 GiB".
+                    CFG_RAM_LIMIT         => cfg.ram_limit.map(crate::config::format_ram_limit).unwrap_or_default(),
                     _ => String::new(),
                 };
                 // Clear pre-fill when current value is one of the fixed presets.
@@ -2463,6 +2473,11 @@ fn on_setting_help(app: &mut App, _code: KeyCode) {
 // ── Text input overlay (spoof settings) ──────────────────────────────────────
 
 fn set_spoof_field(config: &mut AppConfig, idx: usize, value: String) {
+    // RAM limit is numeric-with-units, not a free string.
+    if idx == CFG_RAM_LIMIT {
+        config.ram_limit = crate::config::parse_ram_limit(&value);
+        return;
+    }
     let v = if value.is_empty() { None } else { Some(value) };
     match idx {
         CFG_SPOOF_HOSTNAME    => config.spoof_hostname    = v,
