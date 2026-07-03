@@ -574,7 +574,17 @@ fn spawn_dbus_proxy(host_bus: &str, socket_path: &str) -> Option<std::process::C
 /// written outside the container.  The child carries PR_SET_PDEATHSIG so it (and
 /// its dbus-daemon) die with the sandbox even on the exec() retry path.
 fn spawn_avahi_stub(spoof_dir: &Path) -> Option<(std::process::Child, String)> {
-    let sock = spoof_dir.join(".avahi-bus");
+    // AF_UNIX socket paths are capped at ~108 bytes. A deeply nested app dir can
+    // overflow that, and dbus-daemon then silently fails to bind, leaving the
+    // stub disabled. When the in-container path is too long, fall back to a short
+    // hashed name in the runtime dir (tmpfs — the name is a hash and the file is
+    // ephemeral, so nothing identifying persists outside ~/.wryayer).
+    let mut sock = spoof_dir.join(".avahi-bus");
+    if sock.as_os_str().len() > 100 {
+        let rt = std::env::var("XDG_RUNTIME_DIR")
+            .unwrap_or_else(|_| format!("/run/user/{}", unsafe { libc::getuid() }));
+        sock = PathBuf::from(rt).join(format!(".wrav-{:x}", short_hash(spoof_dir)));
+    }
     let conf = spoof_dir.join(".avahi-bus.conf");
     let sock_str = sock.to_str()?.to_string();
     let conf_str = conf.to_str()?.to_string();
@@ -638,6 +648,15 @@ fn spawn_avahi_stub(spoof_dir: &Path) -> Option<(std::process::Child, String)> {
     let _ = child.kill();
     let _ = child.wait();
     None
+}
+
+/// A short, stable hash of a path — used to name a per-app socket without
+/// exposing the app name.
+fn short_hash(p: &Path) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    p.hash(&mut h);
+    h.finish()
 }
 
 // ── bwrap command builder ─────────────────────────────────────────────────────

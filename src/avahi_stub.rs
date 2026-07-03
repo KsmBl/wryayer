@@ -246,9 +246,13 @@ struct Msg {
     member: Option<String>,
     interface: Option<String>,
     sender: Option<String>,
+    /// Method-call arguments. The stub's methods take none, so this is only
+    /// inspected by the round-trip tests, not by `dispatch`.
+    #[allow(dead_code)]
+    body: Vec<u8>,
 }
 
-fn read_message(stream: &mut UnixStream) -> Result<Msg> {
+fn read_message<R: Read>(stream: &mut R) -> Result<Msg> {
     // Fixed header is 12 bytes, immediately followed by the u32 length of the
     // header-field array — read all 16 up front.
     let mut head = [0u8; 16];
@@ -319,7 +323,7 @@ fn read_message(stream: &mut UnixStream) -> Result<Msg> {
         }
     }
 
-    Ok(Msg { mtype, serial, reply_serial, member, interface, sender })
+    Ok(Msg { mtype, serial, reply_serial, member, interface, sender, body })
 }
 
 // ── Outgoing message building ──────────────────────────────────────────────────
@@ -469,4 +473,78 @@ impl Marshal {
 
 fn align(pos: usize, n: usize) -> usize {
     (pos + n - 1) & !(n - 1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    /// A method call survives marshal → parse with all header fields intact.
+    #[test]
+    fn method_call_round_trips() {
+        let bytes = build_call(
+            42,
+            "org.freedesktop.Avahi",
+            "/",
+            "org.freedesktop.Avahi.Server",
+            "GetState",
+            "",
+            &[],
+        );
+        let msg = read_message(&mut Cursor::new(bytes)).unwrap();
+        assert_eq!(msg.mtype, MSG_METHOD_CALL);
+        assert_eq!(msg.serial, 42);
+        assert_eq!(msg.member.as_deref(), Some("GetState"));
+        assert_eq!(msg.interface.as_deref(), Some("org.freedesktop.Avahi.Server"));
+    }
+
+    /// A method return carries its reply-serial and body back out intact.
+    #[test]
+    fn method_return_round_trips_with_u32_body() {
+        let mut b = Marshal::new();
+        b.u32(516);
+        let bytes = build_return(7, 42, ":1.5", "u", &b.buf);
+        let msg = read_message(&mut Cursor::new(bytes)).unwrap();
+        assert_eq!(msg.mtype, MSG_METHOD_RETURN);
+        assert_eq!(msg.reply_serial, 42);
+        assert_eq!(msg.body, 516u32.to_le_bytes());
+    }
+
+    /// dispatch answers the calls avahi_client_new() makes at startup with the
+    /// exact values a real avahi-daemon returns, so the client accepts the stub.
+    #[test]
+    fn dispatch_answers_startup_probes() {
+        // GetAPIVersion -> u32 516
+        let call = read_message(&mut Cursor::new(build_call(
+            1, "org.freedesktop.Avahi", "/", "org.freedesktop.Avahi.Server", "GetAPIVersion", "", &[],
+        )))
+        .unwrap();
+        let reply = read_message(&mut Cursor::new(dispatch(&call, 100).unwrap())).unwrap();
+        assert_eq!(reply.mtype, MSG_METHOD_RETURN);
+        assert_eq!(reply.reply_serial, 1);
+        assert_eq!(reply.body, AVAHI_API_VERSION.to_le_bytes());
+
+        // GetState -> i32 RUNNING (2)
+        let call = read_message(&mut Cursor::new(build_call(
+            2, "org.freedesktop.Avahi", "/", "org.freedesktop.Avahi.Server", "GetState", "", &[],
+        )))
+        .unwrap();
+        let reply = read_message(&mut Cursor::new(dispatch(&call, 101).unwrap())).unwrap();
+        assert_eq!(reply.mtype, MSG_METHOD_RETURN);
+        assert_eq!(reply.body, AVAHI_SERVER_RUNNING.to_le_bytes());
+    }
+
+    /// Unknown methods get an error reply (not a hang or a panic), which
+    /// avahi-client treats as "feature unavailable" rather than a hard failure.
+    #[test]
+    fn dispatch_errors_unknown_method() {
+        let call = read_message(&mut Cursor::new(build_call(
+            3, "org.freedesktop.Avahi", "/", "org.freedesktop.Avahi.Server", "ServiceBrowserNew", "", &[],
+        )))
+        .unwrap();
+        let reply = read_message(&mut Cursor::new(dispatch(&call, 102).unwrap())).unwrap();
+        assert_eq!(reply.mtype, MSG_ERROR);
+        assert_eq!(reply.reply_serial, 3);
+    }
 }
