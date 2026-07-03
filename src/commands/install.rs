@@ -19,6 +19,26 @@ pub fn run(
     keep_no_launcher: bool,
     sync_db: bool,
 ) -> Result<()> {
+    let result = run_inner(pkg_name, app_name, bin_names, into, keep_no_launcher, sync_db);
+    // Wipe the shared download/build cache after any successful install (even a
+    // no-op reinstall) when clean_cache is enabled, so no record of what was
+    // installed is left outside ~/.wryayer — useful when that dir is an
+    // encrypted container. Best-effort; never turns a successful install into a
+    // failure.
+    if result.is_ok() && crate::config::read_global_config().clean_cache {
+        crate::commands::clean::clean_cache();
+    }
+    result
+}
+
+fn run_inner(
+    pkg_name: &str,
+    app_name: Option<&str>,
+    bin_names: &[String],
+    into: Option<&str>,
+    keep_no_launcher: bool,
+    sync_db: bool,
+) -> Result<()> {
     if sync_db {
         eprintln!("  Updating package databases...");
         let ok = std::process::Command::new("sudo")
@@ -427,27 +447,7 @@ pub fn run(
         }
     }
 
-    // Optionally wipe the shared download/build cache so no record of what was
-    // installed is left outside ~/.wryayer (useful when that dir is an encrypted
-    // container). Best-effort; a failure never fails the install.
-    if crate::config::read_global_config().clean_cache {
-        clean_wryayer_cache();
-    }
-
     Ok(())
-}
-
-/// Delete `~/.cache/wryayer` (the download, build, and dependency-resolution
-/// caches). Called after an install when `clean_cache` is enabled. Best-effort.
-fn clean_wryayer_cache() {
-    let Ok(home) = std::env::var("HOME") else { return };
-    let cache = PathBuf::from(home).join(".cache").join("wryayer");
-    if cache.exists() {
-        match fs::remove_dir_all(&cache) {
-            Ok(()) => eprintln!("Cleaned cache: {}", cache.display()),
-            Err(e) => eprintln!("warning: failed to clean cache {}: {e:#}", cache.display()),
-        }
-    }
 }
 
 /// Recreate the well-known top-level symlinks that the `filesystem` package

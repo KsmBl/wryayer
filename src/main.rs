@@ -151,6 +151,8 @@ enum Commands {
         #[arg(long, short)]
         verbose: bool,
     },
+    /// Delete the shared download/build cache (~/.cache/wryayer)
+    Clean,
     /// Print shell completion script to stdout
     Completions {
         /// Shell to generate completions for (bash, fish, zsh, elvish, powershell)
@@ -356,6 +358,7 @@ fn main() {
         Commands::SnapshotPrune { app_name, keep } => commands::snapshot::prune(&app_name, keep),
         Commands::Tui => tui::run(),
         Commands::Dedup { verbose } => commands::dedup::run(verbose),
+        Commands::Clean => commands::clean::run(),
         Commands::Completions { shell } => {
             generate(shell, &mut Cli::command(), "wryayer", &mut std::io::stdout());
             Ok(())

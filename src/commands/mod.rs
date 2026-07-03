@@ -1,5 +1,6 @@
 pub mod export;
 pub mod snapshot;
+pub mod clean;
 pub mod config;
 pub mod dedup;
 pub mod import;

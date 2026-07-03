@@ -395,6 +395,18 @@ wryayer dedup           # silent
 wryayer dedup --verbose # print every file linked
 ```
 
+### Clean the download cache
+
+`~/.cache/wryayer` holds downloaded packages, AUR build dirs, and resolved
+dependency lists — which reveal what you've installed. Wipe it at any time:
+
+```fish
+wryayer clean
+```
+
+Set `clean_cache = on` (Settings → Clean cache) to do this automatically after
+every install, so nothing recording your app set is left outside `~/.wryayer`.
+
 ### Scan for missing shared libraries
 
 If an app crashes with a missing `.so` error, this command finds and installs the missing package:
