@@ -10,7 +10,7 @@ use crate::commands::dedup::format_bytes;
 use crate::config::{AppConfig, AvahiMode, LocalDelete, TempMode};
 
 use super::{
-    App, Screen, Tab, CFG_SAVE, CFG_SHARES, CFG_GAME_EXE, CFG_GAME_PREFIX,
+    App, Screen, Tab, CFG_SAVE, CFG_SHARES, CFG_CREATE_SHORTCUT, CFG_GAME_EXE, CFG_GAME_PREFIX,
     app_cfg_save_idx, setting_description, setting_options, setting_current, setting_title,
     HOSTNAME_SAMPLE, MACHINE_ID_SAMPLE, USERNAME_SAMPLE,
 };
@@ -1256,7 +1256,7 @@ fn draw_settings_tab(f: &mut Frame, app: &mut App, area: Rect) {
     // ── Left: settings list ───────────────────────────────────────────────────
     let list_block = Block::default()
         .borders(Borders::ALL).border_type(c_border_type())
-        .title(" Default Settings ")
+        .title(" Settings ")
         .title_style(Style::default().fg(c_accent()).add_modifier(Modifier::BOLD))
         .border_style(Style::default().fg(c_accent()));
     let list_inner = list_block.inner(cols[0]);
@@ -1347,11 +1347,39 @@ fn draw_settings_tab(f: &mut Frame, app: &mut App, area: Rect) {
         }),
     ];
 
-    // Reserve last 2 rows for separator + save
-    let max_rows = (list_inner.height as usize).saturating_sub(2);
-    for (idx, (label, value)) in rows.iter().enumerate().take(max_rows) {
+    // The list is split into two labelled sections: "Default settings" (the
+    // per-app sandbox defaults, rows 0..CFG_CREATE_SHORTCUT) and "Application
+    // settings" (wryayer's own behaviour/appearance, the rest). The headers are
+    // non-selectable lines drawn between the rows, so each row is pushed down by
+    // the number of headers above it while keeping its CFG_ selection index.
+    let app_section_start = CFG_CREATE_SHORTCUT;
+    let sep_y = list_inner.y + list_inner.height.saturating_sub(2);
+
+    let header = |f: &mut Frame, y: u16, label: &str| {
+        if y >= sep_y {
+            return;
+        }
+        let used = label.chars().count() + 1;
+        let fill = (list_inner.width as usize).saturating_sub(used);
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(format!("{label} "), Style::default().fg(c_accent()).add_modifier(Modifier::BOLD)),
+                Span::styled("─".repeat(fill), Style::default().fg(c_dim())),
+            ])),
+            Rect { x: list_inner.x, y, width: list_inner.width, height: 1 },
+        );
+    };
+    header(f, list_inner.y, "Default settings");
+    header(f, list_inner.y + app_section_start as u16 + 1, "Application settings");
+
+    for (idx, (label, value)) in rows.iter().enumerate() {
+        // One header sits above the default section; a second above the app one.
+        let header_offset = if idx < app_section_start { 1 } else { 2 };
+        let y = list_inner.y + idx as u16 + header_offset;
+        if y >= sep_y {
+            continue; // ran out of room before the separator/save row
+        }
         let is_sel = idx == selected;
-        let y = list_inner.y + idx as u16;
         let bg = if is_sel { c_select() } else { Color::Reset };
         let val_color = match value.trim() {
             "on" => c_green(),
