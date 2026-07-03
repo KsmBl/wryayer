@@ -223,7 +223,7 @@ fn cycle_on_empty_options_is_noop() {
     let mut c = AppConfig::default();
     let before = c.clone();
     cycle_setting(&mut c, 6, 1);  // CFG_SHARES — no options
-    cycle_setting(&mut c, 16, -1); // CFG_SAVE — no options
+    cycle_setting(&mut c, 20, -1); // CFG_SAVE — no options
     assert_eq!(c.network, before.network);
     assert_eq!(c.temp_mode, before.temp_mode);
     assert_eq!(c.temp_delete, before.temp_delete);
@@ -456,4 +456,60 @@ fn cycle_ram_limit_forward_steps_through_all_tiers() {
     cycle_setting(&mut c, 13, 1); assert_eq!(c.ram_limit, Some(4096));
     cycle_setting(&mut c, 13, 1); assert_eq!(c.ram_limit, Some(8192));
     cycle_setting(&mut c, 13, 1); assert_eq!(c.ram_limit, None, "wrap back to none");
+}
+
+// ── Exhaustive cross-function consistency ────────────────────────────────────
+//
+// The settings rows are addressed by index across six functions
+// (setting_options / _title / _description / option_description /
+// setting_current / apply_setting) plus the UI. When a row is inserted every
+// index shifts, and a single missed spot silently mis-maps a row. This test
+// walks every picker row and asserts all six functions agree, turning that
+// whole class of drift into a loud failure instead of a wrong-row-edits-wrong-
+// setting bug.
+#[test]
+fn every_picker_row_is_cross_function_consistent() {
+    use wryayer::tui::CFG_LEN;
+    let base = AppConfig::default();
+    for idx in 0..CFG_LEN {
+        let opts = setting_options(idx);
+        if opts.is_empty() {
+            continue; // non-picker rows (shared dirs, save) drive their own screens
+        }
+        // A picker row must present a real title and description.
+        assert_ne!(setting_title(idx), "Option", "row {idx}: picker row has no title");
+        assert_ne!(
+            setting_description(idx),
+            "No description available.",
+            "row {idx}: picker row has no description",
+        );
+        // The stored value must map to a real option index.
+        let cur = setting_current(&base, idx);
+        assert!(cur < opts.len(), "row {idx}: current index {cur} >= {} options", opts.len());
+
+        for (choice, opt) in opts.iter().enumerate() {
+            // Every choice must be documented.
+            assert_ne!(
+                option_description(idx, choice),
+                "No description available.",
+                "row {idx}: option {choice} ({opt}) is undocumented",
+            );
+            // 'input' / 'edit' choices defer to a text editor, so apply_setting
+            // deliberately leaves the value unchanged — skip their round-trip.
+            if *opt == "input" || *opt == "edit" {
+                continue;
+            }
+            // apply_setting(idx, choice) then setting_current(idx) must return
+            // `choice`: this is what fails if two functions map the same index to
+            // different settings.
+            let mut cfg = AppConfig::default();
+            apply_setting(&mut cfg, idx, choice);
+            assert_eq!(
+                setting_current(&cfg, idx),
+                choice,
+                "row {idx} ('{}'): option {choice} ('{opt}') did not round-trip apply -> current",
+                setting_title(idx),
+            );
+        }
+    }
 }
