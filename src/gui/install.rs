@@ -12,7 +12,8 @@ use gtk4 as gtk;
 use gtk::prelude::*;
 use gtk::glib;
 
-use super::{op, Ctx};
+use super::{confirm, op, text_prompt, Ctx};
+use crate::manifest::read_manifest;
 
 struct PkgResult {
     name: String,
@@ -174,6 +175,12 @@ pub fn build_tab(ctx: &Ctx) -> gtk::Box {
             if names.is_empty() {
                 return;
             }
+            // If any ticked package is already installed, resolve that first
+            // (uninstall or install-a-copy) before touching the batch.
+            if let Some(existing) = names.iter().find(|n| read_manifest(n).is_ok()) {
+                already_installed_dialog(&ctx, existing);
+                return;
+            }
             let jobs: Vec<(String, Vec<String>)> = names
                 .iter()
                 .map(|n| (format!("install {n}"), vec!["install".into(), n.clone()]))
@@ -186,6 +193,92 @@ pub fn build_tab(ctx: &Ctx) -> gtk::Box {
     }
 
     vbox
+}
+
+/// Shown when a package to install is already installed: offer to install a
+/// second copy under a new name, or uninstall the existing one (mirrors the
+/// TUI's already-installed prompt).
+fn already_installed_dialog(ctx: &Ctx, pkg: &str) {
+    let win = gtk::Window::builder()
+        .title("Already installed")
+        .transient_for(&ctx.window)
+        .modal(true)
+        .default_width(400)
+        .build();
+
+    let vbox = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    vbox.set_margin_top(12);
+    vbox.set_margin_bottom(12);
+    vbox.set_margin_start(12);
+    vbox.set_margin_end(12);
+
+    let msg = gtk::Label::new(None);
+    msg.set_xalign(0.0);
+    msg.set_wrap(true);
+    msg.set_markup(&format!(
+        "<b>“{}” is already installed.</b>\nInstall a second copy under a new name, or uninstall the existing one?",
+        gtk::glib::markup_escape_text(pkg)
+    ));
+    vbox.append(&msg);
+
+    let copy_btn = gtk::Button::with_label("Install another copy…");
+    let uninstall_btn = gtk::Button::with_label("Uninstall existing");
+    uninstall_btn.add_css_class("destructive-action");
+    let bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    let spacer = gtk::Label::new(None);
+    spacer.set_hexpand(true);
+    let cancel = gtk::Button::with_label("Cancel");
+    bar.append(&copy_btn);
+    bar.append(&uninstall_btn);
+    bar.append(&spacer);
+    bar.append(&cancel);
+    vbox.append(&bar);
+
+    win.set_child(Some(&vbox));
+    win.present();
+
+    {
+        let win = win.clone();
+        cancel.connect_clicked(move |_| win.close());
+    }
+    {
+        let ctx = ctx.clone();
+        let win = win.clone();
+        let pkg = pkg.to_string();
+        copy_btn.connect_clicked(move |_| {
+            win.close();
+            let ctx2 = ctx.clone();
+            let pkg2 = pkg.clone();
+            text_prompt(&ctx, "Install another copy", "Name for the new copy:", &format!("{pkg}-2"), move |name| {
+                let name = name.trim().to_string();
+                if name.is_empty() {
+                    return;
+                }
+                op::run_operation(&ctx2.window, "Install",
+                    vec!["install".into(), pkg2.clone(), "--app-name".into(), name], {
+                    let ctx = ctx2.clone();
+                    move |_| ctx.refresh()
+                });
+            });
+        });
+    }
+    {
+        let ctx = ctx.clone();
+        let win = win.clone();
+        let pkg = pkg.to_string();
+        uninstall_btn.connect_clicked(move |_| {
+            win.close();
+            let pkg2 = pkg.clone();
+            confirm(&ctx, &format!("Uninstall “{pkg}”?"),
+                "This deletes the existing app and its launchers.", true, {
+                let ctx = ctx.clone();
+                move || op::run_operation(&ctx.window, "Remove", vec!["remove".into(), pkg2.clone()], {
+                    let ctx = ctx.clone();
+                    move |_| ctx.refresh()
+                })
+            });
+        });
+    }
 }
 
 /// One result row: a tick box + the package name/description.
