@@ -579,7 +579,107 @@ fn build_space_tab(ctx: &Ctx) -> gtk::Box {
             });
         });
     }
+
+    vbox.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+
+    // ── Per-app disk usage ──────────────────────────────────────────────
+    let head = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let usage_lbl = gtk::Label::new(None);
+    usage_lbl.set_xalign(0.0);
+    usage_lbl.set_hexpand(true);
+    usage_lbl.set_markup("<b>Disk usage</b>");
+    let refresh_btn = gtk::Button::with_label("Refresh");
+    head.append(&usage_lbl);
+    head.append(&refresh_btn);
+    vbox.append(&head);
+
+    let total_lbl = gtk::Label::new(Some("Computing…"));
+    total_lbl.set_xalign(0.0);
+    vbox.append(&total_lbl);
+
+    let list = gtk::ListBox::new();
+    list.set_selection_mode(gtk::SelectionMode::None);
+    let scroller = gtk::ScrolledWindow::new();
+    scroller.set_vexpand(true);
+    scroller.set_child(Some(&list));
+    vbox.append(&scroller);
+
+    let populate: Rc<dyn Fn()> = {
+        let list = list.clone();
+        let total_lbl = total_lbl.clone();
+        Rc::new(move || {
+            while let Some(c) = list.first_child() {
+                list.remove(&c);
+            }
+            total_lbl.set_text("Computing…");
+            let rx = spawn_usage();
+            let list = list.clone();
+            let total_lbl = total_lbl.clone();
+            glib::timeout_add_local(Duration::from_millis(80), move || match rx.try_recv() {
+                Ok(rows) => {
+                    let total: u64 = rows.iter().map(|(_, b)| *b).sum();
+                    total_lbl.set_markup(&format!("Total: <b>{}</b>", format_bytes(total)));
+                    for (name, bytes) in &rows {
+                        let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+                        row.set_margin_top(2);
+                        row.set_margin_bottom(2);
+                        row.set_margin_start(4);
+                        row.set_margin_end(4);
+                        let n = gtk::Label::new(Some(name));
+                        n.set_xalign(0.0);
+                        n.set_hexpand(true);
+                        let s = gtk::Label::new(Some(&format_bytes(*bytes)));
+                        s.set_xalign(1.0);
+                        row.append(&n);
+                        row.append(&s);
+                        list.append(&row);
+                    }
+                    glib::ControlFlow::Break
+                }
+                Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                Err(mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
+            });
+        })
+    };
+    populate();
+    {
+        let populate = populate.clone();
+        refresh_btn.connect_clicked(move |_| populate());
+    }
+
     vbox
+}
+
+/// Compute each installed app's on-disk size with `du`, off the main thread.
+/// Returns rows sorted largest-first.
+fn spawn_usage() -> mpsc::Receiver<Vec<(String, u64)>> {
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let home = std::env::var("HOME").unwrap_or_default();
+        let mut rows: Vec<(String, u64)> = list_all_apps()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|m| {
+                let path = format!("{home}/.wryayer/{}", m.app.name);
+                let bytes = Command::new("du")
+                    .args(["-sb", &path])
+                    .output()
+                    .ok()
+                    .and_then(|o| {
+                        String::from_utf8_lossy(&o.stdout)
+                            .split_whitespace()
+                            .next()?
+                            .parse::<u64>()
+                            .ok()
+                    })
+                    .unwrap_or(0);
+                (m.app.name, bytes)
+            })
+            .collect();
+        rows.sort_by_key(|r| std::cmp::Reverse(r.1));
+        let _ = tx.send(rows);
+    });
+    rx
 }
 
 // ── App actions ────────────────────────────────────────────────────────────────
