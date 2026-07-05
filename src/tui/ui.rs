@@ -420,7 +420,7 @@ fn draw_snapshot_manager(f: &mut Frame, area: Rect, app_name: &str, snaps: &[Str
 
     f.render_widget(
         Paragraph::new(Span::styled(
-            " [↑↓] Choose  [Enter] Roll back  [Esc] Close",
+            " [↑↓] Choose  [Enter] Roll back  [d] Delete  [Esc] Close",
             Style::default().fg(c_dim()),
         )),
         chunks[1],

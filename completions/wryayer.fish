@@ -39,6 +39,39 @@ function __wryayer_rollback_snapshots
     end
 end
 
+# Snapshot labels for the app that follows 'snapshot-delete' on the command line.
+function __wryayer_snapdel_snapshots
+    set -l cmd (commandline -opc)
+    set -l past 0
+    for tok in $cmd
+        if test $tok = snapshot-delete
+            set past 1
+        else if test $past = 1; and not string match -q -- '-*' $tok
+            set -l snap_dir ~/.wryayer/$tok/.snapshots
+            if test -d $snap_dir
+                for d in $snap_dir/*/
+                    basename $d
+                end
+            end
+            return
+        end
+    end
+end
+
+# True when an app name already follows 'snapshot-delete'.
+function __wryayer_snapdel_has_app
+    set -l cmd (commandline -opc)
+    set -l past 0
+    for tok in $cmd
+        if test $tok = snapshot-delete
+            set past 1
+        else if test $past = 1; and not string match -q -- '-*' $tok
+            return 0
+        end
+    end
+    return 1
+end
+
 # True when at least one positional arg already follows 'rollback'.
 function __wryayer_rollback_needs_snapshot
     set -l cmd (commandline -opc)
@@ -73,7 +106,7 @@ complete -c wryayer -f
 # Front-end subcommands (tui/gui) are appended by install.sh to match the build;
 # they are kept in this guard list so once one is typed, top-level completions stop.
 set -l cmds install remove list run update repair config export import \
-           snapshot rollback snapshots snapshot-prune tui gui dedup completions
+           snapshot rollback snapshots snapshot-prune snapshot-delete tui gui dedup completions
 
 complete -c wryayer -n "not __fish_seen_subcommand_from $cmds" -a install         -d 'Install a package in an isolated directory'
 complete -c wryayer -n "not __fish_seen_subcommand_from $cmds" -a remove          -d 'Remove an installed app and its launchers'
@@ -132,6 +165,12 @@ complete -c wryayer -n '__fish_seen_subcommand_from rollback; and not __wryayer_
     -a '(__wryayer_apps)' -d 'installed app'
 complete -c wryayer -n '__fish_seen_subcommand_from rollback; and __wryayer_rollback_needs_snapshot' \
     -a '(__wryayer_rollback_snapshots)' -d 'snapshot label'
+
+# ── snapshot-delete — app name, then snapshot label ──────────────────────────
+complete -c wryayer -n '__fish_seen_subcommand_from snapshot-delete; and not __wryayer_snapdel_has_app' \
+    -a '(__wryayer_apps)' -d 'installed app'
+complete -c wryayer -n '__fish_seen_subcommand_from snapshot-delete; and __wryayer_snapdel_has_app' \
+    -a '(__wryayer_snapdel_snapshots)' -d 'snapshot label'
 
 # ── snapshot-prune ────────────────────────────────────────────────────────────
 complete -c wryayer -n '__fish_seen_subcommand_from snapshot-prune' -a '(__wryayer_apps)' -d 'installed app'

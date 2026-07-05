@@ -142,6 +142,21 @@ pub fn prune(app_name: &str, keep: usize) -> Result<()> {
     Ok(())
 }
 
+/// Delete a single snapshot by label.
+pub fn delete(app_name: &str, label: &str) -> Result<()> {
+    read_manifest(app_name)
+        .with_context(|| format!("'{app_name}' is not installed"))?;
+
+    let path = snapshots_dir(app_name)?.join(label);
+    if !path.is_dir() {
+        bail!("snapshot '{label}' not found for {app_name}");
+    }
+    fs::remove_dir_all(&path)
+        .with_context(|| format!("failed to remove snapshot {}", path.display()))?;
+    eprintln!("Deleted snapshot {app_name}/{label}");
+    Ok(())
+}
+
 pub fn latest(app_name: &str) -> Result<Option<String>> {
     Ok(labels(app_name)?.into_iter().next())
 }

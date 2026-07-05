@@ -212,6 +212,7 @@ pub enum PendingAction {
     Export(String),
     Snapshot(String),
     Rollback(String, String),
+    DeleteSnapshot(String, String),
 }
 
 // ── Tabs ──────────────────────────────────────────────────────────────────────
@@ -896,6 +897,22 @@ fn on_snapshot_manager(app: &mut App, code: KeyCode) {
                         "Press y to roll back, n or Esc to cancel.".into(),
                     ],
                     action: PendingAction::Rollback(name, snap),
+                    danger: true,
+                };
+                app.needs_clear = true;
+            }
+        }
+        KeyCode::Char('d') | KeyCode::Delete => {
+            if let Some(snap) = snaps.get(*selected).cloned() {
+                let name = app_name.clone();
+                app.screen = Screen::Confirm {
+                    title: "Delete snapshot?".into(),
+                    body: vec![
+                        format!("Delete snapshot {snap} of '{name}'?"),
+                        String::new(),
+                        "Press y to delete, n or Esc to cancel.".into(),
+                    ],
+                    action: PendingAction::DeleteSnapshot(name, snap),
                     danger: true,
                 };
                 app.needs_clear = true;
@@ -1733,6 +1750,24 @@ fn execute_action(app: &mut App, action: PendingAction) {
             launch_op(app, format!("Snapshot — {name}"), vec!["snapshot".into(), name], None, true),
         PendingAction::Rollback(name, snap) =>
             launch_op(app, format!("Rollback — {name}"), vec!["rollback".into(), name, snap], None, true),
+        PendingAction::DeleteSnapshot(name, snap) => {
+            match crate::commands::snapshot::delete(&name, &snap) {
+                Ok(_) => {
+                    app.status = format!("Deleted snapshot {snap}");
+                    let snaps = crate::commands::snapshot::labels(&name).unwrap_or_default();
+                    app.screen = if snaps.is_empty() {
+                        Screen::Main
+                    } else {
+                        Screen::SnapshotManager { app_name: name, snaps, selected: 0 }
+                    };
+                }
+                Err(e) => {
+                    app.status = format!("delete failed: {e:#}");
+                    app.screen = Screen::Main;
+                }
+            }
+            app.needs_clear = true;
+        }
     }
 }
 

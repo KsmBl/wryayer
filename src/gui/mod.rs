@@ -703,10 +703,13 @@ fn open_snapshots(ctx: &Ctx, name: &str) {
 
     let bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     let rollback = gtk::Button::with_label("Roll back to selected");
+    let delete = gtk::Button::with_label("Delete selected");
+    delete.add_css_class("destructive-action");
     let spacer = gtk::Label::new(None);
     spacer.set_hexpand(true);
     let close = gtk::Button::with_label("Close");
     bar.append(&rollback);
+    bar.append(&delete);
     bar.append(&spacer);
     bar.append(&close);
     vbox.append(&bar);
@@ -739,6 +742,31 @@ fn open_snapshots(ctx: &Ctx, name: &str) {
                     let ctx = ctx2.clone();
                     move |_| ctx.refresh()
                 });
+            });
+        });
+    }
+    {
+        let ctx = ctx.clone();
+        let selected = selected.clone();
+        let refill = refill.clone();
+        let name = name.to_string();
+        delete.connect_clicked(move |_| {
+            let Some(label) = selected() else {
+                ctx.status("Select a snapshot first.");
+                return;
+            };
+            let ctx2 = ctx.clone();
+            let refill2 = refill.clone();
+            let name2 = name.clone();
+            confirm(&ctx, &format!("Delete snapshot {label}?"),
+                "This permanently removes this snapshot. The app itself is unaffected.", true, move || {
+                match crate::commands::snapshot::delete(&name2, &label) {
+                    Ok(_) => {
+                        ctx2.status(&format!("Deleted snapshot {label}."));
+                        refill2();
+                    }
+                    Err(e) => ctx2.status(&format!("Delete failed: {e}")),
+                }
             });
         });
     }

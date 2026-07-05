@@ -143,6 +143,13 @@ enum Commands {
         #[arg(long, default_value = "3")]
         keep: usize,
     },
+    /// Delete a single snapshot by label
+    SnapshotDelete {
+        /// The app name as shown by `wryayer list`
+        app_name: String,
+        /// Snapshot label to delete (see `wryayer snapshots <app>`)
+        snapshot: String,
+    },
     /// Launch the interactive TUI
     Tui,
     /// Launch the native GTK desktop GUI (requires a build with --features gui)
@@ -358,6 +365,9 @@ fn main() {
         }
         Commands::Snapshots { app_name } => commands::snapshot::list(&app_name),
         Commands::SnapshotPrune { app_name, keep } => commands::snapshot::prune(&app_name, keep),
+        Commands::SnapshotDelete { app_name, snapshot } => {
+            commands::snapshot::delete(&app_name, &snapshot)
+        }
         Commands::Tui => {
             #[cfg(feature = "tui")]
             {
