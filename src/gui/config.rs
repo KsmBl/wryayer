@@ -154,6 +154,70 @@ fn entry(form: &gtk::Box, caption: &str, value: &str) -> gtk::Entry {
     e
 }
 
+/// A labelled entry with a "Random" button that fills it with a freshly
+/// generated value. The value is stored verbatim as a custom string, so it
+/// never changes on its own — only when the button is clicked again.
+fn entry_random(form: &gtk::Box, caption: &str, value: &str, gen: fn() -> String) -> gtk::Entry {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let l = gtk::Label::new(Some(caption));
+    l.set_xalign(0.0);
+    l.set_width_chars(22);
+    row.append(&l);
+
+    let e = gtk::Entry::new();
+    e.set_text(value);
+    e.set_hexpand(true);
+    row.append(&e);
+
+    let b = gtk::Button::with_label("Random");
+    b.set_tooltip_text(Some(
+        "Fill with a random value. It is saved as-is and never changes until you click Random again.",
+    ));
+    let e2 = e.clone();
+    b.connect_clicked(move |_| e2.set_text(&gen()));
+    row.append(&b);
+
+    form.append(&row);
+    e
+}
+
+/// Cheap non-cryptographic randomness — enough to seed a plausible hostname or
+/// username. Mixes the clock, the pid and a monotonic counter so successive
+/// calls differ even within the same nanosecond.
+fn rng() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    static CTR: AtomicU64 = AtomicU64::new(0);
+    let t = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let c = CTR.fetch_add(1, Ordering::Relaxed);
+    let mut x = t
+        ^ (std::process::id() as u64).rotate_left(17)
+        ^ c.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    x
+}
+
+fn pick<'a>(items: &[&'a str]) -> &'a str {
+    items[(rng() as usize) % items.len()]
+}
+
+/// A random but realistic-looking hostname, e.g. `desktop-a3f9c1`.
+fn random_hostname() -> String {
+    let prefix = pick(&["pc", "desktop", "host", "arch", "box", "node", "lab", "workstation"]);
+    format!("{prefix}-{:06x}", rng() & 0xff_ffff)
+}
+
+/// A random but realistic-looking username, e.g. `max47`.
+fn random_username() -> String {
+    let name = pick(&["alex", "sam", "max", "lee", "kai", "noah", "mia", "ivy", "leo", "zoe", "user"]);
+    format!("{name}{:02}", rng() % 100)
+}
+
 /// Build the form widgets into `form` and return a closure that reconstructs an
 /// `AppConfig` from them (carrying over anything not shown from the original).
 fn build_form(form: &gtk::Box, cfg: AppConfig, is_global: bool, ctx: &Ctx) -> Rc<dyn Fn() -> AppConfig> {
@@ -180,8 +244,8 @@ fn build_form(form: &gtk::Box, cfg: AppConfig, is_global: bool, ctx: &Ctx) -> Rc
         match cfg.avahi { AvahiMode::Stub => 0, AvahiMode::Host => 1, AvahiMode::Off => 2 });
 
     header(form, "Identity");
-    let spoof_hostname = entry(form, "Hostname", cfg.spoof_hostname.as_deref().unwrap_or(""));
-    let spoof_username = entry(form, "Username ($USER)", cfg.spoof_username.as_deref().unwrap_or(""));
+    let spoof_hostname = entry_random(form, "Hostname", cfg.spoof_hostname.as_deref().unwrap_or(""), random_hostname);
+    let spoof_username = entry_random(form, "Username ($USER)", cfg.spoof_username.as_deref().unwrap_or(""), random_username);
     let spoof_machine_id = entry(form, "Machine ID / \"random\"", cfg.spoof_machine_id.as_deref().unwrap_or(""));
     let spoof_os = entry(form, "OS name", cfg.spoof_os.as_deref().unwrap_or(""));
     let spoof_cpuinfo = entry(form, "cpuinfo file path", cfg.spoof_cpuinfo.as_deref().unwrap_or(""));
