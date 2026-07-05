@@ -1954,7 +1954,13 @@ pub fn setting_options(idx: usize) -> Vec<&'static str> {
         5 => vec!["never", "on_start", "on_close"],
         CFG_SPOOF_HOSTNAME | CFG_SPOOF_USERNAME => vec!["system", "sample", "input", "random"],
         CFG_SPOOF_OS => vec!["system", "Ubuntu", "Arch", "Windows 11", "ArduinoIDE", "input"],
-        CFG_SPOOF_CPUINFO => vec!["system", "sample", "edit"],
+        CFG_SPOOF_CPUINFO => {
+            // system, sample, the built-in CPU presets, then the custom editor.
+            let mut v = vec!["system", "sample"];
+            v.extend(crate::cpu::CPU_PROFILES.iter().map(|p| p.label));
+            v.push("edit");
+            v
+        }
         CFG_SPOOF_MACHINE_ID => vec!["system", "random", "sample", "input"],
         CFG_SPOOF_TERMINAL => vec!["off", "detect"],
         CFG_RAM_LIMIT => vec!["none", "512 MB", "1 GB", "2 GB", "4 GB", "8 GB", "custom"],
@@ -2008,7 +2014,7 @@ pub fn setting_description(idx: usize) -> &'static str {
         7 => "Override /etc/hostname and $HOSTNAME inside the sandbox.\n\n• system — use the real hostname\n• sample — sets it to 'workstation'\n• input  — type any custom name\n• random — fill with a generated name, kept fixed until you pick random again",
         8 => "Override $USER and $LOGNAME inside the sandbox.\n\n• system — use your real login name\n• sample — sets it to 'user'\n• input  — type any custom name\n• random — fill with a generated name, kept fixed until you pick random again",
         9 => "Override /etc/machine-id inside the sandbox.\n\n• system — real machine ID\n• random — fresh UUID every launch\n• sample — fixed placeholder\n• input  — type a 32-char hex value",
-        10 => "Override /proc/cpuinfo inside the sandbox.\n\n• system — expose the real CPU\n• sample — generic Intel i7 cpuinfo\n• edit   — open a text editor to write a fully custom file (pre-filled with your real CPU data)",
+        10 => "Override /proc/cpuinfo inside the sandbox — pick a CPU to present.\n\n• system — expose the real CPU\n• sample — generic Intel i7 cpuinfo\n• <CPU>  — a built-in profile spanning budget → flagship → server, Intel and AMD\n• edit   — open a text editor to write a fully custom file (pre-filled with your real CPU data)",
         11 => "Override /etc/os-release inside the sandbox.\n\nChoose a preset (Ubuntu, Arch, Windows 11, ArduinoIDE) or 'input' to type any OS name.\n'system' exposes the real OS release.",
         12 => "Detect your real terminal emulator and pass its identity into the sandbox.\n\nWalks the process tree to find kitty, foot, alacritty, WezTerm, etc., then sets the matching env var (KITTY_WINDOW_ID, WEZTERM_PANE, …).\n\nFixes fastfetch / neofetch showing 'bwrap' instead of your real terminal.",
         13 => "Maximum RAM the app may use (RAM + swap both capped).\n\nEnforced via systemd-run MemoryMax + MemorySwapMax=0.\n'none' disables the limit. Requires systemd.\n\nPick a preset or 'custom' to type any size with a unit — e.g. 512MB, 1.5GB, 500000KB (KB/MB/GB, 1024-based).",
@@ -2025,6 +2031,16 @@ pub fn setting_description(idx: usize) -> &'static str {
 
 /// Description of the specific choice `choice_idx` within the setting at `idx`.
 pub fn option_description(setting_idx: usize, choice_idx: usize) -> &'static str {
+    // The cpuinfo row's presets are data-driven, so describe them from the table.
+    if setting_idx == CFG_SPOOF_CPUINFO {
+        let n = crate::cpu::CPU_PROFILES.len();
+        return match choice_idx {
+            0 => "system — Expose the real /proc/cpuinfo to the app. No spoofing.",
+            1 => "sample — Bind a built-in generic Intel Core i7-8550U cpuinfo.",
+            c if c >= 2 && c < 2 + n => crate::cpu::CPU_PROFILES[c - 2].desc,
+            _ => "edit — Open a text editor to write a fully custom /proc/cpuinfo (pre-filled with your real CPU).",
+        };
+    }
     match (setting_idx, choice_idx) {
         // Network
         (0, 0) => "on — Allow outgoing network connections from the sandbox.",
@@ -2062,10 +2078,7 @@ pub fn option_description(setting_idx: usize, choice_idx: usize) -> &'static str
         (9, 1) => "random — Generate a fresh 32-char hex UUID on every launch. Prevents cross-session fingerprinting.",
         (9, 2) => "sample — Use a fixed placeholder ID: cafebabe0011223344556677deadbeef. Same every run, but not your real ID.",
         (9, 3) => "input — Type your own 32-char hex machine-id. Useful for reproducing a specific identity.",
-        // CPU info
-        (10, 0) => "system — Expose the real /proc/cpuinfo to the app. No spoofing.",
-        (10, 1) => "sample — Bind a built-in generic Intel Core i7-8550U cpuinfo. The app won't see your real CPU model.",
-        (10, 2) => "edit — Open a text editor (nvim/vim/vi/nano) to write a custom /proc/cpuinfo. Pre-filled with your real CPU info on first use. Content is saved per-app.",
+        // CPU info (row 10) is handled by the data-driven early return above.
         // OS release
         (11, 0) => "system — Expose the real /etc/os-release to the app. No spoofing.",
         (11, 1) => "Ubuntu — Presents as Ubuntu 24.04 LTS. Apps see NAME=Ubuntu, ID=ubuntu, VERSION_ID=24.04.",
@@ -2147,11 +2160,18 @@ pub fn setting_current(config: &AppConfig, idx: usize) -> usize {
             Some(v) if v == MACHINE_ID_SAMPLE => 2,
             _                => 3,
         },
-        CFG_SPOOF_CPUINFO => match config.spoof_cpuinfo.as_deref() {
-            None           => 0,
-            Some("sample") => 1,
-            _              => 2,  // "custom" or legacy path both show as "edit"
-        },
+        CFG_SPOOF_CPUINFO => {
+            let last = setting_options(CFG_SPOOF_CPUINFO).len() - 1; // "edit"
+            match config.spoof_cpuinfo.as_deref() {
+                None           => 0,
+                Some("sample") => 1,
+                Some(v) => v
+                    .strip_prefix("preset:")
+                    .and_then(|k| crate::cpu::CPU_PROFILES.iter().position(|p| p.key == k))
+                    .map(|pos| 2 + pos)
+                    .unwrap_or(last), // "custom"/legacy path shows as "edit"
+            }
+        }
         CFG_SPOOF_OS => match config.spoof_os.as_deref() {
             None               => 0,
             Some("ubuntu")     => 1,
@@ -2227,7 +2247,10 @@ pub fn apply_setting(config: &mut AppConfig, idx: usize, choice: usize) {
         // (9, 3) = "input" — handled by on_option_picker which opens TextInput
         (10, 0) => config.spoof_cpuinfo = None,
         (10, 1) => config.spoof_cpuinfo = Some("sample".to_string()),
-        // (10, 2) = "edit" — handled by on_option_picker which opens editor
+        // (10, 2..=N+1) = built-in CPU presets; (10, N+2) = "edit" (editor)
+        (10, c) if c >= 2 && c < 2 + crate::cpu::CPU_PROFILES.len() => {
+            config.spoof_cpuinfo = Some(format!("preset:{}", crate::cpu::CPU_PROFILES[c - 2].key));
+        }
         (11, 0) => config.spoof_os = None,
         (11, 1) => config.spoof_os = Some("ubuntu".to_string()),
         (11, 2) => config.spoof_os = Some("arch".to_string()),
@@ -2330,8 +2353,8 @@ fn on_option_picker(app: &mut App, code: KeyCode) {
             let mut cfg = config.clone();
             let idx = *setting_idx;
             let choice = *selected;
-            // cpuinfo "edit" → tear down TUI, open editor, save content.
-            if idx == CFG_SPOOF_CPUINFO && choice == 2 {
+            // cpuinfo "edit" (the last option) → tear down TUI, open editor.
+            if idx == CFG_SPOOF_CPUINFO && choice == setting_options(CFG_SPOOF_CPUINFO).len() - 1 {
                 let name2 = name.clone();
                 let cpuinfo_file = crate::manifest::app_dir(&name)
                     .map(|d| d.join(".spoof").join("cpuinfo"));

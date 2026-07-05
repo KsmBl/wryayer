@@ -988,6 +988,13 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
                     cmd.args(["--ro-bind", s, "/proc/cpuinfo"]);
                 }
             }
+        } else if let Some(text) = crate::cpu::cpuinfo_for(cpuinfo_path) {
+            // A built-in CPU preset ("preset:<key>") — render and bind it.
+            let cf = spoof_dir.join("cpuinfo");
+            let _ = std::fs::write(&cf, text);
+            if let Some(s) = cf.to_str() {
+                cmd.args(["--ro-bind-try", s, "/proc/cpuinfo"]);
+            }
         } else {
             cmd.args(["--ro-bind-try", cpuinfo_path.as_str(), "/proc/cpuinfo"]);
         }

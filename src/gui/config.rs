@@ -9,6 +9,7 @@ use gtk::prelude::*;
 use gtk::glib;
 
 use super::Ctx;
+use crate::cpu::CPU_PROFILES;
 use crate::config::{
     format_ram_limit, parse_ram_limit, random_hostname, random_username, read_config,
     read_global_config, write_config, write_global_config, AppConfig, AvahiMode, Layout,
@@ -212,7 +213,24 @@ fn build_form(form: &gtk::Box, cfg: AppConfig, is_global: bool, ctx: &Ctx) -> Rc
     let spoof_username = entry_random(form, "Username ($USER)", cfg.spoof_username.as_deref().unwrap_or(""), random_username);
     let spoof_machine_id = entry(form, "Machine ID / \"random\"", cfg.spoof_machine_id.as_deref().unwrap_or(""));
     let spoof_os = entry(form, "OS name", cfg.spoof_os.as_deref().unwrap_or(""));
-    let spoof_cpuinfo = entry(form, "cpuinfo file path", cfg.spoof_cpuinfo.as_deref().unwrap_or(""));
+    // CPU spoof: a preset picker, plus an optional custom cpuinfo file path.
+    let mut cpu_labels: Vec<&str> = vec!["Real CPU", "Sample (i7-8550U)"];
+    cpu_labels.extend(CPU_PROFILES.iter().map(|p| p.label));
+    let cpu_sel = match cfg.spoof_cpuinfo.as_deref() {
+        None => 0,
+        Some("sample") => 1,
+        Some(v) => v
+            .strip_prefix("preset:")
+            .and_then(|k| CPU_PROFILES.iter().position(|p| p.key == k))
+            .map(|p| (p + 2) as u32)
+            .unwrap_or(0),
+    };
+    let spoof_cpu = dropdown(form, "Spoof CPU", &cpu_labels, cpu_sel);
+    let cpu_custom_init = match cfg.spoof_cpuinfo.as_deref() {
+        Some(v) if v != "sample" && !v.starts_with("preset:") => v,
+        _ => "",
+    };
+    let spoof_cpuinfo = entry(form, "…or custom cpuinfo file", cpu_custom_init);
     let spoof_terminal = check(form, "Forward terminal identity (TERM_PROGRAM)", cfg.spoof_terminal);
 
     header(form, "Resources");
@@ -331,7 +349,19 @@ fn build_form(form: &gtk::Box, cfg: AppConfig, is_global: bool, ctx: &Ctx) -> Rc
         c.spoof_username = opt(&spoof_username);
         c.spoof_machine_id = opt(&spoof_machine_id);
         c.spoof_os = opt(&spoof_os);
-        c.spoof_cpuinfo = opt(&spoof_cpuinfo);
+        // A custom path wins; otherwise use the CPU-preset dropdown selection.
+        c.spoof_cpuinfo = {
+            let custom = spoof_cpuinfo.text().trim().to_string();
+            if !custom.is_empty() {
+                Some(custom)
+            } else {
+                match spoof_cpu.selected() {
+                    0 => None,
+                    1 => Some("sample".to_string()),
+                    n => CPU_PROFILES.get((n - 2) as usize).map(|p| format!("preset:{}", p.key)),
+                }
+            }
+        };
         c.spoof_terminal = spoof_terminal.is_active();
         c.ram_limit = parse_ram_limit(&ram.text());
         c.shared_dirs = shared_state.borrow().clone();

@@ -1,6 +1,7 @@
 pub mod avahi_stub;
 pub mod commands;
 pub mod config;
+pub mod cpu;
 pub mod distro;
 #[cfg(feature = "gui")]
 pub mod gui;
