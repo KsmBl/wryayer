@@ -10,8 +10,9 @@ use gtk::glib;
 
 use super::Ctx;
 use crate::config::{
-    format_ram_limit, parse_ram_limit, read_config, read_global_config, write_config,
-    write_global_config, AppConfig, AvahiMode, Layout, LocalDelete, TempMode, Theme,
+    format_ram_limit, parse_ram_limit, random_hostname, random_username, read_config,
+    read_global_config, write_config, write_global_config, AppConfig, AvahiMode, Layout,
+    LocalDelete, TempMode, Theme,
 };
 
 /// The Settings tab (global defaults).
@@ -179,43 +180,6 @@ fn entry_random(form: &gtk::Box, caption: &str, value: &str, gen: fn() -> String
 
     form.append(&row);
     e
-}
-
-/// Cheap non-cryptographic randomness — enough to seed a plausible hostname or
-/// username. Mixes the clock, the pid and a monotonic counter so successive
-/// calls differ even within the same nanosecond.
-fn rng() -> u64 {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
-    static CTR: AtomicU64 = AtomicU64::new(0);
-    let t = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
-    let c = CTR.fetch_add(1, Ordering::Relaxed);
-    let mut x = t
-        ^ (std::process::id() as u64).rotate_left(17)
-        ^ c.wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    x ^= x << 13;
-    x ^= x >> 7;
-    x ^= x << 17;
-    x
-}
-
-fn pick<'a>(items: &[&'a str]) -> &'a str {
-    items[(rng() as usize) % items.len()]
-}
-
-/// A random but realistic-looking hostname, e.g. `desktop-a3f9c1`.
-fn random_hostname() -> String {
-    let prefix = pick(&["pc", "desktop", "host", "arch", "box", "node", "lab", "workstation"]);
-    format!("{prefix}-{:06x}", rng() & 0xff_ffff)
-}
-
-/// A random but realistic-looking username, e.g. `max47`.
-fn random_username() -> String {
-    let name = pick(&["alex", "sam", "max", "lee", "kai", "noah", "mia", "ivy", "leo", "zoe", "user"]);
-    format!("{name}{:02}", rng() % 100)
 }
 
 /// Build the form widgets into `form` and return a closure that reconstructs an

@@ -409,6 +409,44 @@ pub fn format_ram_limit(kib: u64) -> String {
     format!("{kib} KB")
 }
 
+/// Cheap non-cryptographic randomness — enough to seed a plausible hostname or
+/// username. Mixes the clock, the pid and a monotonic counter so successive
+/// calls differ even within the same nanosecond.
+fn spoof_rng() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    static CTR: AtomicU64 = AtomicU64::new(0);
+    let t = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let c = CTR.fetch_add(1, Ordering::Relaxed);
+    let mut x = t
+        ^ (std::process::id() as u64).rotate_left(17)
+        ^ c.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    x
+}
+
+fn spoof_pick<'a>(items: &[&'a str]) -> &'a str {
+    items[(spoof_rng() as usize) % items.len()]
+}
+
+/// A random but realistic-looking hostname, e.g. `desktop-a3f9c1`. Returned as a
+/// fixed custom string — it only changes when regenerated, never per launch.
+pub fn random_hostname() -> String {
+    let prefix = spoof_pick(&["pc", "desktop", "host", "arch", "box", "node", "lab", "workstation"]);
+    format!("{prefix}-{:06x}", spoof_rng() & 0xff_ffff)
+}
+
+/// A random but realistic-looking username, e.g. `max47`.
+pub fn random_username() -> String {
+    let name = spoof_pick(&["alex", "sam", "max", "lee", "kai", "noah", "mia", "ivy", "leo", "zoe", "user"]);
+    format!("{name}{:02}", spoof_rng() % 100)
+}
+
 #[allow(clippy::result_unit_err)] // callers only care whether it parsed; the unit err is the signal
 pub fn parse_bool(v: &str) -> Result<bool, ()> {
     match v {

@@ -499,8 +499,10 @@ fn every_picker_row_is_cross_function_consistent() {
             );
             // 'input' / 'edit' / 'custom' choices defer to a text editor, so
             // apply_setting deliberately leaves the value unchanged — skip their
-            // round-trip.
-            if matches!(*opt, "input" | "edit" | "custom") {
+            // round-trip. Likewise hostname/username 'random' generates a fresh
+            // custom value that reads back as the 'input' slot, not 'random'.
+            let generates_custom = *opt == "random" && matches!(idx, 7 | 8);
+            if matches!(*opt, "input" | "edit" | "custom") || generates_custom {
                 continue;
             }
             // apply_setting(idx, choice) then setting_current(idx) must return
