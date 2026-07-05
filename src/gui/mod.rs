@@ -197,7 +197,7 @@ fn build_app_list_tab(ctx: &Ctx, games: bool) -> (gtk::Box, Rc<dyn Fn()>) {
     bar.append(&config_btn);
     let rename_btn = gtk::Button::with_label("Rename");
     let snapshot_btn = gtk::Button::with_label("Snapshot");
-    let rollback_btn = gtk::Button::with_label("Roll back");
+    let rollback_btn = gtk::Button::with_label("Snapshots…");
     let export_btn = gtk::Button::with_label("Export");
     if !games {
         bar.append(&rename_btn);
@@ -257,17 +257,7 @@ fn build_app_list_tab(ctx: &Ctx, games: bool) -> (gtk::Box, Rc<dyn Fn()>) {
             move |_| ctx.refresh()
         });
     });
-    act!(rollback_btn, |ctx: &Ctx, name: &str| {
-        let name = name.to_string();
-        confirm(ctx, "Roll back to latest snapshot?",
-            "The app's files are restored to the most recent snapshot.", true, {
-            let ctx = ctx.clone();
-            move || op::run_operation(&ctx.window, "Rollback", vec!["rollback".into(), name.clone()], {
-                let ctx = ctx.clone();
-                move |_| ctx.refresh()
-            })
-        });
-    });
+    act!(rollback_btn, |ctx: &Ctx, name: &str| open_snapshots(ctx, name));
     act!(export_btn, |ctx: &Ctx, name: &str| export_app(ctx, name));
     act!(remove_btn, |ctx: &Ctx, name: &str| {
         let name = name.to_string();
@@ -640,6 +630,118 @@ fn rename_app(ctx: &Ctx, name: &str) {
             Err(e) => ctx2.status(&format!("Failed to save: {e}")),
         }
     });
+}
+
+/// A snapshot-management window: pick a snapshot to roll back to (or delete).
+fn open_snapshots(ctx: &Ctx, name: &str) {
+    let win = gtk::Window::builder()
+        .title(format!("Snapshots — {name}"))
+        .transient_for(&ctx.window)
+        .modal(true)
+        .default_width(420)
+        .default_height(360)
+        .build();
+
+    let vbox = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    vbox.set_margin_top(10);
+    vbox.set_margin_bottom(10);
+    vbox.set_margin_start(10);
+    vbox.set_margin_end(10);
+
+    let heading = gtk::Label::new(None);
+    heading.set_xalign(0.0);
+    heading.set_markup("<b>Select a snapshot</b>");
+    vbox.append(&heading);
+
+    let listbox = gtk::ListBox::new();
+    listbox.set_selection_mode(gtk::SelectionMode::Single);
+    let scroller = gtk::ScrolledWindow::new();
+    scroller.set_vexpand(true);
+    scroller.set_child(Some(&listbox));
+    vbox.append(&scroller);
+
+    let labels: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    let refill = {
+        let listbox = listbox.clone();
+        let labels = labels.clone();
+        let name = name.to_string();
+        Rc::new(move || {
+            while let Some(c) = listbox.first_child() {
+                listbox.remove(&c);
+            }
+            let snaps = crate::commands::snapshot::labels(&name).unwrap_or_default();
+            *labels.borrow_mut() = snaps.clone();
+            if snaps.is_empty() {
+                let l = gtk::Label::new(Some("No snapshots yet."));
+                l.set_margin_top(12);
+                l.set_margin_bottom(12);
+                listbox.append(&l);
+                listbox.set_selection_mode(gtk::SelectionMode::None);
+            } else {
+                listbox.set_selection_mode(gtk::SelectionMode::Single);
+                for s in &snaps {
+                    let l = gtk::Label::new(Some(s));
+                    l.set_xalign(0.0);
+                    l.set_margin_top(3);
+                    l.set_margin_bottom(3);
+                    l.set_margin_start(4);
+                    listbox.append(&l);
+                }
+            }
+        })
+    };
+    refill();
+
+    let selected = {
+        let listbox = listbox.clone();
+        let labels = labels.clone();
+        move || -> Option<String> {
+            let i = listbox.selected_row()?.index();
+            labels.borrow().get(i as usize).cloned()
+        }
+    };
+
+    let bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    let rollback = gtk::Button::with_label("Roll back to selected");
+    let spacer = gtk::Label::new(None);
+    spacer.set_hexpand(true);
+    let close = gtk::Button::with_label("Close");
+    bar.append(&rollback);
+    bar.append(&spacer);
+    bar.append(&close);
+    vbox.append(&bar);
+
+    win.set_child(Some(&vbox));
+    win.present();
+
+    {
+        let win = win.clone();
+        close.connect_clicked(move |_| win.close());
+    }
+    {
+        let ctx = ctx.clone();
+        let selected = selected.clone();
+        let name = name.to_string();
+        let win = win.clone();
+        rollback.connect_clicked(move |_| {
+            let Some(label) = selected() else {
+                ctx.status("Select a snapshot first.");
+                return;
+            };
+            let ctx2 = ctx.clone();
+            let name2 = name.clone();
+            let win2 = win.clone();
+            confirm(&ctx, &format!("Roll back to {label}?"),
+                "The app's files are restored to this snapshot.", true, move || {
+                win2.close();
+                op::run_operation(&ctx2.window, "Rollback",
+                    vec!["rollback".into(), name2.clone(), label.clone()], {
+                    let ctx = ctx2.clone();
+                    move |_| ctx.refresh()
+                });
+            });
+        });
+    }
 }
 
 /// Export an app to a zip chosen with a native save dialog.

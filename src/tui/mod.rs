@@ -192,6 +192,12 @@ pub enum Screen {
         args: Vec<String>,
         selected: usize, // 0 = yes (create shortcut), 1 = no (skip)
     },
+    /// Snapshot manager: pick a snapshot to roll back to or delete.
+    SnapshotManager {
+        app_name: String,
+        snaps: Vec<String>,
+        selected: usize,
+    },
 }
 
 pub enum PendingAction {
@@ -833,6 +839,7 @@ fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
         Screen::GameExePick { .. } => 19,
         Screen::GameNameInput { .. } => 20,
         Screen::GameConfirm { .. } => 21,
+        Screen::SnapshotManager { .. } => 22,
     };
 
     match tag {
@@ -858,9 +865,44 @@ fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
         19 => on_game_exe_pick(app, code),
         20 => on_game_name_input(app, code),
         21 => on_game_confirm(app, code),
+        22 => on_snapshot_manager(app, code),
         _ => {}
     }
     Ok(())
+}
+
+/// Snapshot manager: ↑/↓ to choose, Enter to roll back, Esc to close.
+fn on_snapshot_manager(app: &mut App, code: KeyCode) {
+    let Screen::SnapshotManager { app_name, snaps, selected } = &mut app.screen else { return };
+    match code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            app.screen = Screen::Main;
+            app.needs_clear = true;
+        }
+        KeyCode::Up | KeyCode::Char('k') if !snaps.is_empty() => {
+            *selected = if *selected == 0 { snaps.len() - 1 } else { *selected - 1 };
+        }
+        KeyCode::Down | KeyCode::Char('j') if !snaps.is_empty() => {
+            *selected = (*selected + 1) % snaps.len();
+        }
+        KeyCode::Enter => {
+            if let Some(snap) = snaps.get(*selected).cloned() {
+                let name = app_name.clone();
+                app.screen = Screen::Confirm {
+                    title: format!("Rollback '{name}'?"),
+                    body: vec![
+                        format!("Restore from snapshot: {snap}"),
+                        String::new(),
+                        "Press y to roll back, n or Esc to cancel.".into(),
+                    ],
+                    action: PendingAction::Rollback(name, snap),
+                    danger: true,
+                };
+                app.needs_clear = true;
+            }
+        }
+        _ => {}
+    }
 }
 
 // ── Main screen ───────────────────────────────────────────────────────────────
@@ -1049,20 +1091,12 @@ fn on_installed(app: &mut App, code: KeyCode) {
         KeyCode::Char('o') => {
             if let Some(m) = app.selected_installed() {
                 let name = m.app.name.clone();
-                match crate::commands::snapshot::latest(&name) {
-                    Ok(Some(snap)) => {
-                        app.screen = Screen::Confirm {
-                            title: format!("Rollback '{name}'?"),
-                            body: vec![
-                                format!("Restore from snapshot: {snap}"),
-                                String::new(),
-                                "Press y to roll back, n or Esc to cancel.".into(),
-                            ],
-                            action: PendingAction::Rollback(name, snap),
-                            danger: true,
-                        };
+                match crate::commands::snapshot::labels(&name) {
+                    Ok(snaps) if !snaps.is_empty() => {
+                        app.screen = Screen::SnapshotManager { app_name: name, snaps, selected: 0 };
+                        app.needs_clear = true;
                     }
-                    Ok(None) => app.status = format!("No snapshots for {name}"),
+                    Ok(_) => app.status = format!("No snapshots for {name}"),
                     Err(e) => app.status = format!("snapshot lookup failed: {e:#}"),
                 }
             }

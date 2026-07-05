@@ -381,7 +381,50 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             let selected = *selected;
             draw_ask_shortcut(f, area, &pkg, selected);
         }
+        Screen::SnapshotManager { app_name, snaps, selected } => {
+            let app_name = app_name.clone();
+            let snaps = snaps.clone();
+            let selected = *selected;
+            draw_snapshot_manager(f, area, &app_name, &snaps, selected);
+        }
     }
+}
+
+fn draw_snapshot_manager(f: &mut Frame, area: Rect, app_name: &str, snaps: &[String], selected: usize) {
+    let needed_h = (snaps.len() as u16) + 4;
+    let h_pct = ((needed_h as f32 / area.height.max(1) as f32) * 100.0).clamp(25.0, 65.0) as u16;
+    let popup = centered_rect(46, h_pct, area);
+    f.render_widget(Clear, popup);
+
+    let block = Block::default().borders(Borders::ALL).border_type(c_border_type())
+        .title(format!(" Snapshots — {app_name} "))
+        .title_style(Style::default().fg(c_accent()).add_modifier(Modifier::BOLD))
+        .border_style(Style::default().fg(c_accent()));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .split(inner);
+
+    let items: Vec<ListItem> = snaps.iter().map(|s| {
+        ListItem::new(Line::from(Span::styled(s.clone(), Style::default().fg(c_fg()))))
+    }).collect();
+    let mut state = ListState::default();
+    state.select(Some(selected));
+    let list = List::new(items)
+        .highlight_style(Style::default().bg(c_select()).fg(c_fg()).add_modifier(Modifier::BOLD))
+        .highlight_symbol(c_select_symbol());
+    f.render_stateful_widget(list, chunks[0], &mut state);
+
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            " [↑↓] Choose  [Enter] Roll back  [Esc] Close",
+            Style::default().fg(c_dim()),
+        )),
+        chunks[1],
+    );
 }
 
 // ── Tab bar ───────────────────────────────────────────────────────────────────
