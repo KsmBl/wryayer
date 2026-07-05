@@ -136,6 +136,15 @@ fn build_app_list_tab(ctx: &Ctx, games: bool) -> (gtk::Box, Rc<dyn Fn()>) {
     vbox.set_margin_start(6);
     vbox.set_margin_end(6);
 
+    // Collapse the parent/child (`--into`) tree down to just the parents.
+    let compact = Rc::new(std::cell::Cell::new(false));
+    let compact_check = gtk::CheckButton::with_label("Compact tree (show parents only)");
+    if !games {
+        let top = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        top.append(&compact_check);
+        vbox.append(&top);
+    }
+
     let listbox = gtk::ListBox::new();
     listbox.set_selection_mode(gtk::SelectionMode::Single);
     let scroller = gtk::ScrolledWindow::new();
@@ -244,16 +253,20 @@ fn build_app_list_tab(ctx: &Ctx, games: bool) -> (gtk::Box, Rc<dyn Fn()>) {
     let populate: Rc<dyn Fn()> = {
         let listbox = listbox.clone();
         let names = names.clone();
+        let compact = compact.clone();
         Rc::new(move || {
             while let Some(child) = listbox.first_child() {
                 listbox.remove(&child);
             }
             names.borrow_mut().clear();
 
+            // tree_order keeps each `--into` child directly after its parent.
             let apps = list_all_apps().map(tree_order).unwrap_or_default();
+            let show_children = !compact.get();
             let filtered: Vec<&Manifest> = apps
                 .iter()
                 .filter(|m| m.app.wine_game.is_some() == games)
+                .filter(|m| show_children || m.app.alias_of.is_none())
                 .collect();
 
             if filtered.is_empty() {
@@ -267,21 +280,44 @@ fn build_app_list_tab(ctx: &Ctx, games: bool) -> (gtk::Box, Rc<dyn Fn()>) {
             }
             listbox.set_selection_mode(gtk::SelectionMode::Single);
 
-            for m in filtered {
+            for (idx, m) in filtered.iter().enumerate() {
                 names.borrow_mut().push(m.app.name.clone());
-                listbox.append(&app_row_widget(m));
+                // A child (alias) gets a tree connector; the last child of a
+                // parent gets the corner glyph.
+                let connector = if let Some(target) = &m.app.alias_of {
+                    let is_last = filtered
+                        .get(idx + 1)
+                        .map(|n| n.app.alias_of.as_deref() != Some(target.as_str()))
+                        .unwrap_or(true);
+                    if is_last { "└─ " } else { "├─ " }
+                } else {
+                    ""
+                };
+                listbox.append(&app_row_widget(m, connector));
             }
         })
     };
 
+    // Toggling compact mode re-renders the list.
+    {
+        let compact = compact.clone();
+        let populate = populate.clone();
+        compact_check.connect_toggled(move |c| {
+            compact.set(c.is_active());
+            populate();
+        });
+    }
+
     (vbox, populate)
 }
 
-fn app_row_widget(m: &Manifest) -> gtk::Box {
+fn app_row_widget(m: &Manifest, connector: &str) -> gtk::Box {
+    let is_child = !connector.is_empty();
     let row = gtk::Box::new(gtk::Orientation::Vertical, 0);
     row.set_margin_top(4);
     row.set_margin_bottom(4);
-    row.set_margin_start(4);
+    // Indent children so the tree structure reads at a glance.
+    row.set_margin_start(if is_child { 22 } else { 4 });
     row.set_margin_end(4);
 
     let title = match &m.app.display_name {
@@ -290,7 +326,17 @@ fn app_row_widget(m: &Manifest) -> gtk::Box {
     };
     let name_lbl = gtk::Label::new(None);
     name_lbl.set_xalign(0.0);
-    name_lbl.set_markup(&format!("<b>{}</b>", glib::markup_escape_text(&title)));
+    // The connector glyph is dimmed; a child's name is dimmed too, like the TUI.
+    let name_markup = if is_child {
+        format!(
+            "<span alpha='55%'>{}</span><span alpha='75%'>{}</span>",
+            glib::markup_escape_text(connector),
+            glib::markup_escape_text(&title)
+        )
+    } else {
+        format!("<b>{}</b>", glib::markup_escape_text(&title))
+    };
+    name_lbl.set_markup(&name_markup);
     row.append(&name_lbl);
 
     let mut info: Vec<String> = m
