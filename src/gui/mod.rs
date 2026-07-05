@@ -65,14 +65,31 @@ pub fn run() -> Result<()> {
 }
 
 fn build_ui(app: &gtk::Application) {
+    load_css();
+
     let window = gtk::ApplicationWindow::builder()
         .application(app)
         .title("wryayer")
-        .default_width(880)
-        .default_height(620)
+        .default_width(900)
+        .default_height(660)
         .build();
 
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+
+    // Header strip.
+    let header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    header.add_css_class("app-header");
+    let title = gtk::Label::new(None);
+    title.set_xalign(0.0);
+    title.set_hexpand(true);
+    title.set_markup("<b>wryayer</b>");
+    title.add_css_class("app-title");
+    let subtitle = gtk::Label::new(Some("isolated per-app sandboxes"));
+    subtitle.add_css_class("app-subtitle");
+    header.append(&title);
+    header.append(&subtitle);
+    root.append(&header);
+
     let notebook = gtk::Notebook::new();
     notebook.set_vexpand(true);
     root.append(&notebook);
@@ -80,13 +97,8 @@ fn build_ui(app: &gtk::Application) {
     // Bottom status line (classic).
     let status = gtk::Label::new(Some("Ready."));
     status.set_xalign(0.0);
-    status.set_margin_top(3);
-    status.set_margin_bottom(3);
-    status.set_margin_start(6);
-    status.set_margin_end(6);
-    let status_frame = gtk::Frame::new(None);
-    status_frame.set_child(Some(&status));
-    root.append(&status_frame);
+    status.add_css_class("statusline");
+    root.append(&status);
 
     window.set_child(Some(&root));
 
@@ -126,6 +138,40 @@ fn build_ui(app: &gtk::Application) {
 
 fn add_tab(notebook: &gtk::Notebook, child: &impl IsA<gtk::Widget>, label: &str) {
     notebook.append_page(child, Some(&gtk::Label::new(Some(label))));
+}
+
+/// A small, theme-aware stylesheet — tidier spacing, a header strip, a real
+/// status bar and roomier list rows, without abandoning the plain-GTK look.
+fn load_css() {
+    const CSS: &str = "
+        .app-header {
+            padding: 8px 12px;
+            background-color: alpha(@theme_fg_color, 0.05);
+            border-bottom: 1px solid alpha(@theme_fg_color, 0.12);
+        }
+        .app-title { font-size: 15px; }
+        .app-subtitle { color: alpha(@theme_fg_color, 0.55); font-size: 11px; }
+        .statusline {
+            padding: 5px 12px;
+            background-color: alpha(@theme_fg_color, 0.05);
+            border-top: 1px solid alpha(@theme_fg_color, 0.12);
+            font-size: 12px;
+        }
+        notebook > header > tabs > tab { padding: 6px 14px; }
+        notebook > header > tabs > tab:checked { font-weight: bold; }
+        button { padding: 5px 12px; }
+        list > row { padding: 2px 4px; }
+        list > row:selected { border-radius: 4px; }
+    ";
+    let provider = gtk::CssProvider::new();
+    provider.load_from_data(CSS);
+    if let Some(display) = gtk::gdk::Display::default() {
+        gtk::style_context_add_provider_for_display(
+            &display,
+            &provider,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    }
 }
 
 // ── Installed / Games tabs ─────────────────────────────────────────────────────
