@@ -1,3 +1,6 @@
+// These tests exercise the TUI; only build them when the tui feature is on.
+#![cfg(feature = "tui")]
+
 use crossterm::event::KeyCode;
 use ratatui::style::Color;
 use wryayer::tui::konami::{self, Anim, Frame};

@@ -48,6 +48,41 @@ fi
 
 info "Detected distro: $DISTRO"
 
+# ── Choose which front-ends to build ──────────────────────────────────────────
+
+heading "Which interfaces should be built?"
+echo -e "  1) both  — terminal UI (TUI) + desktop GUI   ${BOLD}(default)${NC}"
+echo "  2) tui   — terminal UI only"
+echo "  3) gui   — desktop GUI only (GTK4 + libadwaita)"
+echo "  4) none  — command-line only"
+
+choice=""
+if [ -e /dev/tty ]; then
+    printf "  Select [1-4] (default 1): "
+    read -r choice < /dev/tty || choice=""
+    echo
+fi
+
+BUILD_TUI=1
+BUILD_GUI=1
+case "$(echo "${choice:-1}" | tr '[:upper:]' '[:lower:]')" in
+    2|tui)          BUILD_TUI=1; BUILD_GUI=0 ;;
+    3|gui)          BUILD_TUI=0; BUILD_GUI=1 ;;
+    4|none|nothing) BUILD_TUI=0; BUILD_GUI=0 ;;
+    *)              BUILD_TUI=1; BUILD_GUI=1 ;;
+esac
+
+FEATURES=""
+[ "$BUILD_TUI" = 1 ] && FEATURES="$FEATURES tui"
+[ "$BUILD_GUI" = 1 ] && FEATURES="$FEATURES gui"
+FEATURES="$(echo "$FEATURES" | xargs)"
+
+sel="none (CLI only)"
+if [ "$BUILD_TUI" = 1 ] && [ "$BUILD_GUI" = 1 ]; then sel="TUI + GUI"
+elif [ "$BUILD_TUI" = 1 ]; then sel="TUI"
+elif [ "$BUILD_GUI" = 1 ]; then sel="GUI"; fi
+info "Building: $sel"
+
 # ── Install system dependencies ───────────────────────────────────────────────
 
 heading "Installing system dependencies..."
@@ -60,6 +95,10 @@ if [ "$DISTRO" = "arch" ]; then
     command -v makepkg  &>/dev/null || PKGS+=(base-devel)
     command -v readelf  &>/dev/null || PKGS+=(binutils)
     command -v ldconfig &>/dev/null || PKGS+=(glibc)
+    if [ "$BUILD_GUI" = 1 ]; then
+        command -v pkg-config &>/dev/null || PKGS+=(pkgconf)
+        pkg-config --exists gtk4 2>/dev/null || PKGS+=(gtk4)
+    fi
 
     if [ ${#PKGS[@]} -gt 0 ]; then
         echo "  Installing: ${PKGS[*]}"
@@ -76,6 +115,10 @@ elif [ "$DISTRO" = "debian" ]; then
     command -v readelf  &>/dev/null || PKGS+=(binutils)
     command -v ldconfig &>/dev/null || PKGS+=(libc-bin)
     # dpkg and apt are always present on Debian/Ubuntu
+    if [ "$BUILD_GUI" = 1 ]; then
+        command -v pkg-config &>/dev/null || PKGS+=(pkg-config)
+        pkg-config --exists gtk4 2>/dev/null || PKGS+=(libgtk-4-dev)
+    fi
 
     if [ ${#PKGS[@]} -gt 0 ]; then
         echo "  Installing: ${PKGS[*]}"
@@ -102,6 +145,10 @@ elif [ "$DISTRO" = "fedora" ]; then
     command -v cpio     &>/dev/null || PKGS+=(cpio)
     # dnf download is built-in on dnf5; on dnf4 it needs dnf-plugins-core
     dnf help download &>/dev/null 2>&1 || PKGS+=(dnf-plugins-core)
+    if [ "$BUILD_GUI" = 1 ]; then
+        command -v pkg-config &>/dev/null || PKGS+=(pkgconf-pkg-config)
+        pkg-config --exists gtk4 2>/dev/null || PKGS+=(gtk4-devel)
+    fi
 
     if [ ${#PKGS[@]} -gt 0 ]; then
         echo "  Installing: ${PKGS[*]}"
@@ -168,7 +215,13 @@ fi
 # ── Build ─────────────────────────────────────────────────────────────────────
 
 heading "Building wryayer..."
-"$CARGO" build --release
+if [ -n "$FEATURES" ]; then
+    echo "  Features: $FEATURES"
+    "$CARGO" build --release --no-default-features --features "$FEATURES"
+else
+    echo "  Features: none (command-line only)"
+    "$CARGO" build --release --no-default-features
+fi
 info "Build complete."
 
 # ── Install binary ────────────────────────────────────────────────────────────
@@ -197,6 +250,19 @@ if command -v fish &>/dev/null; then
     FISH_COMP_DIR="${HOME}/.config/fish/completions"
     mkdir -p "$FISH_COMP_DIR"
     cp completions/wryayer.fish "$FISH_COMP_DIR/wryayer.fish"
+
+    # Reflect the built front-ends: the committed file advertises 'tui'; drop it
+    # if the TUI wasn't built, and add 'gui' when the desktop GUI was built.
+    if [ "$BUILD_TUI" != 1 ]; then
+        sed -i '/-a tui .*Launch the interactive TUI/d' "$FISH_COMP_DIR/wryayer.fish"
+    fi
+    if [ "$BUILD_GUI" = 1 ]; then
+        cat >> "$FISH_COMP_DIR/wryayer.fish" <<'FISH_GUI'
+
+# ── gui (added by install.sh because the desktop GUI was built) ────────────────
+complete -c wryayer -n "not __fish_seen_subcommand_from $cmds" -a gui -d 'Launch the native GTK desktop GUI'
+FISH_GUI
+    fi
     info "Installed completions to $FISH_COMP_DIR/wryayer.fish"
 
     if ! fish -c "contains -- $BIN_DIR \$fish_user_paths" 2>/dev/null; then
@@ -231,3 +297,5 @@ else
 fi
 echo "  then try:  wryayer --help"
 echo "             wryayer install jq"
+[ "$BUILD_TUI" = 1 ] && echo "             wryayer tui"
+[ "$BUILD_GUI" = 1 ] && echo "             wryayer gui"

@@ -70,8 +70,10 @@ end
 complete -c wryayer -f
 
 # ── Top-level subcommands ─────────────────────────────────────────────────────
+# Front-end subcommands (tui/gui) are appended by install.sh to match the build;
+# they are kept in this guard list so once one is typed, top-level completions stop.
 set -l cmds install remove list run update repair config export import \
-           snapshot rollback snapshots snapshot-prune tui dedup completions
+           snapshot rollback snapshots snapshot-prune tui gui dedup completions
 
 complete -c wryayer -n "not __fish_seen_subcommand_from $cmds" -a install         -d 'Install a package in an isolated directory'
 complete -c wryayer -n "not __fish_seen_subcommand_from $cmds" -a remove          -d 'Remove an installed app and its launchers'

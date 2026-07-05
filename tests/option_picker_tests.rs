@@ -1,5 +1,7 @@
 // Tests intentionally build a Default config and tweak one field at a time.
 #![allow(clippy::field_reassign_with_default)]
+// These tests exercise the TUI; only build them when the tui feature is on.
+#![cfg(feature = "tui")]
 
 use wryayer::config::{AppConfig, AvahiMode, LocalDelete, TempMode};
 use wryayer::tui::{
