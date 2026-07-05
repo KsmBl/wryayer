@@ -14,6 +14,9 @@ mod op;
 use std::cell::RefCell;
 use std::process::{Command, Stdio};
 use std::rc::Rc;
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
 
 use anyhow::Result;
 use gtk4 as gtk;
@@ -127,8 +130,11 @@ fn add_tab(notebook: &gtk::Notebook, child: &impl IsA<gtk::Widget>, label: &str)
 
 // ── Installed / Games tabs ─────────────────────────────────────────────────────
 
-/// Build a list-of-apps tab. `games` selects wine-game containers; otherwise
-/// ordinary apps. Returns the tab widget and a closure that repopulates it.
+/// Build a list-of-apps tab: a folding tree on the left (parents with their
+/// `--into` children, expander arrows and tree lines) and a details panel on
+/// the right. `games` selects wine-game containers; otherwise ordinary apps.
+/// Returns the tab widget and a closure that repopulates it.
+#[allow(deprecated)] // GtkTreeView gives the classic folding tree with lines.
 fn build_app_list_tab(ctx: &Ctx, games: bool) -> (gtk::Box, Rc<dyn Fn()>) {
     let vbox = gtk::Box::new(gtk::Orientation::Vertical, 6);
     vbox.set_margin_top(6);
@@ -136,25 +142,51 @@ fn build_app_list_tab(ctx: &Ctx, games: bool) -> (gtk::Box, Rc<dyn Fn()>) {
     vbox.set_margin_start(6);
     vbox.set_margin_end(6);
 
-    // Collapse the parent/child (`--into`) tree down to just the parents.
+    // Collapse-to-parents toggle (Installed tab only).
     let compact = Rc::new(std::cell::Cell::new(false));
-    let compact_check = gtk::CheckButton::with_label("Compact tree (show parents only)");
+    let compact_check = gtk::CheckButton::with_label("Collapse tree (show parents only)");
     if !games {
         let top = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         top.append(&compact_check);
         vbox.append(&top);
     }
 
-    let listbox = gtk::ListBox::new();
-    listbox.set_selection_mode(gtk::SelectionMode::Single);
-    let scroller = gtk::ScrolledWindow::new();
-    scroller.set_vexpand(true);
-    scroller.set_child(Some(&listbox));
-    vbox.append(&scroller);
+    // ── Tree (left) ─────────────────────────────────────────────────────
+    // Columns: 0 = display markup, 1 = app name.
+    let store = gtk::TreeStore::new(&[glib::Type::STRING, glib::Type::STRING]);
+    let tree = gtk::TreeView::with_model(&store);
+    tree.set_headers_visible(false);
+    tree.set_enable_tree_lines(true);
+    tree.set_show_expanders(true);
+    tree.selection().set_mode(gtk::SelectionMode::Single);
+    let cell = gtk::CellRendererText::new();
+    let col = gtk::TreeViewColumn::new();
+    col.pack_start(&cell, true);
+    col.add_attribute(&cell, "markup", 0);
+    tree.append_column(&col);
 
-    let names: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    let tree_scroll = gtk::ScrolledWindow::new();
+    tree_scroll.set_min_content_width(240);
+    tree_scroll.set_child(Some(&tree));
 
-    // Button toolbar.
+    // ── Details (right) ─────────────────────────────────────────────────
+    let details = gtk::Box::new(gtk::Orientation::Vertical, 3);
+    details.set_margin_top(8);
+    details.set_margin_bottom(8);
+    details.set_margin_start(10);
+    details.set_margin_end(10);
+    let det_scroll = gtk::ScrolledWindow::new();
+    det_scroll.set_child(Some(&details));
+    render_details(&details, "");
+
+    let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
+    paned.set_start_child(Some(&tree_scroll));
+    paned.set_end_child(Some(&det_scroll));
+    paned.set_position(300);
+    paned.set_vexpand(true);
+    vbox.append(&paned);
+
+    // ── Button toolbar ──────────────────────────────────────────────────
     let bar = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     let run_btn = gtk::Button::with_label("Run");
     let update_btn = gtk::Button::with_label("Update");
@@ -163,7 +195,6 @@ fn build_app_list_tab(ctx: &Ctx, games: bool) -> (gtk::Box, Rc<dyn Fn()>) {
     bar.append(&run_btn);
     bar.append(&update_btn);
     bar.append(&config_btn);
-    // Non-game extras.
     let rename_btn = gtk::Button::with_label("Rename");
     let snapshot_btn = gtk::Button::with_label("Snapshot");
     let rollback_btn = gtk::Button::with_label("Roll back");
@@ -180,24 +211,22 @@ fn build_app_list_tab(ctx: &Ctx, games: bool) -> (gtk::Box, Rc<dyn Fn()>) {
     bar.append(&remove_btn);
     vbox.append(&bar);
 
-    // Helper to read the selected app name.
+    // Selected app name (empty placeholder rows count as no selection).
     let selected = {
-        let listbox = listbox.clone();
-        let names = names.clone();
+        let tree = tree.clone();
         move || -> Option<String> {
-            let idx = listbox.selected_row()?.index();
-            names.borrow().get(idx as usize).cloned()
+            let (model, iter) = tree.selection().selected()?;
+            let name = model.get::<String>(&iter, 1);
+            (!name.is_empty()).then_some(name)
         }
     };
 
-    // Double-click a row to run it.
+    // Selecting a row shows its details — clicking never runs the app.
     {
-        let ctx = ctx.clone();
-        let names = names.clone();
-        listbox.connect_row_activated(move |_, row| {
-            if let Some(name) = names.borrow().get(row.index() as usize) {
-                launch_detached(&ctx, name);
-            }
+        let details = details.clone();
+        tree.selection().connect_changed(move |sel| match sel.selected() {
+            Some((model, iter)) => render_details(&details, &model.get::<String>(&iter, 1)),
+            None => render_details(&details, ""),
         });
     }
 
@@ -223,7 +252,10 @@ fn build_app_list_tab(ctx: &Ctx, games: bool) -> (gtk::Box, Rc<dyn Fn()>) {
     act!(config_btn, |ctx: &Ctx, name: &str| config::open(ctx, name));
     act!(rename_btn, |ctx: &Ctx, name: &str| rename_app(ctx, name));
     act!(snapshot_btn, |ctx: &Ctx, name: &str| {
-        op::run_operation(&ctx.window, "Snapshot", vec!["snapshot".into(), name.into()], |_| {});
+        op::run_operation(&ctx.window, "Snapshot", vec!["snapshot".into(), name.into()], {
+            let ctx = ctx.clone();
+            move |_| ctx.refresh()
+        });
     });
     act!(rollback_btn, |ctx: &Ctx, name: &str| {
         let name = name.to_string();
@@ -249,114 +281,242 @@ fn build_app_list_tab(ctx: &Ctx, games: bool) -> (gtk::Box, Rc<dyn Fn()>) {
         });
     });
 
-    // Populate closure.
+    // Populate closure — builds the tree store.
     let populate: Rc<dyn Fn()> = {
-        let listbox = listbox.clone();
-        let names = names.clone();
+        let store = store.clone();
+        let tree = tree.clone();
+        let details = details.clone();
         let compact = compact.clone();
         Rc::new(move || {
-            while let Some(child) = listbox.first_child() {
-                listbox.remove(&child);
-            }
-            names.borrow_mut().clear();
+            store.clear();
+            render_details(&details, "");
 
-            // tree_order keeps each `--into` child directly after its parent.
+            // tree_order keeps each `--into` child directly after its parent, so
+            // by the time a child is seen its parent iter already exists.
             let apps = list_all_apps().map(tree_order).unwrap_or_default();
-            let show_children = !compact.get();
-            let filtered: Vec<&Manifest> = apps
-                .iter()
-                .filter(|m| m.app.wine_game.is_some() == games)
-                .filter(|m| show_children || m.app.alias_of.is_none())
-                .collect();
+            let mut parent_iters: std::collections::HashMap<String, gtk::TreeIter> =
+                std::collections::HashMap::new();
+            let mut any = false;
 
-            if filtered.is_empty() {
-                let msg = if games { "No wine games imported." } else { "No apps installed." };
-                let l = gtk::Label::new(Some(msg));
-                l.set_margin_top(12);
-                l.set_margin_bottom(12);
-                listbox.append(&l);
-                listbox.set_selection_mode(gtk::SelectionMode::None);
-                return;
+            for m in apps.iter().filter(|m| m.app.wine_game.is_some() == games) {
+                any = true;
+                let is_child = m
+                    .app
+                    .alias_of
+                    .as_ref()
+                    .map(|t| parent_iters.contains_key(t))
+                    .unwrap_or(false);
+                let markup = row_markup(m, is_child);
+                let parent = m.app.alias_of.as_ref().and_then(|t| parent_iters.get(t)).cloned();
+                let iter = store.append(parent.as_ref());
+                store.set_value(&iter, 0, &markup.to_value());
+                store.set_value(&iter, 1, &m.app.name.to_value());
+                parent_iters.insert(m.app.name.clone(), iter);
             }
-            listbox.set_selection_mode(gtk::SelectionMode::Single);
 
-            for (idx, m) in filtered.iter().enumerate() {
-                names.borrow_mut().push(m.app.name.clone());
-                // A child (alias) gets a tree connector; the last child of a
-                // parent gets the corner glyph.
-                let connector = if let Some(target) = &m.app.alias_of {
-                    let is_last = filtered
-                        .get(idx + 1)
-                        .map(|n| n.app.alias_of.as_deref() != Some(target.as_str()))
-                        .unwrap_or(true);
-                    if is_last { "└─ " } else { "├─ " }
-                } else {
-                    ""
-                };
-                listbox.append(&app_row_widget(m, connector));
+            if !any {
+                let msg = if games { "No wine games imported." } else { "No apps installed." };
+                let iter = store.append(None);
+                store.set_value(&iter, 0, &format!("<i>{msg}</i>").to_value());
+                store.set_value(&iter, 1, &String::new().to_value());
+            }
+
+            if compact.get() {
+                tree.collapse_all();
+            } else {
+                tree.expand_all();
             }
         })
     };
 
-    // Toggling compact mode re-renders the list.
+    // Collapse/expand the whole tree.
     {
         let compact = compact.clone();
-        let populate = populate.clone();
+        let tree = tree.clone();
         compact_check.connect_toggled(move |c| {
             compact.set(c.is_active());
-            populate();
+            if c.is_active() {
+                tree.collapse_all();
+            } else {
+                tree.expand_all();
+            }
         });
     }
 
     (vbox, populate)
 }
 
-fn app_row_widget(m: &Manifest, connector: &str) -> gtk::Box {
-    let is_child = !connector.is_empty();
-    let row = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    row.set_margin_top(4);
-    row.set_margin_bottom(4);
-    // Indent children so the tree structure reads at a glance.
-    row.set_margin_start(if is_child { 22 } else { 4 });
-    row.set_margin_end(4);
+/// One tree-row label: bold for a parent, dimmed for a child.
+fn row_markup(m: &Manifest, is_child: bool) -> String {
+    let title = match &m.app.display_name {
+        Some(d) => format!("{d}  [{}]", m.app.name),
+        None => match &m.app.pkg_name {
+            Some(p) => format!("{}  [{p}]", m.app.name),
+            None => m.app.name.clone(),
+        },
+    };
+    let esc = glib::markup_escape_text(&title);
+    if is_child {
+        format!("<span alpha='75%'>{esc}</span>")
+    } else {
+        format!("<b>{esc}</b>")
+    }
+}
+
+/// Rebuild the right-hand details panel for `name` (empty = nothing selected).
+fn render_details(container: &gtk::Box, name: &str) {
+    while let Some(child) = container.first_child() {
+        container.remove(&child);
+    }
+
+    if name.is_empty() {
+        let l = gtk::Label::new(Some("No app selected."));
+        l.set_xalign(0.0);
+        l.add_css_class("dim-label");
+        container.append(&l);
+        return;
+    }
+    let Ok(m) = read_manifest(name) else {
+        let l = gtk::Label::new(Some("No app selected."));
+        l.set_xalign(0.0);
+        container.append(&l);
+        return;
+    };
 
     let title = match &m.app.display_name {
         Some(d) => format!("{d}  [{}]", m.app.name),
         None => m.app.name.clone(),
     };
-    let name_lbl = gtk::Label::new(None);
-    name_lbl.set_xalign(0.0);
-    // The connector glyph is dimmed; a child's name is dimmed too, like the TUI.
-    let name_markup = if is_child {
-        format!(
-            "<span alpha='55%'>{}</span><span alpha='75%'>{}</span>",
-            glib::markup_escape_text(connector),
-            glib::markup_escape_text(&title)
-        )
-    } else {
-        format!("<b>{}</b>", glib::markup_escape_text(&title))
-    };
-    name_lbl.set_markup(&name_markup);
-    row.append(&name_lbl);
+    let head = gtk::Label::new(None);
+    head.set_xalign(0.0);
+    head.set_markup(&format!("<b>{}</b>", glib::markup_escape_text(&title)));
+    head.set_wrap(true);
+    container.append(&head);
 
-    let mut info: Vec<String> = m
+    let real_pkg = m.app.pkg_name.as_deref().unwrap_or(&m.app.name);
+    let ver = m
         .packages
         .iter()
-        .map(|p| format!("{} {}", p.name, p.version))
+        .find(|p| p.name == real_pkg)
+        .map(|p| p.version.as_str())
+        .unwrap_or("?");
+    detail_line(container, "Version", ver);
+    detail_line(container, "Installed", m.app.installed_at.get(..10).unwrap_or(&m.app.installed_at));
+    let launchers = if m.app.launchers.is_empty() { "none".to_string() } else { m.app.launchers.join(", ") };
+    detail_line(container, "Launchers", &launchers);
+    if let Some(g) = &m.app.wine_game {
+        detail_line(container, "Wine exe", &g.exe);
+    }
+
+    // Size — computed off-thread so a big app can't freeze the panel.
+    let size_lbl = detail_line(container, "Size", "computing…");
+    dir_bytes_async(name, &size_lbl);
+
+    // Snapshots.
+    let snaps = list_snapshots(name);
+    detail_header(container, &format!("Snapshots ({})", snaps.len()));
+    if snaps.is_empty() {
+        detail_item(container, "none");
+    } else {
+        for s in &snaps {
+            detail_item(container, s);
+        }
+    }
+
+    // Packages.
+    detail_header(container, &format!("Packages ({})", m.packages.len()));
+    for p in &m.packages {
+        detail_item(container, &format!("{}  {}", p.name, p.version));
+    }
+}
+
+/// A `Key:  value` line; returns the value label so callers can update it.
+fn detail_line(container: &gtk::Box, key: &str, value: &str) -> gtk::Label {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    let k = gtk::Label::new(None);
+    k.set_xalign(0.0);
+    k.set_width_chars(11);
+    k.set_markup(&format!("<span alpha='55%'>{}</span>", glib::markup_escape_text(key)));
+    let v = gtk::Label::new(Some(value));
+    v.set_xalign(0.0);
+    v.set_wrap(true);
+    v.set_selectable(true);
+    v.set_hexpand(true);
+    row.append(&k);
+    row.append(&v);
+    container.append(&row);
+    v
+}
+
+fn detail_header(container: &gtk::Box, text: &str) {
+    let l = gtk::Label::new(None);
+    l.set_xalign(0.0);
+    l.set_margin_top(8);
+    l.set_markup(&format!("<b>{}</b>", glib::markup_escape_text(text)));
+    container.append(&l);
+}
+
+fn detail_item(container: &gtk::Box, text: &str) {
+    let l = gtk::Label::new(None);
+    l.set_xalign(0.0);
+    l.set_margin_start(10);
+    l.set_selectable(true);
+    l.set_markup(&format!("<span alpha='80%'>{}</span>", glib::markup_escape_text(text)));
+    container.append(&l);
+}
+
+/// Snapshot labels for an app (newest first), read straight from disk.
+fn list_snapshots(name: &str) -> Vec<String> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let dir = format!("{home}/.wryayer/{name}/.snapshots");
+    let mut labels: Vec<String> = std::fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect();
-    if m.app.alias_of.is_some() {
-        info.push("alias".into());
+    labels.sort_by(|a, b| b.cmp(a));
+    labels
+}
+
+/// Compute an app directory's size with `du` off-thread and update `label`.
+fn dir_bytes_async(name: &str, label: &gtk::Label) {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let path = format!("{home}/.wryayer/{name}");
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let bytes = Command::new("du")
+            .args(["-sb", &path])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8_lossy(&o.stdout).split_whitespace().next()?.parse::<u64>().ok());
+        let _ = tx.send(bytes);
+    });
+    let label = label.clone();
+    glib::timeout_add_local(Duration::from_millis(80), move || match rx.try_recv() {
+        Ok(bytes) => {
+            label.set_text(&bytes.map(format_bytes).unwrap_or_else(|| "—".into()));
+            glib::ControlFlow::Break
+        }
+        Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+        Err(mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
+    });
+}
+
+fn format_bytes(b: u64) -> String {
+    const U: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut v = b as f64;
+    let mut i = 0;
+    while v >= 1024.0 && i < U.len() - 1 {
+        v /= 1024.0;
+        i += 1;
     }
-    if !info.is_empty() {
-        let info_lbl = gtk::Label::new(None);
-        info_lbl.set_xalign(0.0);
-        info_lbl.set_markup(&format!(
-            "<small>{}</small>",
-            glib::markup_escape_text(&info.join("  ·  "))
-        ));
-        row.append(&info_lbl);
+    if i == 0 {
+        format!("{b} B")
+    } else {
+        format!("{v:.1} {}", U[i])
     }
-    row
 }
 
 // ── Import tab ─────────────────────────────────────────────────────────────────
