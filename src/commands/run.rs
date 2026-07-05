@@ -998,6 +998,25 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
         } else {
             cmd.args(["--ro-bind-try", cpuinfo_path.as_str(), "/proc/cpuinfo"]);
         }
+
+        // /proc/cpuinfo only fools file-parsing tools. Detection libraries
+        // (libcpuid, used by CPU-X) run the CPUID instruction directly, so also
+        // inject an LD_PRELOAD shim that intercepts CPUID via CPUID-faulting.
+        if let Some(sp) = crate::cpu::cpuid_spoof_for(cpuinfo_path) {
+            const SHIM: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/libcpuidspoof.so"));
+            if !SHIM.is_empty() {
+                let so = spoof_dir.join("cpuidspoof.so");
+                if std::fs::write(&so, SHIM).is_ok() {
+                    if let Some(s) = so.to_str() {
+                        cmd.args(["--ro-bind", s, "/.wryayer-cpuidspoof.so"]);
+                        cmd.args(["--setenv", "LD_PRELOAD", "/.wryayer-cpuidspoof.so"]);
+                        cmd.args(["--setenv", "WRYAYER_CPUID_VENDOR", sp.vendor]);
+                        cmd.args(["--setenv", "WRYAYER_CPUID_BRAND", sp.brand]);
+                        cmd.args(["--setenv", "WRYAYER_CPUID_FMS", &format!("0x{:08x}", sp.fms)]);
+                    }
+                }
+            }
+        }
     }
 
     // ── RAM limit: fake /proc/meminfo ────────────────────────────────────────

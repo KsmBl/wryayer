@@ -130,6 +130,47 @@ pub fn cpuinfo_for(spec: &str) -> Option<String> {
     Some(generate(p))
 }
 
+/// The values the CPUID-spoofing shim needs to present a fake CPU: 12-char
+/// vendor id, brand string (the displayed model name), and the leaf-1 EAX that
+/// encodes family/model/stepping.
+pub struct CpuidSpoof {
+    pub vendor: &'static str,
+    pub brand: &'static str,
+    pub fms: u32,
+}
+
+/// CPUID-spoof data for a config value, if it names a built-in CPU. Covers both
+/// the `preset:<key>` profiles and the legacy "sample" (Intel i7-8550U).
+pub fn cpuid_spoof_for(spec: &str) -> Option<CpuidSpoof> {
+    if spec == "sample" {
+        return Some(CpuidSpoof {
+            vendor: "GenuineIntel",
+            brand: "Intel(R) Core(TM) i7-8550U CPU @ 1.80GHz",
+            fms: leaf1_eax(6, 142, 10),
+        });
+    }
+    let key = spec.strip_prefix("preset:")?;
+    let p = CPU_PROFILES.iter().find(|p| p.key == key)?;
+    Some(CpuidSpoof {
+        vendor: p.vendor_id,
+        brand: p.model_name,
+        fms: leaf1_eax(p.family, p.model, 1),
+    })
+}
+
+/// Pack family/model/stepping into the CPUID leaf-1 EAX layout.
+fn leaf1_eax(family: u32, model: u32, stepping: u32) -> u32 {
+    let base_family = if family >= 0xf { 0xf } else { family };
+    let ext_family = family.saturating_sub(0xf);
+    let base_model = model & 0xf;
+    let ext_model = (model >> 4) & 0xf;
+    (stepping & 0xf)
+        | (base_model << 4)
+        | (base_family << 8)
+        | (ext_model << 16)
+        | (ext_family << 20)
+}
+
 /// Render a full `/proc/cpuinfo` body for a profile — one block per thread.
 fn generate(p: &CpuProfile) -> String {
     let threads_per_core = (p.threads / p.cores).max(1);
