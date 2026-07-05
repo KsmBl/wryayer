@@ -23,10 +23,20 @@ reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"], def
 indicatif = "0.17"
 chrono = { version = "0.4", features = ["serde"] }
 zip = "2"
-ratatui = "0.29"
-crossterm = "0.28"
+ratatui = { version = "0.29", optional = true }
+crossterm = { version = "0.28", optional = true }
 shellexpand = "3"
 libc = "0.2"
+gtk4 = { version = "0.11", features = ["v4_10"], optional = true }
+
+[features]
+# The interactive terminal UI (ratatui/crossterm). On by default so the plain
+# `cargo build` and CI keep the TUI; the installer lets users opt out.
+tui = ["dep:ratatui", "dep:crossterm"]
+# Native GTK4 desktop front-end (plain GTK, no libadwaita). Opt-in so the plain
+# CLI/TUI builds (and CI) don't require the GTK development libraries.
+gui = ["dep:gtk4"]
+default = ["tui"]
 
 [dev-dependencies]
 tempfile = "3"

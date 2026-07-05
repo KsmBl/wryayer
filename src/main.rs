@@ -1,4 +1,4 @@
-use wryayer::{avahi_stub, commands, tui};
+use wryayer::{avahi_stub, commands};
 
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{generate, Shell};
@@ -145,6 +145,8 @@ enum Commands {
     },
     /// Launch the interactive TUI
     Tui,
+    /// Launch the native GTK desktop GUI (requires a build with --features gui)
+    Gui,
     /// Hard-link identical files across app directories to reclaim disk space
     Dedup {
         /// Print every file that gets linked
@@ -356,7 +358,30 @@ fn main() {
         }
         Commands::Snapshots { app_name } => commands::snapshot::list(&app_name),
         Commands::SnapshotPrune { app_name, keep } => commands::snapshot::prune(&app_name, keep),
-        Commands::Tui => tui::run(),
+        Commands::Tui => {
+            #[cfg(feature = "tui")]
+            {
+                wryayer::tui::run()
+            }
+            #[cfg(not(feature = "tui"))]
+            {
+                Err(anyhow::anyhow!(
+                    "this build has no TUI. Rebuild with the tui feature:\n    cargo build --release --features tui"
+                ))
+            }
+        }
+        Commands::Gui => {
+            #[cfg(feature = "gui")]
+            {
+                wryayer::gui::run()
+            }
+            #[cfg(not(feature = "gui"))]
+            {
+                Err(anyhow::anyhow!(
+                    "this build has no GUI. Rebuild with the gui feature:\n    cargo build --release --features gui"
+                ))
+            }
+        }
         Commands::Dedup { verbose } => commands::dedup::run(verbose),
         Commands::Clean => commands::clean::run(),
         Commands::Completions { shell } => {

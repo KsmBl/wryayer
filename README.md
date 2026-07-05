@@ -114,6 +114,40 @@ Settings are stored in `~/.wryayer/defaults.ini` and apply as defaults to every 
 
 ---
 
+## The desktop GUI
+
+For a pointer-driven front-end there is a native **GTK4** GUI (plain GTK — ordinary
+buttons and a tab strip, built like the TUI) that does everything the TUI does —
+browse, install, run, update, configure, snapshot, export, import, and the
+Windows-game wizard — plus a search-and-tick install flow. The tabs mirror the TUI:
+**Installed · Install · Import · Games · Space · Settings**.
+
+```
+wryayer gui
+```
+
+- **Multi-select install** — search the official repos and the AUR, then **tick a
+  checkbox** on every package you want and install them all in one go (no per-item
+  key presses). You can also type an exact package name to add it directly.
+- **Per-app settings** — a proper preferences page with switches, drop-downs and a
+  folder picker for shared directories; writes the same `~/.wryayer/<app>/config.ini`
+  the CLI uses.
+- **Live console** — installs, updates and removals stream their output into a page
+  you can close when done.
+
+The GUI is an **opt-in build feature** so the plain CLI/TUI doesn't require the GTK
+development libraries:
+
+```
+cargo build --release --features gui
+```
+
+It needs `gtk4` (≥ 4.10) at build and run time. On Arch: `sudo pacman -S --needed gtk4`.
+A desktop entry for your application menu lives in
+[`packaging/de.synthelicz.Wryayer.desktop`](packaging/de.synthelicz.Wryayer.desktop).
+
+---
+
 ## Supported distributions
 
 | Distribution | Support | Notes |

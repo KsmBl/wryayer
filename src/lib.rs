@@ -2,7 +2,10 @@ pub mod avahi_stub;
 pub mod commands;
 pub mod config;
 pub mod distro;
+#[cfg(feature = "gui")]
+pub mod gui;
 pub mod launcher;
 pub mod manifest;
 pub mod package;
+#[cfg(feature = "tui")]
 pub mod tui;
