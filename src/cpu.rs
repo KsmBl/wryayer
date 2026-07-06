@@ -123,37 +123,146 @@ pub const CPU_PROFILES: &[CpuProfile] = &[
     },
 ];
 
-/// If `spec` is `preset:<key>` for a known profile, render its `/proc/cpuinfo`.
+/// If `spec` names a built-in preset (`preset:<key>`) or a user-defined CPU
+/// (`custom:<...>`), render its `/proc/cpuinfo`.
 pub fn cpuinfo_for(spec: &str) -> Option<String> {
+    if let Some(c) = CustomCpu::parse(spec) {
+        return Some(generate(&c.view()));
+    }
     let key = spec.strip_prefix("preset:")?;
     let p = CPU_PROFILES.iter().find(|p| p.key == key)?;
-    Some(generate(p))
+    Some(generate(&p.view()))
+}
+
+/// A user-defined CPU built with the TUI configurator. Serialized into the
+/// config as `custom:<vendor>|<family>|<model>|<stepping>|<cores>|<threads>|<mhz>|<cache_kb>|<model name>`.
+/// The model name is the last field so it may safely contain any character
+/// except a newline. Flags and address sizes are derived from the vendor.
+#[derive(Clone, PartialEq)]
+pub struct CustomCpu {
+    pub vendor_id: String,
+    pub family: u32,
+    pub model: u32,
+    pub stepping: u32,
+    pub cores: u32,
+    pub threads: u32,
+    pub mhz: u32,
+    pub cache_kb: u32,
+    pub model_name: String,
+}
+
+impl CustomCpu {
+    /// A sensible starting point for the configurator (a generic 8-core Intel).
+    pub fn starter() -> Self {
+        CustomCpu {
+            vendor_id: "GenuineIntel".to_string(),
+            family: 6,
+            model: 151,
+            stepping: 1,
+            cores: 8,
+            threads: 16,
+            mhz: 3200,
+            cache_kb: 16384,
+            model_name: "Custom CPU @ 3.20GHz".to_string(),
+        }
+    }
+
+    /// Serialize into the `custom:...` config value.
+    pub fn serialize(&self) -> String {
+        format!(
+            "custom:{}|{}|{}|{}|{}|{}|{}|{}|{}",
+            self.vendor_id, self.family, self.model, self.stepping,
+            self.cores, self.threads, self.mhz, self.cache_kb, self.model_name,
+        )
+    }
+
+    /// Parse a `custom:...` config value. Returns None for anything else,
+    /// including the bare legacy `custom` (raw-editor) value.
+    pub fn parse(spec: &str) -> Option<CustomCpu> {
+        let body = spec.strip_prefix("custom:")?;
+        // 9 fields; the model name (last) may contain '|', so split with a cap.
+        let mut it = body.splitn(9, '|');
+        let vendor_id = it.next()?.to_string();
+        let family = it.next()?.parse().ok()?;
+        let model = it.next()?.parse().ok()?;
+        let stepping = it.next()?.parse().ok()?;
+        let cores = it.next()?.parse().ok()?;
+        let threads = it.next()?.parse().ok()?;
+        let mhz = it.next()?.parse().ok()?;
+        let cache_kb = it.next()?.parse().ok()?;
+        let model_name = it.next()?.to_string();
+        Some(CustomCpu {
+            vendor_id, family, model, stepping,
+            cores, threads, mhz, cache_kb, model_name,
+        })
+    }
+
+    /// Seed a custom CPU from a built-in `preset:<key>`, so the configurator can
+    /// pre-fill from a preset the user was previously using. None for non-presets.
+    pub fn from_preset(spec: &str) -> Option<CustomCpu> {
+        let key = spec.strip_prefix("preset:")?;
+        let p = CPU_PROFILES.iter().find(|p| p.key == key)?;
+        Some(CustomCpu {
+            vendor_id: p.vendor_id.to_string(),
+            family: p.family, model: p.model, stepping: 1,
+            cores: p.cores, threads: p.threads, mhz: p.mhz, cache_kb: p.cache_kb,
+            model_name: p.model_name.to_string(),
+        })
+    }
+
+    fn flags(&self) -> &'static str {
+        if self.vendor_id == "AuthenticAMD" { AMD_FLAGS } else { INTEL_FLAGS }
+    }
+
+    fn view(&self) -> CpuView<'_> {
+        CpuView {
+            vendor_id: &self.vendor_id,
+            family: self.family,
+            model: self.model,
+            stepping: self.stepping,
+            model_name: &self.model_name,
+            cores: self.cores.max(1),
+            threads: self.threads.max(self.cores).max(1),
+            mhz: self.mhz,
+            cache_kb: self.cache_kb,
+            address_sizes: "48 bits physical, 48 bits virtual",
+            flags: self.flags(),
+        }
+    }
 }
 
 /// The values the CPUID-spoofing shim needs to present a fake CPU: 12-char
 /// vendor id, brand string (the displayed model name), and the leaf-1 EAX that
 /// encodes family/model/stepping.
 pub struct CpuidSpoof {
-    pub vendor: &'static str,
-    pub brand: &'static str,
+    pub vendor: String,
+    pub brand: String,
     pub fms: u32,
 }
 
-/// CPUID-spoof data for a config value, if it names a built-in CPU. Covers both
-/// the `preset:<key>` profiles and the legacy "sample" (Intel i7-8550U).
+/// CPUID-spoof data for a config value, if it names a CPU. Covers the
+/// `preset:<key>` profiles, a user-defined `custom:<...>`, and the legacy
+/// "sample" (Intel i7-8550U).
 pub fn cpuid_spoof_for(spec: &str) -> Option<CpuidSpoof> {
     if spec == "sample" {
         return Some(CpuidSpoof {
-            vendor: "GenuineIntel",
-            brand: "Intel(R) Core(TM) i7-8550U CPU @ 1.80GHz",
+            vendor: "GenuineIntel".to_string(),
+            brand: "Intel(R) Core(TM) i7-8550U CPU @ 1.80GHz".to_string(),
             fms: leaf1_eax(6, 142, 10),
+        });
+    }
+    if let Some(c) = CustomCpu::parse(spec) {
+        return Some(CpuidSpoof {
+            vendor: c.vendor_id.clone(),
+            brand: c.model_name.clone(),
+            fms: leaf1_eax(c.family, c.model, c.stepping),
         });
     }
     let key = spec.strip_prefix("preset:")?;
     let p = CPU_PROFILES.iter().find(|p| p.key == key)?;
     Some(CpuidSpoof {
-        vendor: p.vendor_id,
-        brand: p.model_name,
+        vendor: p.vendor_id.to_string(),
+        brand: p.model_name.to_string(),
         fms: leaf1_eax(p.family, p.model, 1),
     })
 }
@@ -171,9 +280,43 @@ fn leaf1_eax(family: u32, model: u32, stepping: u32) -> u32 {
         | (ext_family << 20)
 }
 
-/// Render a full `/proc/cpuinfo` body for a profile — one block per thread.
-fn generate(p: &CpuProfile) -> String {
-    let threads_per_core = (p.threads / p.cores).max(1);
+/// A borrowed view of the fields needed to render `/proc/cpuinfo`, shared by
+/// the built-in [`CpuProfile`]s and the user-defined [`CustomCpu`].
+struct CpuView<'a> {
+    vendor_id: &'a str,
+    family: u32,
+    model: u32,
+    stepping: u32,
+    model_name: &'a str,
+    cores: u32,
+    threads: u32,
+    mhz: u32,
+    cache_kb: u32,
+    address_sizes: &'a str,
+    flags: &'a str,
+}
+
+impl CpuProfile {
+    fn view(&self) -> CpuView<'_> {
+        CpuView {
+            vendor_id: self.vendor_id,
+            family: self.family,
+            model: self.model,
+            stepping: 1,
+            model_name: self.model_name,
+            cores: self.cores,
+            threads: self.threads,
+            mhz: self.mhz,
+            cache_kb: self.cache_kb,
+            address_sizes: self.address_sizes,
+            flags: self.flags,
+        }
+    }
+}
+
+/// Render a full `/proc/cpuinfo` body for a CPU — one block per thread.
+fn generate(p: &CpuView) -> String {
+    let threads_per_core = (p.threads / p.cores.max(1)).max(1);
     let bogomips = format!("{:.2}", p.mhz as f64 * 2.0);
     let mut out = String::new();
     for i in 0..p.threads {
@@ -184,7 +327,7 @@ fn generate(p: &CpuProfile) -> String {
              cpu family\t: {family}\n\
              model\t\t: {model}\n\
              model name\t: {name}\n\
-             stepping\t: 1\n\
+             stepping\t: {stepping}\n\
              cpu MHz\t\t: {mhz}.000\n\
              cache size\t: {cache} KB\n\
              physical id\t: 0\n\
@@ -208,6 +351,7 @@ fn generate(p: &CpuProfile) -> String {
             family = p.family,
             model = p.model,
             name = p.model_name,
+            stepping = p.stepping,
             mhz = p.mhz,
             cache = p.cache_kb,
             threads = p.threads,
@@ -243,5 +387,35 @@ mod tests {
         assert!(cpuinfo_for("preset:nope").is_none());
         assert!(cpuinfo_for("/some/path").is_none());
         assert!(cpuinfo_for("sample").is_none());
+    }
+
+    #[test]
+    fn custom_round_trips_and_renders() {
+        let c = CustomCpu {
+            vendor_id: "AuthenticAMD".to_string(),
+            family: 25, model: 97, stepping: 2,
+            cores: 12, threads: 24, mhz: 4200, cache_kb: 65536,
+            model_name: "My Fancy Chip @ 4.20GHz | rev A".to_string(),
+        };
+        let spec = c.serialize();
+        assert!(spec.starts_with("custom:"));
+        // Round-trips even though the model name contains '|'.
+        assert!(CustomCpu::parse(&spec).unwrap() == c);
+        // Renders one block per thread with the custom name and vendor.
+        let text = cpuinfo_for(&spec).expect("renders");
+        assert_eq!(text.matches("processor\t:").count(), 24);
+        assert!(text.contains("My Fancy Chip @ 4.20GHz | rev A"));
+        assert!(text.contains("AuthenticAMD"));
+        // And drives the CPUID shim.
+        let sp = cpuid_spoof_for(&spec).expect("cpuid");
+        assert_eq!(sp.vendor, "AuthenticAMD");
+        assert_eq!(sp.fms, leaf1_eax(25, 97, 2));
+    }
+
+    #[test]
+    fn bare_custom_is_not_a_custom_cpu() {
+        // The legacy raw-editor value is a bare "custom", not "custom:...".
+        assert!(CustomCpu::parse("custom").is_none());
+        assert!(cpuinfo_for("custom").is_none());
     }
 }

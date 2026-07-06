@@ -1010,8 +1010,8 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
                     if let Some(s) = so.to_str() {
                         cmd.args(["--ro-bind", s, "/.wryayer-cpuidspoof.so"]);
                         cmd.args(["--setenv", "LD_PRELOAD", "/.wryayer-cpuidspoof.so"]);
-                        cmd.args(["--setenv", "WRYAYER_CPUID_VENDOR", sp.vendor]);
-                        cmd.args(["--setenv", "WRYAYER_CPUID_BRAND", sp.brand]);
+                        cmd.args(["--setenv", "WRYAYER_CPUID_VENDOR", &sp.vendor]);
+                        cmd.args(["--setenv", "WRYAYER_CPUID_BRAND", &sp.brand]);
                         cmd.args(["--setenv", "WRYAYER_CPUID_FMS", &format!("0x{:08x}", sp.fms)]);
                     }
                 }
