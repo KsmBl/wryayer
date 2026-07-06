@@ -25,7 +25,7 @@ pub fn build_settings_tab(ctx: &Ctx) -> gtk::Box {
     form.set_margin_bottom(8);
     form.set_margin_start(8);
     form.set_margin_end(8);
-    let gather = build_form(&form, read_global_config(), true, ctx);
+    let gather = build_form(&form, read_global_config(), true, None, ctx);
 
     let scroller = gtk::ScrolledWindow::new();
     scroller.set_vexpand(true);
@@ -71,7 +71,7 @@ pub fn open(ctx: &Ctx, app_name: &str) {
     form.set_margin_bottom(8);
     form.set_margin_start(8);
     form.set_margin_end(8);
-    let gather = build_form(&form, cfg, false, ctx);
+    let gather = build_form(&form, cfg, false, Some(app_name), ctx);
 
     let scroller = gtk::ScrolledWindow::new();
     scroller.set_vexpand(true);
@@ -185,7 +185,7 @@ fn entry_random(form: &gtk::Box, caption: &str, value: &str, gen: fn() -> String
 
 /// Build the form widgets into `form` and return a closure that reconstructs an
 /// `AppConfig` from them (carrying over anything not shown from the original).
-fn build_form(form: &gtk::Box, cfg: AppConfig, is_global: bool, ctx: &Ctx) -> Rc<dyn Fn() -> AppConfig> {
+fn build_form(form: &gtk::Box, cfg: AppConfig, is_global: bool, app_name: Option<&str>, ctx: &Ctx) -> Rc<dyn Fn() -> AppConfig> {
     header(form, "Sandbox");
     let network = check(form, "Network access", cfg.network);
     let camera = check(form, "Camera (/dev/video*)", cfg.camera);
@@ -234,6 +234,10 @@ fn build_form(form: &gtk::Box, cfg: AppConfig, is_global: bool, ctx: &Ctx) -> Rc
 
     header(form, "Resources");
     let ram = entry(form, "RAM limit (e.g. 2 GB)", &cfg.ram_limit.map(format_ram_limit).unwrap_or_default());
+
+    // Bound apps (per-app only): tick other installed apps to expose as
+    // host-delegated launchers inside this app's sandbox.
+    let mut bound_checks: Vec<(String, gtk::CheckButton)> = Vec::new();
 
     // Shared dirs (per-app only).
     let shared_state: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(cfg.shared_dirs.clone()));
@@ -303,6 +307,34 @@ fn build_form(form: &gtk::Box, cfg: AppConfig, is_global: bool, ctx: &Ctx) -> Rc
                 }
             });
         }
+
+        header(form, "Bound apps");
+        let hint = gtk::Label::new(Some(
+            "Ticked apps become launchers inside this app's sandbox — e.g. tick \
+             firefox so links open in Firefox's own container.",
+        ));
+        hint.set_xalign(0.0);
+        hint.set_wrap(true);
+        form.append(&hint);
+
+        let self_name = app_name.unwrap_or("");
+        let mut names: Vec<String> = crate::manifest::list_all_apps()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|m| m.app.name)
+            .filter(|n| n != self_name)
+            .collect();
+        names.sort();
+        if names.is_empty() {
+            let l = gtk::Label::new(Some("No other apps installed to bind."));
+            l.set_xalign(0.0);
+            form.append(&l);
+        }
+        for n in names {
+            let active = cfg.bound_apps.contains(&n);
+            let c = check(form, &n, active);
+            bound_checks.push((n, c));
+        }
     }
 
     // Global-only groups.
@@ -363,6 +395,14 @@ fn build_form(form: &gtk::Box, cfg: AppConfig, is_global: bool, ctx: &Ctx) -> Rc
         c.spoof_terminal = spoof_terminal.is_active();
         c.ram_limit = parse_ram_limit(&ram.text());
         c.shared_dirs = shared_state.borrow().clone();
+
+        // Bound apps only exist on the per-app form (global has no such section).
+        if global_widgets.is_none() {
+            c.bound_apps = bound_checks.iter()
+                .filter(|(_, cb)| cb.is_active())
+                .map(|(n, _)| n.clone())
+                .collect();
+        }
 
         if let Some((cs, ci, as_, cc, theme, layout)) = &global_widgets {
             c.create_shortcut = cs.is_active();

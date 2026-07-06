@@ -112,6 +112,11 @@ pub struct AppConfig {
     /// desktop portal, so file pickers run in-sandbox and only show shared
     /// dirs instead of leaking host paths (default: true)
     pub portal_filter: bool,
+    /// Names of other installed wryayer apps exposed inside this app's sandbox
+    /// as host-delegated launchers. When the sandboxed app runs e.g. `firefox
+    /// <url>`, the command is forwarded out to the host and re-launched as
+    /// `wryayer run firefox -- <url>` in Firefox's own container (default: none).
+    pub bound_apps: Vec<String>,
 }
 
 impl Default for AppConfig {
@@ -139,6 +144,7 @@ impl Default for AppConfig {
             theme: Theme::Default,
             layout: Layout::Default,
             portal_filter: true,
+            bound_apps: Vec::new(),
         }
     }
 }
@@ -240,6 +246,7 @@ fn sync_container_aliases(root_name: &str, root_config: &AppConfig) -> Result<()
         alias_cfg.spoof_terminal   = root_config.spoof_terminal;
         alias_cfg.ram_limit        = root_config.ram_limit;
         alias_cfg.portal_filter    = root_config.portal_filter;
+        alias_cfg.bound_apps       = root_config.bound_apps.clone();
         let alias_path = config_path(alias)?;
         fs::write(&alias_path, format_ini(&alias_cfg))
             .with_context(|| format!("failed to write {}", alias_path.display()))?;
@@ -356,6 +363,12 @@ pub fn parse_ini(content: &str) -> Result<AppConfig> {
             }
             ("portal_filter", v) => {
                 config.portal_filter = !matches!(v, "off" | "false" | "0" | "no");
+            }
+            ("bind_app", v) if !v.is_empty() => {
+                let name = v.to_owned();
+                if !config.bound_apps.contains(&name) {
+                    config.bound_apps.push(name);
+                }
             }
             _ => {}
         }
@@ -549,6 +562,15 @@ pub fn format_ini(config: &AppConfig) -> String {
         s.push_str("; Maximum RAM (RAM + swap). Enforced via systemd-run MemoryMax+MemorySwapMax.\n");
         s.push_str("; Accepts a unit: KB / MB / GB (e.g. 512MB, 2GB). A bare number means MiB.\n");
         s.push_str(&format!("ram_limit = {}\n", format_ram_limit(kib)));
+    }
+    if !config.bound_apps.is_empty() {
+        s.push_str("\n[bind]\n");
+        s.push_str("; Other installed wryayer apps exposed inside this sandbox as\n");
+        s.push_str("; host-delegated launchers. Running e.g. `firefox <url>` from this\n");
+        s.push_str("; app forwards to the host and re-launches `wryayer run firefox`.\n");
+        for app in &config.bound_apps {
+            s.push_str(&format!("bind_app = {app}\n"));
+        }
     }
     if !config.create_shortcut || !config.confirm_install || !config.ask_shortcut || config.clean_cache || config.theme != Theme::Default || config.layout != Layout::Default || !config.portal_filter {
         s.push_str("\n[behavior]\n");

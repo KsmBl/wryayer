@@ -175,6 +175,14 @@ enum Commands {
         /// Path to the generated dbus-daemon config file
         config: String,
     },
+    /// Internal: host-side portal listener for cross-container app binding (not for direct use)
+    #[command(hide = true)]
+    PortalListener {
+        /// AF_UNIX socket path to listen on
+        socket: String,
+        /// Comma-separated list of app names allowed to be launched
+        allowed: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -399,6 +407,7 @@ fn main() {
             Ok(())
         }
         Commands::AvahiStub { socket, config } => avahi_stub::run(&socket, &config),
+        Commands::PortalListener { socket, allowed } => commands::portal::run(&socket, &allowed),
     };
 
     if let Err(e) = result {

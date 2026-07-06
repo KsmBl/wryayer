@@ -7,6 +7,7 @@ pub mod import;
 pub mod install;
 pub mod install_game;
 pub mod list;
+pub mod portal;
 pub mod remove;
 pub mod repair;
 pub mod run;

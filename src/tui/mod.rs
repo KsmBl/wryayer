@@ -82,6 +82,14 @@ pub enum Screen {
         dirs: Vec<String>,
         selected: usize,
     },
+    /// Multi-select list of other installed apps to bind into this app's
+    /// sandbox as host-delegated launchers (config.bound_apps). Each entry is
+    /// (app name, ticked). Space toggles; Enter/Esc saves and returns to Config.
+    BoundApps {
+        app_name: String,
+        apps: Vec<(String, bool)>,
+        selected: usize,
+    },
     FileBrowser {
         current_dir: PathBuf,
         entries: Vec<FbEntry>,
@@ -991,6 +999,7 @@ fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
         Screen::GameConfirm { .. } => 21,
         Screen::SnapshotManager { .. } => 22,
         Screen::CpuConfig { .. } => 23,
+        Screen::BoundApps { .. } => 24,
     };
 
     match tag {
@@ -1018,6 +1027,7 @@ fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
         21 => on_game_confirm(app, code),
         22 => on_snapshot_manager(app, code),
         23 => on_cpu_config(app, code),
+        24 => on_bound_apps(app, code),
         _ => {}
     }
     Ok(())
@@ -2092,8 +2102,8 @@ fn on_op_done(app: &mut App, code: KeyCode) -> Result<()> {
 // Rows: 0=network 1=camera 2=microphone 3=audio 4=temp_mode 5=temp_delete 6=shared_dirs
 //       7=spoof_hostname 8=spoof_username 9=spoof_machine_id 10=spoof_cpuinfo 11=spoof_os
 //       12=spoof_terminal 13=ram_limit 14=avahi
-// Per-app Config (no wine_game):  15=Save
-// Per-app Config (wine_game):     15=game_exe 16=game_prefix 17=Save
+// Per-app Config (no wine_game):  15=bound_apps 16=Save
+// Per-app Config (wine_game):     15=bound_apps 16=game_exe 17=game_prefix 18=Save
 // Global Settings:                15=create_shortcut 16=confirm_install 17=ask_shortcut
 //                                 18=clean_cache 19=theme 20=layout 21=Save
 pub const CFG_SHARES: usize = 6;
@@ -2106,9 +2116,11 @@ pub const CFG_SPOOF_TERMINAL: usize = 12;
 pub const CFG_RAM_LIMIT: usize = 13;
 /// Avahi mode — a shared row shown in both per-app Config and global Settings.
 pub const CFG_AVAHI: usize = 14;
+/// Bound apps — a per-app-only row that opens the cross-container bind picker.
+pub const CFG_BOUND: usize = 15;
 /// Wine-game rows (only present when the Config screen carries `wine_game = Some`).
-pub const CFG_GAME_EXE: usize = 15;
-pub const CFG_GAME_PREFIX: usize = 16;
+pub const CFG_GAME_EXE: usize = 16;
+pub const CFG_GAME_PREFIX: usize = 17;
 /// The following are only shown in the global Settings tab, not per-app Config.
 /// Their indices sit past the per-app rows (which top out at 17 = wine save), so
 /// the shared setting_* helpers never see them from a per-app screen.
@@ -2124,12 +2136,12 @@ pub const CFG_LEN: usize = 22;
 /// Index of the Save button in the per-app Config screen. Shifts down by 2 when
 /// the screen carries wine_game rows.
 pub fn app_cfg_save_idx(has_wine_game: bool) -> usize {
-    if has_wine_game { 17 } else { 15 }
+    if has_wine_game { 18 } else { 16 }
 }
 
 /// Total navigable rows in the per-app Config screen.
 pub fn app_cfg_total_rows(has_wine_game: bool) -> usize {
-    if has_wine_game { 18 } else { 16 }
+    if has_wine_game { 19 } else { 17 }
 }
 
 /// A fixed 32-char hex machine-id that apps can use as a plausible-looking ID.
@@ -2176,6 +2188,11 @@ fn on_config(app: &mut App, code: KeyCode) {
                 app.needs_clear = true;
                 return;
             }
+            if *selected == CFG_BOUND {
+                let name = app_name.clone();
+                open_bound_apps(app, name);
+                return;
+            }
             if has_wg && (*selected == CFG_GAME_EXE || *selected == CFG_GAME_PREFIX) {
                 open_game_field_input(app);
                 return;
@@ -2186,7 +2203,7 @@ fn on_config(app: &mut App, code: KeyCode) {
             // Inverse of Right — cycle backward. Special rows are no-ops.
             let sel = *selected;
             let is_game_row = has_wg && (sel == CFG_GAME_EXE || sel == CFG_GAME_PREFIX);
-            if sel != save_idx && sel != CFG_SHARES && !is_game_row {
+            if sel != save_idx && sel != CFG_SHARES && sel != CFG_BOUND && !is_game_row {
                 cycle_setting(config, sel, -1);
             }
         }
@@ -2203,6 +2220,11 @@ fn on_config(app: &mut App, code: KeyCode) {
                 let sel = if dirs.is_empty() { 0 } else { dirs.len() - 1 };
                 app.screen = Screen::SharedDirs { app_name: name, dirs, selected: sel };
                 app.needs_clear = true;
+                return;
+            }
+            if *selected == CFG_BOUND {
+                let name = app_name.clone();
+                open_bound_apps(app, name);
                 return;
             }
             if has_wg && (*selected == CFG_GAME_EXE || *selected == CFG_GAME_PREFIX) {
@@ -3094,6 +3116,59 @@ fn on_shared_dirs(app: &mut App, code: KeyCode) {
         KeyCode::Char('a') => {
             let name = app_name.clone();
             open_file_browser(app, BrowserMode::PickShareDir(name));
+        }
+        _ => {}
+    }
+}
+
+/// Open the bound-apps multi-select for `app_name`: every other installed app
+/// (root apps and aliases that can be launched), pre-ticked from the current
+/// config.bound_apps.
+fn open_bound_apps(app: &mut App, app_name: String) {
+    let cfg = read_shared_cfg(&app_name);
+    let chosen = cfg.bound_apps;
+    let mut apps: Vec<(String, bool)> = crate::manifest::list_all_apps()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|m| m.app.name)
+        .filter(|n| *n != app_name)
+        .map(|n| {
+            let on = chosen.contains(&n);
+            (n, on)
+        })
+        .collect();
+    apps.sort_by(|a, b| a.0.cmp(&b.0));
+    app.screen = Screen::BoundApps { app_name, apps, selected: 0 };
+    app.needs_clear = true;
+}
+
+fn on_bound_apps(app: &mut App, code: KeyCode) {
+    let Screen::BoundApps { app_name, apps, selected } = &mut app.screen else { return };
+    match code {
+        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => {
+            // Persist the ticked set into config.bound_apps and return to Config.
+            let name = app_name.clone();
+            let chosen: Vec<String> = apps.iter()
+                .filter(|(_, on)| *on)
+                .map(|(n, _)| n.clone())
+                .collect();
+            let mut cfg = read_shared_cfg(&name);
+            cfg.bound_apps = chosen;
+            write_shared_cfg(&name, &cfg);
+            let config = read_config(&name).unwrap_or_default();
+            app.screen = Screen::Config { app_name: name, config, selected: CFG_BOUND };
+            app.needs_clear = true;
+        }
+        KeyCode::Up | KeyCode::Char('k') if !apps.is_empty() => {
+            *selected = if *selected == 0 { apps.len() - 1 } else { *selected - 1 };
+        }
+        KeyCode::Down | KeyCode::Char('j') if !apps.is_empty() => {
+            *selected = (*selected + 1) % apps.len();
+        }
+        KeyCode::Char(' ') if !apps.is_empty() => {
+            if let Some(entry) = apps.get_mut(*selected) {
+                entry.1 = !entry.1;
+            }
         }
         _ => {}
     }

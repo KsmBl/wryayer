@@ -30,4 +30,25 @@ fn main() {
              CPU-name spoofing via CPUID is disabled, /proc/cpuinfo binding still works"
         );
     }
+
+    // Portal client: a tiny *static* helper symlinked into sandboxes under each
+    // bound app's name. It must be statically linked so it runs regardless of
+    // which libraries the sandboxed app's filesystem tree ships.
+    println!("cargo:rerun-if-changed=csrc/portal_client.c");
+    let portal = format!("{out_dir}/wryayer-portal");
+    let portal_built = Command::new(&cc)
+        .args(["-static", "-O2", "-o", &portal, "csrc/portal_client.c"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    if !portal_built {
+        // Empty blob → the runtime treats cross-container app binding as
+        // unavailable and skips the portal setup.
+        let _ = std::fs::write(&portal, b"");
+        println!(
+            "cargo:warning=could not build the static portal client \
+             (no C compiler or no static libc?); cross-container app binding is disabled"
+        );
+    }
 }

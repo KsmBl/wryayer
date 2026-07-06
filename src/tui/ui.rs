@@ -249,6 +249,12 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             let selected = *selected;
             draw_shared_dirs(f, area, &app_name, &dirs, selected);
         }
+        Screen::BoundApps { app_name, apps, selected } => {
+            let app_name = app_name.clone();
+            let apps = apps.clone();
+            let selected = *selected;
+            draw_bound_apps(f, area, &app_name, &apps, selected);
+        }
         Screen::FileBrowser { current_dir, entries, fb_state, mode } => {
             let title = current_dir.to_string_lossy().into_owned();
             let entries: Vec<(String, bool, bool)> = entries
@@ -1842,6 +1848,11 @@ fn draw_config(
             AvahiMode::Host => " host ".to_string(),
             AvahiMode::Off  => "  off ".to_string(),
         }),
+        ("Bound apps ", if config.bound_apps.is_empty() {
+            " none  →".to_string()
+        } else {
+            format!(" {}  →", config.bound_apps.len())
+        }),
     ];
 
     // Wine-game rows are only shown when the Config was opened for a wine game.
@@ -2276,6 +2287,71 @@ fn draw_shared_dirs(f: &mut Frame, area: Rect, app_name: &str, dirs: &[String], 
             Style::default().fg(c_dim()),
         )),
         chunks[1],
+    );
+}
+
+fn draw_bound_apps(f: &mut Frame, area: Rect, app_name: &str, apps: &[(String, bool)], selected: usize) {
+    let popup = centered_rect(60, 70, area);
+    f.render_widget(Clear, popup);
+
+    let block = Block::default().borders(Borders::ALL).border_type(c_border_type())
+        .title(format!(" Bind apps into — {app_name} "))
+        .title_style(Style::default().fg(c_accent()).add_modifier(Modifier::BOLD))
+        .border_style(Style::default().fg(c_accent()));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(2), Constraint::Min(0), Constraint::Length(1)])
+        .split(inner);
+
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            "  Ticked apps become launchers inside this app's sandbox\n  (e.g. tick firefox so links open in Firefox's container).",
+            Style::default().fg(c_dim()),
+        )).wrap(Wrap { trim: false }),
+        chunks[0],
+    );
+
+    if apps.is_empty() {
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                "  No other apps are installed to bind.",
+                Style::default().fg(c_dim()),
+            )),
+            chunks[1],
+        );
+    } else {
+        let items: Vec<ListItem> = apps.iter().enumerate().map(|(i, (name, on))| {
+            let is_sel = i == selected;
+            let mark = if *on { "[x] " } else { "[ ] " };
+            let name_style = if is_sel {
+                Style::default().fg(c_fg()).bg(c_select()).add_modifier(Modifier::BOLD)
+            } else if *on {
+                Style::default().fg(c_green())
+            } else {
+                Style::default().fg(c_accent())
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(if is_sel { " ▶ " } else { "   " }, Style::default().fg(c_accent())),
+                Span::styled(mark, Style::default().fg(if *on { c_green() } else { c_dim() })),
+                Span::styled(name.as_str(), name_style),
+            ]))
+        }).collect();
+
+        let mut list_state = ListState::default();
+        list_state.select(Some(selected));
+        let list = List::new(items).block(Block::default());
+        f.render_stateful_widget(list, chunks[1], &mut list_state);
+    }
+
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            " [Space] Toggle  [Enter/Esc] Save & Back",
+            Style::default().fg(c_dim()),
+        )),
+        chunks[2],
     );
 }
 
