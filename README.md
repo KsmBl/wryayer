@@ -85,7 +85,7 @@ Changes are saved to that app's own `config.ini`.
 | `d` / `Delete` | Remove selected app (double-confirm) |
 | `e` | Export selected app to a zip |
 | `p` | Snapshot selected app (hard-linked clone) |
-| `o` | Roll selected app back to its latest snapshot |
+| `o` | Open the snapshot manager (choose one to roll back to, or delete) |
 | `u` | Update selected app |
 | `U` | Update **all** out-of-date apps |
 | `c` | Check for updates |
@@ -412,10 +412,18 @@ wryayer rollback firefox
 # Roll back to a specific labelled snapshot
 wryayer rollback firefox 20260516-141022
 
+# Delete one specific snapshot
+wryayer snapshot-delete firefox 20260516-141022
+
 # Prune old snapshots, keeping the N most recent (default: 3)
 wryayer snapshot-prune firefox
 wryayer snapshot-prune firefox --keep 5
 ```
+
+In the TUI, press `o` on an installed app to open the **snapshot manager**: a
+list of every snapshot where `Enter` rolls back to the highlighted one and `d`
+deletes it. The same chooser is available in the GUI. When called without a
+label, `wryayer rollback` restores the most recent snapshot.
 
 Snapshots survive updates: a rollback after an update returns you to the
 pre-update version. (Extraction always writes a fresh inode, so the snapshot's
@@ -553,9 +561,10 @@ wryayer config firefox spoof-machine-id random    # fresh UUID every launch
 wryayer config firefox spoof-machine-id sample    # → cafebabe0011223344556677deadbeef
 wryayer config firefox spoof-machine-id a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4
 
-# Spoof /proc/cpuinfo
-wryayer config firefox spoof-cpuinfo sample        # built-in generic Intel i7
-wryayer config firefox spoof-cpuinfo ~/fakecpu.txt # custom file
+# Spoof the CPU — presets, a custom file, or the TUI configurator
+wryayer config firefox spoof-cpuinfo preset:ryzen-9-7950x # a built-in profile
+wryayer config firefox spoof-cpuinfo ~/fakecpu.txt        # your own cpuinfo file
+wryayer config firefox spoof-cpuinfo system               # disable
 
 # Spoof /etc/os-release (hide real distro identity from the app)
 wryayer config firefox spoof-os ubuntu      # present as Ubuntu 24.04 LTS
@@ -573,7 +582,25 @@ wryayer config fastfetch spoof-terminal off  # disable (default)
 wryayer config firefox spoof-hostname system
 ```
 
+**CPU spoofing goes deeper than the file.** Tools like CPU-X and anything built
+on `libcpuid` read the CPU by executing the `CPUID` instruction directly, so a
+faked `/proc/cpuinfo` alone doesn't fool them. wryayer also injects a small
+`LD_PRELOAD` shim that intercepts `CPUID` (via CPUID-faulting) and reports the
+spoofed vendor, brand string and family/model/stepping — so the fake CPU is what
+detection libraries see too. Pick from **ten built-in profiles** (`preset:<key>`,
+spanning budget → flagship → server across Intel and AMD), or build your own in
+the TUI: choose **custom** on the *Spoof CPU info* row to open a field-by-field
+**configurator** (vendor, model name, family, model, stepping, cores, threads,
+MHz, cache). Press `?` on any field for help. The result spoofs both
+`/proc/cpuinfo` and `CPUID`.
+
 All settings are editable in the TUI config screen (`s` on an installed app). Each row uses a picker; press `?` on any row or option to see a description of what the setting does.
+
+Text-input fields (custom names, spoof strings, the CPU configurator) support
+in-line editing: **←/→** move the caret, **Home/End** jump to the ends, and
+**Delete** removes the character under the caret. Every settings list wraps
+around — pressing **↓** on the last row jumps to the first, and **↑** on the
+first jumps to the last.
 
 Press `?` on the **installed** tab for a full key-bindings reference.
 
@@ -582,7 +609,7 @@ Press `?` on the **installed** tab for a full key-bindings reference.
 | `spoof-hostname <value\|sample\|system\|off>` | Any string | Writes `/etc/hostname`, sets `$HOSTNAME` |
 | `spoof-username <value\|sample\|system\|off>` | Any string | Sets `$USER` and `$LOGNAME` |
 | `spoof-machine-id <system\|random\|sample\|hex\|off>` | See below | Writes `/etc/machine-id` |
-| `spoof-cpuinfo <sample\|path\|system\|off>` | Path or `sample` | Binds the file over `/proc/cpuinfo` |
+| `spoof-cpuinfo <preset:key\|path\|custom\|system\|off>` | Preset, path, or configurator | Binds a fake `/proc/cpuinfo` **and** spoofs `CPUID` for `libcpuid`/CPU-X |
 | `spoof-os <ubuntu\|arch\|windows\|arduinoide\|name\|system\|off>` | Preset or any OS name | Writes `/etc/os-release` and `/usr/lib/os-release` |
 | `spoof-terminal <on\|off>` | `on` or `off` | Detects real terminal via process tree and sets `TERM_PROGRAM` inside sandbox |
 
@@ -593,7 +620,7 @@ Press `?` on the **installed** tab for a full key-bindings reference.
 | hostname | `workstation` |
 | username | `user` |
 | machine-id | `cafebabe0011223344556677deadbeef` |
-| cpuinfo | Built-in generic Intel Core i7-8550U on x86_64 |
+| cpuinfo | Ten built-in `preset:` profiles (Intel + AMD, budget → server), or a custom CPU built in the TUI configurator |
 | os-release presets | `ubuntu` → Ubuntu 24.04 LTS · `arch` → Arch Linux · `windows` → Windows 11 · `arduinoide` → ArduinoIDE · any other value used as a custom OS name |
 
 **machine-id modes:**
@@ -651,7 +678,7 @@ The config is stored as a human-readable INI file at `~/.wryayer/<app>/config.in
 - [ ] **Delta updates** — only re-download changed packages instead of the full dep tree
 - [ ] **Export/import via SSH or SFTP** — `wryayer export --remote user@host:/path`
 - [x] **TUI package search from AUR** — Install tab searches both official repos and the AUR
-- [x] **Identity spoofing** — spoof hostname, username, machine-id, and cpuinfo per app
+- [x] **Identity spoofing** — spoof hostname, username, machine-id, OS release, and the CPU per app (fake `/proc/cpuinfo` **and** `CPUID`, with built-in profiles and a TUI configurator)
 - [x] **Global default settings** — Settings tab in TUI and `~/.wryayer/defaults.ini` set defaults inherited by all new apps
 - [x] **Multi-select install** — mark multiple search results with `Space`, install them all sequentially with `Enter`; marks persist across searches
 - [x] **Update all** — check every app for updates on TUI start and update the out-of-date ones with `Shift+U`
