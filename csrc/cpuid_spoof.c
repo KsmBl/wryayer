@@ -33,6 +33,8 @@
 #include <ucontext.h>
 #include <unistd.h>
 #include <dlfcn.h>
+#include <errno.h>
+#include <sched.h>
 #include <sys/syscall.h>
 
 /* Parse a hex/decimal u32 without libc's strtoul (avoids a GLIBC_2.38 symbol
@@ -65,10 +67,19 @@ typedef sighandler_t (*signal_fn)(int, sighandler_t);
 static char g_vendor[16];
 static char g_brand[52];
 static uint32_t g_fms;
-static int g_have_vendor, g_have_brand, g_active;
+static uint32_t g_cores, g_threads;
+static int g_have_vendor, g_have_brand, g_have_topo, g_active;
 
 static sigaction_fn real_sigaction;
 static signal_fn real_signal;
+
+typedef int (*getaffinity_fn)(pid_t, size_t, cpu_set_t *);
+static getaffinity_fn real_sched_getaffinity;
+typedef int (*setaffinity_fn)(pid_t, size_t, const cpu_set_t *);
+static setaffinity_fn real_sched_setaffinity;
+/* The logical CPU libcpuid last "pinned" to; fed back as the x2APIC id in leaf
+ * 0xB/0x1F so its per-CPU enumeration sees g_threads distinct logical CPUs. */
+static uint32_t g_cur_cpu;
 
 /* The handler the app tried to install for SIGSEGV; we chain real faults here. */
 static struct sigaction g_app_sa;
@@ -111,6 +122,51 @@ static void handler(int sig, siginfo_t *si, void *ucv) {
             memcpy(&r[1], g_brand + off + 4, 4);
             memcpy(&r[2], g_brand + off + 8, 4);
             memcpy(&r[3], g_brand + off + 12, 4);
+        }
+
+        /* Topology spoofing so libcpuid (CPU-X) reports the fake core/thread
+         * counts. We drive the *legacy* leaves (1/4/0x80000008) and neutralise
+         * the extended-topology leaves (0xB/0x1F) so libcpuid falls back to the
+         * legacy path we control instead of reading the real silicon's leaf B. */
+        if (g_have_topo) {
+            uint32_t cores = g_cores ? g_cores : 1;
+            uint32_t threads = g_threads ? g_threads : cores;
+            uint32_t tpc = (cores > 0) ? (threads / cores) : 1;
+            if (tpc < 1) tpc = 1;
+            if (leaf == 1) {
+                /* EBX[23:16] = logical processors per package; EDX[28] = HTT. */
+                r[1] = (r[1] & 0x00FFFFFFu) | ((threads & 0xFFu) << 16);
+                if (threads > 1) r[3] |= (1u << 28);
+            } else if (leaf == 4) {
+                /* Intel: EAX[31:26] = max addressable core IDs per package - 1. */
+                r[0] = (r[0] & 0x03FFFFFFu) | (((cores - 1) & 0x3Fu) << 26);
+            } else if (leaf == 0xB || leaf == 0x1F) {
+                /* Provide a coherent extended-topology hierarchy so libcpuid
+                 * derives cores = logical / threads-per-core directly, without
+                 * pinning to every (partly fake) CPU:
+                 *   sub 0 = SMT level  → EBX = threads per core
+                 *   sub 1 = Core level → EBX = logical per package
+                 *   sub ≥2 = invalid. ECX = level | (type<<8). */
+                uint32_t smt_shift = 0; while ((1u << smt_shift) < tpc)     smt_shift++;
+                uint32_t pkg_shift = 0; while ((1u << pkg_shift) < threads) pkg_shift++;
+                if (sub == 0) {
+                    r[0] = smt_shift;
+                    r[1] = tpc;
+                    r[2] = 0u | (1u << 8);       /* level 0, type = SMT(1) */
+                } else if (sub == 1) {
+                    r[0] = pkg_shift;
+                    r[1] = threads;
+                    r[2] = 1u | (2u << 8);       /* level 1, type = Core(2) */
+                } else {
+                    r[0] = 0;
+                    r[1] = 0;
+                    r[2] = sub & 0xFFu;          /* type 0 = invalid */
+                }
+                r[3] = g_cur_cpu;                /* x2APIC id of "current" CPU */
+            } else if (leaf == 0x80000008u) {
+                /* AMD: ECX[7:0] = NC = number of cores - 1. */
+                r[2] = (r[2] & 0xFFFFFF00u) | ((cores - 1) & 0xFFu);
+            }
         }
 
         regs[REG_RAX] = r[0];
@@ -180,12 +236,75 @@ sighandler_t signal(int signum, sighandler_t h) {
     return real_signal(signum, h);
 }
 
+/* Interpose sched_getaffinity so the process appears to be able to run on the
+ * spoofed number of logical CPUs. libcpuid (CPU-X) and glibc's get_nprocs /
+ * coreutils' nproc derive the logical-CPU count from this mask, so faking the
+ * CPUID topology leaves alone isn't enough — the real affinity mask still has
+ * only the host's CPUs. (Runtimes that issue the raw syscall directly, e.g. Go,
+ * bypass this; that's an accepted limitation of a userspace shim.) */
+int sched_getaffinity(pid_t pid, size_t cpusetsize, cpu_set_t *mask) {
+    if (!real_sched_getaffinity)
+        real_sched_getaffinity = (getaffinity_fn)dlsym(RTLD_NEXT, "sched_getaffinity");
+    if (g_have_topo && g_threads > 0 && mask && cpusetsize > 0) {
+        memset(mask, 0, cpusetsize);
+        size_t maxbits = cpusetsize * 8;
+        for (uint32_t i = 0; i < g_threads && i < maxbits; i++)
+            CPU_SET_S(i, cpusetsize, mask);
+        return 0;
+    }
+    if (real_sched_getaffinity)
+        return real_sched_getaffinity(pid, cpusetsize, mask);
+    errno = ENOSYS;
+    return -1;
+}
+
+/* Interpose sched_setaffinity: libcpuid enumerates topology by pinning to each
+ * logical CPU in turn and reading its APIC id. Record the selected CPU (fed to
+ * leaf 0xB above) and report the pin as successful even for the fake surplus
+ * CPUs that don't physically exist. Real CPUs are still pinned for real. */
+int sched_setaffinity(pid_t pid, size_t cpusetsize, const cpu_set_t *mask) {
+    if (!real_sched_setaffinity)
+        real_sched_setaffinity = (setaffinity_fn)dlsym(RTLD_NEXT, "sched_setaffinity");
+    if (g_have_topo && mask && cpusetsize > 0 && CPU_COUNT_S(cpusetsize, mask) == 1) {
+        size_t maxbits = cpusetsize * 8;
+        size_t idx = maxbits;
+        for (size_t i = 0; i < maxbits; i++) {
+            if (CPU_ISSET_S(i, cpusetsize, mask)) { idx = i; break; }
+        }
+        /* Only the spoofed CPUs [0, g_threads) exist to the sandbox: those pins
+         * report success; pins to any other CPU fail, so libcpuid's enumeration
+         * counts exactly g_threads logical CPUs — even when the host has more
+         * real CPUs than the (smaller) spoofed count. */
+        if (idx < g_threads) {
+            g_cur_cpu = (uint32_t)idx;
+            if (real_sched_setaffinity) real_sched_setaffinity(pid, cpusetsize, mask);
+            return 0;
+        }
+        errno = EINVAL;
+        return -1;
+    }
+    if (real_sched_setaffinity)
+        return real_sched_setaffinity(pid, cpusetsize, mask);
+    errno = ENOSYS;
+    return -1;
+}
+
 __attribute__((constructor)) static void init(void) {
     const char *v = getenv("WRYAYER_CPUID_VENDOR");
     const char *b = getenv("WRYAYER_CPUID_BRAND");
     const char *f = getenv("WRYAYER_CPUID_FMS");
-    if ((!v || !*v) && (!b || !*b) && (!f || !*f)) {
+    const char *co = getenv("WRYAYER_CPUID_CORES");
+    const char *th = getenv("WRYAYER_CPUID_THREADS");
+    if ((!v || !*v) && (!b || !*b) && (!f || !*f) && (!th || !*th)) {
         return; /* nothing to spoof */
+    }
+
+    if (th && *th) {
+        g_threads = parse_u32(th);
+        g_cores = (co && *co) ? parse_u32(co) : g_threads;
+        if (g_cores < 1) g_cores = 1;
+        if (g_threads < g_cores) g_threads = g_cores;
+        g_have_topo = (g_threads >= 1);
     }
 
     if (v && *v) {

@@ -238,6 +238,27 @@ pub struct CpuidSpoof {
     pub vendor: String,
     pub brand: String,
     pub fms: u32,
+    /// Physical cores to report through CPUID topology leaves.
+    pub cores: u32,
+    /// Logical processors (threads) to report through CPUID topology leaves.
+    pub threads: u32,
+}
+
+/// Physical cores and logical threads a config value asks for, if it names a
+/// CPU (`preset:<key>`, `custom:<...>`, or the legacy `sample`). Used to drive
+/// the `/proc/stat` + `/sys` overrides that make tools like htop and CPU-X count
+/// the spoofed number of CPUs.
+pub fn topology_for(spec: &str) -> Option<(u32, u32)> {
+    if spec == "sample" {
+        return Some((4, 8)); // Intel i7-8550U: 4 cores / 8 threads
+    }
+    if let Some(c) = CustomCpu::parse(spec) {
+        let cores = c.cores.max(1);
+        return Some((cores, c.threads.max(cores)));
+    }
+    let key = spec.strip_prefix("preset:")?;
+    let p = CPU_PROFILES.iter().find(|p| p.key == key)?;
+    Some((p.cores.max(1), p.threads.max(p.cores).max(1)))
 }
 
 /// CPUID-spoof data for a config value, if it names a CPU. Covers the
@@ -249,13 +270,18 @@ pub fn cpuid_spoof_for(spec: &str) -> Option<CpuidSpoof> {
             vendor: "GenuineIntel".to_string(),
             brand: "Intel(R) Core(TM) i7-8550U CPU @ 1.80GHz".to_string(),
             fms: leaf1_eax(6, 142, 10),
+            cores: 4,
+            threads: 8,
         });
     }
     if let Some(c) = CustomCpu::parse(spec) {
+        let cores = c.cores.max(1);
         return Some(CpuidSpoof {
             vendor: c.vendor_id.clone(),
             brand: c.model_name.clone(),
             fms: leaf1_eax(c.family, c.model, c.stepping),
+            cores,
+            threads: c.threads.max(cores),
         });
     }
     let key = spec.strip_prefix("preset:")?;
@@ -264,6 +290,8 @@ pub fn cpuid_spoof_for(spec: &str) -> Option<CpuidSpoof> {
         vendor: p.vendor_id.to_string(),
         brand: p.model_name.to_string(),
         fms: leaf1_eax(p.family, p.model, 1),
+        cores: p.cores.max(1),
+        threads: p.threads.max(p.cores).max(1),
     })
 }
 
