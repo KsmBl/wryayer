@@ -198,7 +198,151 @@ pub enum Screen {
         snaps: Vec<String>,
         selected: usize,
     },
+    /// Field-by-field configurator for a user-defined ("custom") CPU. Saving
+    /// stores the result as `custom:<...>` in `spoof_cpuinfo`.
+    CpuConfig {
+        /// Empty for global defaults, otherwise the per-app config being edited.
+        app_name: String,
+        config: AppConfig,
+        draft: Box<CpuDraft>,
+        selected: usize,
+        /// When Some, the selected field is being edited: (buffer, caret char index).
+        editing: Option<(String, usize)>,
+        /// When true, a help popup for the selected row is shown over the form.
+        help: bool,
+    },
 }
+
+/// Editable string form of a [`crate::cpu::CustomCpu`]. Every field is held as
+/// text so the configurator can edit it in place; numbers are validated on save.
+#[derive(Clone)]
+pub struct CpuDraft {
+    pub vendor: String,     // "GenuineIntel" or "AuthenticAMD" (cycled, not typed)
+    pub model_name: String,
+    pub family: String,
+    pub model: String,
+    pub stepping: String,
+    pub cores: String,
+    pub threads: String,
+    pub mhz: String,
+    pub cache_kb: String,
+}
+
+/// Field rows in the CPU configurator, in display order. The Save button is an
+/// extra row after these (index `CPU_FIELDS.len()`).
+pub const CPU_FIELDS: &[&str] = &[
+    "Vendor", "Model name", "CPU family", "Model", "Stepping",
+    "Cores", "Threads", "CPU MHz", "Cache (KB)",
+];
+
+/// Row index of the Save button in the configurator.
+pub const CPU_SAVE_ROW: usize = CPU_FIELDS.len();
+
+/// A short one-line hint shown under the selected configurator row.
+pub fn cpu_field_hint(row: usize) -> &'static str {
+    match row {
+        0 => "CPU vendor — ←/→ or Space to switch GenuineIntel / AuthenticAMD.",
+        1 => "Human-readable brand string, e.g. 'AMD Ryzen 9 7950X 16-Core Processor'.",
+        2 => "CPU family number (Intel Core=6, AMD Zen3/4=25). Names the microarchitecture.",
+        3 => "Model number — pins the exact chip within the family.",
+        4 => "Stepping — silicon revision (0–15). 1 is a safe default.",
+        5 => "Number of physical cores to report.",
+        6 => "Total logical CPUs (threads). =Cores for no SMT, 2×Cores for SMT.",
+        7 => "Reported clock speed in MHz (3200 = 3.2 GHz).",
+        8 => "Cache size in KB (16384 = 16 MB).",
+        _ => "Save this CPU and apply it to the sandbox.",
+    }
+}
+
+/// Full `?`-help text for a configurator row.
+pub fn cpu_field_help(row: usize) -> &'static str {
+    match row {
+        0 => "Vendor\n\nThe CPU vendor ID string, reported as /proc/cpuinfo 'vendor_id' and CPUID leaf 0.\n\nUse ←/→ or Space to switch between 'GenuineIntel' (Intel) and 'AuthenticAMD' (AMD). The vendor also selects the matching CPU feature-flag set.",
+        1 => "Model name\n\nThe human-readable brand string shown by lscpu, CPU-X, and /proc/cpuinfo 'model name'.\n\nExamples:\n• 13th Gen Intel(R) Core(TM) i7-13700K\n• AMD Ryzen 9 7950X 16-Core Processor",
+        2 => "CPU family\n\nA number identifying the processor generation / microarchitecture (CPUID family). Together with Model it names a specific chip design, and it is encoded into CPUID leaf 1 so detection libraries (libcpuid / CPU-X) see the same family as /proc/cpuinfo.\n\nCommon values:\n• Intel Core (all modern) = 6\n• AMD Zen / Zen+ = 23\n• AMD Zen 2 = 23\n• AMD Zen 3 / Zen 4 = 25",
+        3 => "Model\n\nA number that, together with CPU family, identifies the exact CPU within that family (CPUID model). Encoded into CPUID leaf 1.\n\nExample: family 6 + model 151 = Intel Alder Lake; family 25 + model 97 = AMD Zen 4 (Ryzen 7000).",
+        4 => "Stepping\n\nThe silicon revision of the chip (CPUID stepping, 0–15). Minor hardware revisions bump this value.\n\nMostly cosmetic for spoofing — leave it at 1 unless you are matching a specific chip.",
+        5 => "Cores\n\nThe number of physical CPU cores to report, shown as 'cpu cores' in /proc/cpuinfo. Must be at least 1.",
+        6 => "Threads\n\nThe total number of logical CPUs (hardware threads). One processor block per thread is written to /proc/cpuinfo.\n\nSet equal to Cores for a chip with no SMT/Hyper-Threading, or 2× Cores for one with SMT. Values below Cores are clamped up to Cores.",
+        7 => "CPU MHz\n\nThe reported clock speed in megahertz, shown as 'cpu MHz' in /proc/cpuinfo (e.g. 3200 = 3.2 GHz). It also drives the synthetic 'bogomips' value.",
+        8 => "Cache (KB)\n\nThe CPU cache size in kilobytes, shown as 'cache size' in /proc/cpuinfo (e.g. 16384 = 16 MB).",
+        _ => "Save\n\nStore this CPU as a custom profile (custom:…) and apply it. It overrides /proc/cpuinfo and the CPUID instruction inside the sandbox, so both file-parsing tools and detection libraries (CPU-X / libcpuid) see the fake CPU.",
+    }
+}
+
+impl CpuDraft {
+    /// Seed the configurator from the current config value: an existing
+    /// `custom:<...>`, a built-in `preset:<key>`, or a generic starter.
+    pub fn from_config(cfg: &AppConfig) -> Self {
+        let base = cfg.spoof_cpuinfo.as_deref()
+            .and_then(crate::cpu::CustomCpu::parse)
+            .or_else(|| cfg.spoof_cpuinfo.as_deref().and_then(crate::cpu::CustomCpu::from_preset))
+            .unwrap_or_else(crate::cpu::CustomCpu::starter);
+        CpuDraft {
+            vendor: base.vendor_id,
+            model_name: base.model_name,
+            family: base.family.to_string(),
+            model: base.model.to_string(),
+            stepping: base.stepping.to_string(),
+            cores: base.cores.to_string(),
+            threads: base.threads.to_string(),
+            mhz: base.mhz.to_string(),
+            cache_kb: base.cache_kb.to_string(),
+        }
+    }
+
+    /// Current text value of field `idx` (0-based, matching `CPU_FIELDS`).
+    pub fn field(&self, idx: usize) -> &str {
+        match idx {
+            0 => &self.vendor,
+            1 => &self.model_name,
+            2 => &self.family,
+            3 => &self.model,
+            4 => &self.stepping,
+            5 => &self.cores,
+            6 => &self.threads,
+            7 => &self.mhz,
+            8 => &self.cache_kb,
+            _ => "",
+        }
+    }
+
+    fn set_field(&mut self, idx: usize, v: String) {
+        match idx {
+            // Row 0 (vendor) is a switch, not a text field — never set here.
+            1 => self.model_name = v,
+            2 => self.family = v,
+            3 => self.model = v,
+            4 => self.stepping = v,
+            5 => self.cores = v,
+            6 => self.threads = v,
+            7 => self.mhz = v,
+            8 => self.cache_kb = v,
+            _ => {}
+        }
+    }
+
+    /// Materialize into a `custom:<...>` config value, coercing invalid or empty
+    /// numeric fields to safe defaults.
+    pub fn to_spec(&self) -> String {
+        let num = |s: &str, d: u32| s.trim().parse::<u32>().unwrap_or(d);
+        let cores = num(&self.cores, 1).max(1);
+        let threads = num(&self.threads, cores).max(cores);
+        let name = if self.model_name.trim().is_empty() { "Custom CPU".to_string() } else { self.model_name.clone() };
+        crate::cpu::CustomCpu {
+            vendor_id: self.vendor.clone(),
+            family: num(&self.family, 6),
+            model: num(&self.model, 0),
+            stepping: num(&self.stepping, 1),
+            cores,
+            threads,
+            mhz: num(&self.mhz, 3000),
+            cache_kb: num(&self.cache_kb, 8192),
+            model_name: name,
+        }.serialize()
+    }
+}
+
 
 pub enum PendingAction {
     Remove(String),
@@ -286,6 +430,10 @@ pub struct App {
     pub status: String,
     pub log_scroll: usize,
     pub needs_clear: bool,
+    /// Caret position (in characters) for whichever text-input overlay is
+    /// active. Only one input is on screen at a time, so a single shared cursor
+    /// is enough. Set to the value's length when an input opens.
+    pub input_cursor: usize,
     /// If Some, the event loop will suspend the TUI, exec `wryayer run <app>`
     /// with inherited stdio so the user actually interacts with the app,
     /// then resume. Set by pressing `r`/Enter on an installed app.
@@ -353,6 +501,7 @@ impl App {
             status: String::new(),
             log_scroll: 0,
             needs_clear: false,
+            input_cursor: 0,
             run_request: None,
             editor_request: None,
             konami_mode: false,
@@ -841,6 +990,7 @@ fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
         Screen::GameNameInput { .. } => 20,
         Screen::GameConfirm { .. } => 21,
         Screen::SnapshotManager { .. } => 22,
+        Screen::CpuConfig { .. } => 23,
     };
 
     match tag {
@@ -867,6 +1017,7 @@ fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
         20 => on_game_name_input(app, code),
         21 => on_game_confirm(app, code),
         22 => on_snapshot_manager(app, code),
+        23 => on_cpu_config(app, code),
         _ => {}
     }
     Ok(())
@@ -916,6 +1067,100 @@ fn on_snapshot_manager(app: &mut App, code: KeyCode) {
                     danger: true,
                 };
                 app.needs_clear = true;
+            }
+        }
+        _ => {}
+    }
+}
+
+/// CPU configurator: edit each field of a user-defined CPU, then save it via the
+/// Save button. ↑/↓ move, Enter edits a field / presses Save, `?` shows per-row
+/// help, Esc cancels.
+fn on_cpu_config(app: &mut App, code: KeyCode) {
+    let Screen::CpuConfig { app_name, config, draft, selected, editing, help } = &mut app.screen else { return };
+    let nrows = CPU_FIELDS.len() + 1; // fields + Save button
+
+    // ── Help popup: any key dismisses ────────────────────────────────────────
+    if *help {
+        *help = false;
+        return;
+    }
+
+    // ── Field edit mode ──────────────────────────────────────────────────────
+    if let Some((buf, cur)) = editing {
+        match code {
+            KeyCode::Esc => { *editing = None; }
+            KeyCode::Enter => {
+                let v = buf.clone();
+                draft.set_field(*selected, v);
+                *editing = None;
+            }
+            // Model name (row 1) is free text; numeric rows accept digits only.
+            _ => {
+                let numeric = *selected >= 2;
+                edit_input(buf, cur, code, 64, |c| !numeric || c.is_ascii_digit());
+            }
+        }
+        return;
+    }
+
+    // ── Navigation mode ──────────────────────────────────────────────────────
+    match code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            // Discard: return to the config popup / settings tab unchanged.
+            let name = app_name.clone();
+            let cfg = config.clone();
+            if name.is_empty() {
+                app.global_config = cfg;
+                app.global_selected = CFG_SPOOF_CPUINFO;
+                app.tab = Tab::Settings;
+                app.screen = Screen::Main;
+            } else {
+                app.screen = Screen::Config { app_name: name, config: cfg, selected: CFG_SPOOF_CPUINFO };
+            }
+            app.needs_clear = true;
+        }
+        KeyCode::Char('?') => { *help = true; }
+        KeyCode::Up | KeyCode::Char('k') => {
+            *selected = if *selected == 0 { nrows - 1 } else { *selected - 1 };
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            *selected = (*selected + 1) % nrows;
+        }
+        // Vendor row: switch between the two vendors we have flag sets for.
+        KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') if *selected == 0 => {
+            draft.vendor = if draft.vendor == "AuthenticAMD" {
+                "GenuineIntel".to_string()
+            } else {
+                "AuthenticAMD".to_string()
+            };
+        }
+        KeyCode::Enter => {
+            if *selected == 0 {
+                draft.vendor = if draft.vendor == "AuthenticAMD" {
+                    "GenuineIntel".to_string()
+                } else {
+                    "AuthenticAMD".to_string()
+                };
+            } else if *selected == CPU_SAVE_ROW {
+                let spec = draft.to_spec();
+                let name = app_name.clone();
+                let mut cfg = config.clone();
+                cfg.spoof_cpuinfo = Some(spec);
+                if name.is_empty() {
+                    app.global_config = cfg;
+                    app.global_selected = CFG_SPOOF_CPUINFO;
+                    app.tab = Tab::Settings;
+                    app.screen = Screen::Main;
+                } else {
+                    app.screen = Screen::Config { app_name: name, config: cfg, selected: CFG_SPOOF_CPUINFO };
+                }
+                app.status = "custom CPU saved".to_string();
+                app.needs_clear = true;
+            } else {
+                let v = draft.field(*selected).to_string();
+                let n = v.chars().count();
+                *editing = Some((v, n));
             }
         }
         _ => {}
@@ -1187,6 +1432,7 @@ fn on_installed(app: &mut App, code: KeyCode) {
             if let Some(m) = app.selected_installed() {
                 let name = m.app.name.clone();
                 let value = m.app.display_name.clone().unwrap_or_default();
+                app.input_cursor = value.chars().count();
                 app.screen = Screen::RenameApp { app_name: name, value };
                 app.needs_clear = true;
             }
@@ -1207,6 +1453,12 @@ fn on_key_help(app: &mut App) {
 // ── App rename overlay ────────────────────────────────────────────────────────
 
 fn on_rename_app(app: &mut App, code: KeyCode) {
+    {
+        let App { screen, input_cursor, .. } = app;
+        if let Screen::RenameApp { value, .. } = screen {
+            if edit_input(value, input_cursor, code, 256, |_| true) { return; }
+        }
+    }
     let Screen::RenameApp { app_name, value } = &mut app.screen else { return };
     match code {
         KeyCode::Esc => {
@@ -1229,8 +1481,6 @@ fn on_rename_app(app: &mut App, code: KeyCode) {
             app.screen = Screen::Main;
             app.needs_clear = true;
         }
-        KeyCode::Backspace => { value.pop(); }
-        KeyCode::Char(c) => { value.push(c); }
         _ => {}
     }
 }
@@ -1238,6 +1488,16 @@ fn on_rename_app(app: &mut App, code: KeyCode) {
 // ── Duplicate install overlay ─────────────────────────────────────────────────
 
 fn on_duplicate_install(app: &mut App, code: KeyCode) {
+    {
+        let App { screen, input_cursor, .. } = app;
+        if let Screen::DuplicateInstall { value, .. } = screen {
+            // 'q' is a valid app-name character while typing, so only treat it as
+            // quit via the match below when it is not consumed as input.
+            if !matches!(code, KeyCode::Char('q')) && edit_input(value, input_cursor, code, 256, |_| true) {
+                return;
+            }
+        }
+    }
     let Screen::DuplicateInstall { pkg, value, into } = &mut app.screen else { return };
     match code {
         KeyCode::Esc | KeyCode::Char('q') => {
@@ -1274,8 +1534,6 @@ fn on_duplicate_install(app: &mut App, code: KeyCode) {
                 PendingAction::Install { pkg, app_name: Some(new_name), into },
             );
         }
-        KeyCode::Backspace => { value.pop(); }
-        KeyCode::Char(c) => { value.push(c); }
         _ => {}
     }
 }
@@ -1565,6 +1823,7 @@ fn on_install_target(app: &mut App, code: KeyCode) {
             // the user must pick a unique alias name before we can confirm.
             let name_taken = app.installed.iter().any(|m| m.app.name == pkg);
             if name_taken {
+                app.input_cursor = 0;
                 app.screen = Screen::DuplicateInstall {
                     pkg,
                     value: String::new(),
@@ -1897,10 +2156,10 @@ fn on_config(app: &mut App, code: KeyCode) {
             app.needs_clear = true;
         }
         KeyCode::Up | KeyCode::Char('k') => {
-            *selected = selected.saturating_sub(1);
+            *selected = if *selected == 0 { total - 1 } else { *selected - 1 };
         }
         KeyCode::Down | KeyCode::Char('j') => {
-            *selected = (*selected + 1).min(total - 1);
+            *selected = (*selected + 1) % total;
         }
         KeyCode::Right | KeyCode::Char(' ') => {
             if *selected == save_idx {
@@ -2001,6 +2260,7 @@ fn open_game_field_input(app: &mut App) {
     let sel = *selected;
     let Some((exe, prefix)) = app.editing_wine_game.as_ref() else { return };
     let value = if sel == CFG_GAME_EXE { exe.clone() } else { prefix.clone() };
+    app.input_cursor = value.chars().count();
     app.screen = Screen::TextInput {
         app_name: name,
         config: cfg,
@@ -2024,9 +2284,11 @@ pub fn setting_options(idx: usize) -> Vec<&'static str> {
         CFG_SPOOF_HOSTNAME | CFG_SPOOF_USERNAME => vec!["system", "sample", "input", "random"],
         CFG_SPOOF_OS => vec!["system", "Ubuntu", "Arch", "Windows 11", "ArduinoIDE", "input"],
         CFG_SPOOF_CPUINFO => {
-            // system, sample, the built-in CPU presets, then the custom editor.
-            let mut v = vec!["system", "sample"];
+            // system, the built-in CPU presets, the field configurator, then the
+            // raw-text editor.
+            let mut v = vec!["system"];
             v.extend(crate::cpu::CPU_PROFILES.iter().map(|p| p.label));
+            v.push("custom");
             v.push("edit");
             v
         }
@@ -2083,7 +2345,7 @@ pub fn setting_description(idx: usize) -> &'static str {
         7 => "Override /etc/hostname and $HOSTNAME inside the sandbox.\n\n• system — use the real hostname\n• sample — sets it to 'workstation'\n• input  — type any custom name\n• random — fill with a generated name, kept fixed until you pick random again",
         8 => "Override $USER and $LOGNAME inside the sandbox.\n\n• system — use your real login name\n• sample — sets it to 'user'\n• input  — type any custom name\n• random — fill with a generated name, kept fixed until you pick random again",
         9 => "Override /etc/machine-id inside the sandbox.\n\n• system — real machine ID\n• random — fresh UUID every launch\n• sample — fixed placeholder\n• input  — type a 32-char hex value",
-        10 => "Override /proc/cpuinfo inside the sandbox — pick a CPU to present.\n\n• system — expose the real CPU\n• sample — generic Intel i7 cpuinfo\n• <CPU>  — a built-in profile spanning budget → flagship → server, Intel and AMD\n• edit   — open a text editor to write a fully custom file (pre-filled with your real CPU data)",
+        10 => "Override /proc/cpuinfo inside the sandbox — pick a CPU to present.\n\n• system — expose the real CPU\n• <CPU>  — a built-in profile spanning budget → flagship → server, Intel and AMD\n• custom — open a configurator to build your own CPU field by field (spoofs cpuinfo + CPUID)\n• edit   — open a text editor to write a fully custom file (pre-filled with your real CPU data)",
         11 => "Override /etc/os-release inside the sandbox.\n\nChoose a preset (Ubuntu, Arch, Windows 11, ArduinoIDE) or 'input' to type any OS name.\n'system' exposes the real OS release.",
         12 => "Detect your real terminal emulator and pass its identity into the sandbox.\n\nWalks the process tree to find kitty, foot, alacritty, WezTerm, etc., then sets the matching env var (KITTY_WINDOW_ID, WEZTERM_PANE, …).\n\nFixes fastfetch / neofetch showing 'bwrap' instead of your real terminal.",
         13 => "Maximum RAM the app may use (RAM + swap both capped).\n\nEnforced via systemd-run MemoryMax + MemorySwapMax=0.\n'none' disables the limit. Requires systemd.\n\nPick a preset or 'custom' to type any size with a unit — e.g. 512MB, 1.5GB, 500000KB (KB/MB/GB, 1024-based).",
@@ -2105,8 +2367,8 @@ pub fn option_description(setting_idx: usize, choice_idx: usize) -> &'static str
         let n = crate::cpu::CPU_PROFILES.len();
         return match choice_idx {
             0 => "system — Expose the real /proc/cpuinfo to the app. No spoofing.",
-            1 => "sample — Bind a built-in generic Intel Core i7-8550U cpuinfo.",
-            c if c >= 2 && c < 2 + n => crate::cpu::CPU_PROFILES[c - 2].desc,
+            c if c >= 1 && c < 1 + n => crate::cpu::CPU_PROFILES[c - 1].desc,
+            c if c == 1 + n => "custom — Open a field-by-field configurator to build your own CPU (vendor, model name, family/model/stepping, cores, threads, MHz, cache). Spoofs both /proc/cpuinfo and CPUID.",
             _ => "edit — Open a text editor to write a fully custom /proc/cpuinfo (pre-filled with your real CPU).",
         };
     }
@@ -2230,15 +2492,18 @@ pub fn setting_current(config: &AppConfig, idx: usize) -> usize {
             _                => 3,
         },
         CFG_SPOOF_CPUINFO => {
-            let last = setting_options(CFG_SPOOF_CPUINFO).len() - 1; // "edit"
+            let opts = setting_options(CFG_SPOOF_CPUINFO).len();
+            let edit = opts - 1;          // raw-text editor
+            let custom = opts - 2;        // field configurator
             match config.spoof_cpuinfo.as_deref() {
                 None           => 0,
-                Some("sample") => 1,
+                Some(v) if v.starts_with("custom:") => custom,
                 Some(v) => v
                     .strip_prefix("preset:")
                     .and_then(|k| crate::cpu::CPU_PROFILES.iter().position(|p| p.key == k))
-                    .map(|pos| 2 + pos)
-                    .unwrap_or(last), // "custom"/legacy path shows as "edit"
+                    .map(|pos| 1 + pos)
+                    // Legacy "sample" / bare "custom" values show as "edit".
+                    .unwrap_or(edit),
             }
         }
         CFG_SPOOF_OS => match config.spoof_os.as_deref() {
@@ -2315,10 +2580,9 @@ pub fn apply_setting(config: &mut AppConfig, idx: usize, choice: usize) {
         (9, 2) => config.spoof_machine_id = Some(MACHINE_ID_SAMPLE.to_string()),
         // (9, 3) = "input" — handled by on_option_picker which opens TextInput
         (10, 0) => config.spoof_cpuinfo = None,
-        (10, 1) => config.spoof_cpuinfo = Some("sample".to_string()),
-        // (10, 2..=N+1) = built-in CPU presets; (10, N+2) = "edit" (editor)
-        (10, c) if c >= 2 && c < 2 + crate::cpu::CPU_PROFILES.len() => {
-            config.spoof_cpuinfo = Some(format!("preset:{}", crate::cpu::CPU_PROFILES[c - 2].key));
+        // (10, 1..=N) = built-in CPU presets; (10, N+1) = "custom", (10, N+2) = "edit"
+        (10, c) if c >= 1 && c < 1 + crate::cpu::CPU_PROFILES.len() => {
+            config.spoof_cpuinfo = Some(format!("preset:{}", crate::cpu::CPU_PROFILES[c - 1].key));
         }
         (11, 0) => config.spoof_os = None,
         (11, 1) => config.spoof_os = Some("ubuntu".to_string()),
@@ -2422,8 +2686,23 @@ fn on_option_picker(app: &mut App, code: KeyCode) {
             let mut cfg = config.clone();
             let idx = *setting_idx;
             let choice = *selected;
+            let cpu_opts = setting_options(CFG_SPOOF_CPUINFO).len();
+            // cpuinfo "custom" (second-to-last) → open the field configurator.
+            if idx == CFG_SPOOF_CPUINFO && choice == cpu_opts - 2 {
+                let draft = Box::new(CpuDraft::from_config(&cfg));
+                app.screen = Screen::CpuConfig {
+                    app_name: name,
+                    config: cfg,
+                    draft,
+                    selected: 0,
+                    editing: None,
+                    help: false,
+                };
+                app.needs_clear = true;
+                return;
+            }
             // cpuinfo "edit" (the last option) → tear down TUI, open editor.
-            if idx == CFG_SPOOF_CPUINFO && choice == setting_options(CFG_SPOOF_CPUINFO).len() - 1 {
+            if idx == CFG_SPOOF_CPUINFO && choice == cpu_opts - 1 {
                 let name2 = name.clone();
                 let cpuinfo_file = crate::manifest::app_dir(&name)
                     .map(|d| d.join(".spoof").join("cpuinfo"));
@@ -2463,6 +2742,7 @@ fn on_option_picker(app: &mut App, code: KeyCode) {
                     _ => false,
                 };
                 let value = if is_preset || current.is_empty() { String::new() } else { current };
+                app.input_cursor = value.chars().count();
                 app.screen = Screen::TextInput {
                     app_name: name,
                     config: cfg,
@@ -2557,7 +2837,63 @@ fn set_spoof_field(config: &mut AppConfig, idx: usize, value: String) {
     }
 }
 
+/// Byte offset of the `char_idx`-th character in `s` (or `s.len()` at the end).
+fn byte_of(s: &str, char_idx: usize) -> usize {
+    s.char_indices().nth(char_idx).map(|(b, _)| b).unwrap_or(s.len())
+}
+
+/// Apply a cursor/editing key to a text field held as (`value`, `cursor`), where
+/// `cursor` is a character index into `value`. Returns true if `code` was an
+/// editing key (Left/Right/Home/End/Backspace/Delete or an accepted Char) so the
+/// caller can stop; false for other keys (Enter/Esc/…). `accept` filters typed
+/// characters; `max_len` caps the length in characters.
+fn edit_input(
+    value: &mut String,
+    cursor: &mut usize,
+    code: KeyCode,
+    max_len: usize,
+    accept: impl Fn(char) -> bool,
+) -> bool {
+    let count = value.chars().count();
+    if *cursor > count { *cursor = count; }
+    match code {
+        KeyCode::Left => { *cursor = cursor.saturating_sub(1); true }
+        KeyCode::Right => { if *cursor < count { *cursor += 1; } true }
+        KeyCode::Home => { *cursor = 0; true }
+        KeyCode::End => { *cursor = count; true }
+        KeyCode::Backspace => {
+            if *cursor > 0 {
+                let b = byte_of(value, *cursor - 1);
+                value.remove(b);
+                *cursor -= 1;
+            }
+            true
+        }
+        KeyCode::Delete => {
+            if *cursor < count {
+                let b = byte_of(value, *cursor);
+                value.remove(b);
+            }
+            true
+        }
+        KeyCode::Char(c) if accept(c) && count < max_len => {
+            let b = byte_of(value, *cursor);
+            value.insert(b, c);
+            *cursor += 1;
+            true
+        }
+        _ => false,
+    }
+}
+
 fn on_text_input(app: &mut App, code: KeyCode) {
+    // Cursor/editing keys mutate value + the shared cursor together.
+    {
+        let App { screen, input_cursor, .. } = app;
+        if let Screen::TextInput { value, .. } = screen {
+            if edit_input(value, input_cursor, code, 4096, |_| true) { return; }
+        }
+    }
     let Screen::TextInput { app_name, config, back_selected, field_idx, value } = &mut app.screen
     else {
         return;
@@ -2608,12 +2944,6 @@ fn on_text_input(app: &mut App, code: KeyCode) {
             }
             app.needs_clear = true;
         }
-        KeyCode::Backspace => {
-            value.pop();
-        }
-        KeyCode::Char(c) => {
-            value.push(c);
-        }
         _ => {}
     }
 }
@@ -2631,10 +2961,10 @@ fn on_space_tab(app: &mut App, code: KeyCode) {
 fn on_settings_tab(app: &mut App, code: KeyCode) {
     match code {
         KeyCode::Up | KeyCode::Char('k') => {
-            app.global_selected = app.global_selected.saturating_sub(1);
+            app.global_selected = if app.global_selected == 0 { CFG_LEN - 1 } else { app.global_selected - 1 };
         }
         KeyCode::Down | KeyCode::Char('j') => {
-            app.global_selected = (app.global_selected + 1).min(CFG_LEN - 1);
+            app.global_selected = (app.global_selected + 1) % CFG_LEN;
         }
         KeyCode::Right | KeyCode::Char(' ') => {
             if app.global_selected == CFG_SAVE {
@@ -2743,13 +3073,12 @@ fn on_shared_dirs(app: &mut App, code: KeyCode) {
             }
             app.needs_clear = true;
         }
-        KeyCode::Up | KeyCode::Char('k') => {
-            *selected = selected.saturating_sub(1);
+        KeyCode::Up | KeyCode::Char('k') if !dirs.is_empty() => {
+            *selected = if *selected == 0 { dirs.len() - 1 } else { *selected - 1 };
         }
-        KeyCode::Down | KeyCode::Char('j')
-            if !dirs.is_empty() => {
-                *selected = (*selected + 1).min(dirs.len() - 1);
-            }
+        KeyCode::Down | KeyCode::Char('j') if !dirs.is_empty() => {
+            *selected = (*selected + 1) % dirs.len();
+        }
         KeyCode::Char('d') | KeyCode::Delete
             if !dirs.is_empty() => {
                 let name = app_name.clone();
@@ -3271,6 +3600,7 @@ fn on_game_exe_pick(app: &mut App, code: KeyCode) {
             let default_name = sanitize_game_name(
                 gd.file_name().and_then(|n| n.to_str()).unwrap_or("game"),
             );
+            app.input_cursor = default_name.chars().count();
             app.screen = Screen::GameNameInput {
                 game_dir: gd,
                 exe,
@@ -3283,6 +3613,12 @@ fn on_game_exe_pick(app: &mut App, code: KeyCode) {
 }
 
 fn on_game_name_input(app: &mut App, code: KeyCode) {
+    {
+        let App { screen, input_cursor, .. } = app;
+        if let Screen::GameNameInput { value, .. } = screen {
+            if edit_input(value, input_cursor, code, 256, |_| true) { return; }
+        }
+    }
     let Screen::GameNameInput { game_dir, exe, value } = &mut app.screen else { return };
     match code {
         KeyCode::Esc => {
@@ -3309,8 +3645,6 @@ fn on_game_name_input(app: &mut App, code: KeyCode) {
             };
             app.needs_clear = true;
         }
-        KeyCode::Backspace => { value.pop(); }
-        KeyCode::Char(c) => { value.push(c); }
         _ => {}
     }
 }

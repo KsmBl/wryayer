@@ -214,15 +214,14 @@ fn build_form(form: &gtk::Box, cfg: AppConfig, is_global: bool, ctx: &Ctx) -> Rc
     let spoof_machine_id = entry(form, "Machine ID / \"random\"", cfg.spoof_machine_id.as_deref().unwrap_or(""));
     let spoof_os = entry(form, "OS name", cfg.spoof_os.as_deref().unwrap_or(""));
     // CPU spoof: a preset picker, plus an optional custom cpuinfo file path.
-    let mut cpu_labels: Vec<&str> = vec!["Real CPU", "Sample (i7-8550U)"];
+    let mut cpu_labels: Vec<&str> = vec!["Real CPU"];
     cpu_labels.extend(CPU_PROFILES.iter().map(|p| p.label));
     let cpu_sel = match cfg.spoof_cpuinfo.as_deref() {
         None => 0,
-        Some("sample") => 1,
         Some(v) => v
             .strip_prefix("preset:")
             .and_then(|k| CPU_PROFILES.iter().position(|p| p.key == k))
-            .map(|p| (p + 2) as u32)
+            .map(|p| (p + 1) as u32)
             .unwrap_or(0),
     };
     let spoof_cpu = dropdown(form, "Spoof CPU", &cpu_labels, cpu_sel);
@@ -357,8 +356,7 @@ fn build_form(form: &gtk::Box, cfg: AppConfig, is_global: bool, ctx: &Ctx) -> Rc
             } else {
                 match spoof_cpu.selected() {
                     0 => None,
-                    1 => Some("sample".to_string()),
-                    n => CPU_PROFILES.get((n - 2) as usize).map(|p| format!("preset:{}", p.key)),
+                    n => CPU_PROFILES.get((n - 1) as usize).map(|p| format!("preset:{}", p.key)),
                 }
             }
         };

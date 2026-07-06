@@ -11,7 +11,7 @@ use crate::config::{AppConfig, AvahiMode, LocalDelete, TempMode};
 
 use super::{
     App, Screen, Tab, CFG_SAVE, CFG_SHARES, CFG_CREATE_SHORTCUT, CFG_GAME_EXE, CFG_GAME_PREFIX,
-    CFG_RAM_LIMIT, app_cfg_save_idx, setting_description, setting_options, setting_current, setting_title,
+    CFG_RAM_LIMIT, CFG_SPOOF_CPUINFO, app_cfg_save_idx, setting_description, setting_options, setting_current, setting_title,
     HOSTNAME_SAMPLE, MACHINE_ID_SAMPLE, USERNAME_SAMPLE,
 };
 
@@ -269,7 +269,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             let game_dir = game_dir.to_string_lossy().into_owned();
             let exe = exe.clone();
             let value = value.clone();
-            draw_game_name_input(f, area, &game_dir, &exe, &value);
+            draw_game_name_input(f, area, &game_dir, &exe, &value, app.input_cursor);
         }
         Screen::GameConfirm { game_dir, exe, app_name, delete_source, selected } => {
             let game_dir = game_dir.to_string_lossy().into_owned();
@@ -344,7 +344,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             } else {
                 &["  Leave blank to disable. Press Enter to confirm."]
             };
-            draw_text_input(f, area, title, &value, hint);
+            draw_text_input(f, area, title, &value, app.input_cursor, hint);
         }
         Screen::KeyHelp => {
             draw_key_help(f, area);
@@ -352,13 +352,13 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Screen::RenameApp { app_name, value } => {
             let app_name = app_name.clone();
             let value = value.clone();
-            draw_rename_app(f, area, &app_name, &value);
+            draw_rename_app(f, area, &app_name, &value, app.input_cursor);
         }
         Screen::DuplicateInstall { pkg, value, into } => {
             let pkg = pkg.clone();
             let value = value.clone();
             let into = into.clone();
-            draw_duplicate_install(f, area, &pkg, &value, into.as_deref());
+            draw_duplicate_install(f, area, &pkg, &value, app.input_cursor, into.as_deref());
         }
         Screen::AlreadyInstalled { pkg, selected } => {
             let pkg = pkg.clone();
@@ -387,7 +387,134 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             let selected = *selected;
             draw_snapshot_manager(f, area, &app_name, &snaps, selected);
         }
+        Screen::CpuConfig { app_name, config, draft, selected, editing, help } => {
+            let app_name = app_name.clone();
+            let config = config.clone();
+            let draft = draft.clone();
+            let selected = *selected;
+            let editing = editing.clone();
+            let help = *help;
+            let wine_game = app.editing_wine_game.clone();
+            // Back the popup with the per-app Config screen (global uses the tabs).
+            if !app_name.is_empty() {
+                draw_config(f, area, &app_name, &config, CFG_SPOOF_CPUINFO, wine_game.as_ref());
+            }
+            let editing_ref = editing.as_ref().map(|(s, c)| (s.as_str(), *c));
+            draw_cpu_config(f, area, &draft, selected, editing_ref);
+            if help {
+                draw_cpu_field_help(f, area, selected);
+            }
+        }
     }
+}
+
+fn draw_cpu_config(f: &mut Frame, area: Rect, draft: &super::CpuDraft, selected: usize, editing: Option<(&str, usize)>) {
+    use super::{CPU_FIELDS, CPU_SAVE_ROW, cpu_field_hint};
+    let popup = centered_rect(58, 74, area);
+    f.render_widget(Clear, popup);
+
+    let block = Block::default().borders(Borders::ALL).border_type(c_border_type())
+        .title(" Configure custom CPU ")
+        .title_style(Style::default().fg(c_accent()).add_modifier(Modifier::BOLD))
+        .border_style(Style::default().fg(c_accent()));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        // field list · hint line · separator · Save button · footer
+        .constraints([
+            Constraint::Min(0), Constraint::Length(1), Constraint::Length(1),
+            Constraint::Length(1), Constraint::Length(1),
+        ])
+        .split(inner);
+
+    let items: Vec<ListItem> = CPU_FIELDS.iter().enumerate().map(|(i, label)| {
+        let label_span = Span::styled(format!("{:<13} ", format!("{label}:")), Style::default().fg(c_dim()));
+        let mut spans = vec![label_span];
+        match editing {
+            // Show the live edit buffer with a caret when this row is being edited.
+            Some((buf, cur)) if i == selected => spans.extend(input_spans(buf, cur)),
+            _ => spans.push(Span::styled(draft.field(i).to_string(), Style::default().fg(c_fg()))),
+        }
+        ListItem::new(Line::from(spans))
+    }).collect();
+
+    let mut state = ListState::default();
+    // Don't highlight a field when the Save button is the active row.
+    state.select(if selected == CPU_SAVE_ROW { None } else { Some(selected) });
+    let list = List::new(items)
+        .highlight_style(Style::default().bg(c_select()).add_modifier(Modifier::BOLD))
+        .highlight_symbol(c_select_symbol());
+    f.render_stateful_widget(list, chunks[0], &mut state);
+
+    // Contextual hint for the selected row.
+    f.render_widget(
+        Paragraph::new(Span::styled(format!(" {}", cpu_field_hint(selected)), Style::default().fg(c_dim())))
+            .wrap(Wrap { trim: true }),
+        chunks[1],
+    );
+
+    // Separator + green Save button, matching the other settings windows.
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            "─".repeat(chunks[2].width as usize),
+            Style::default().fg(Color::Rgb(50, 50, 60)),
+        )),
+        chunks[2],
+    );
+    let is_save = selected == CPU_SAVE_ROW;
+    let save_style = if is_save {
+        Style::default().fg(Color::Black).bg(c_green()).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(c_green())
+    };
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(if is_save { "▶ " } else { "  " }, Style::default().fg(c_accent())),
+            Span::styled("[ Save ]", save_style),
+        ])),
+        chunks[3],
+    );
+
+    let footer = if editing.is_some() {
+        " [Type] Edit  [←/→] Move  [Enter] Confirm  [Esc] Cancel"
+    } else if selected == 0 {
+        " [↑↓] Move  [←/→/Space] Switch  [?] Help  [Esc] Cancel"
+    } else if selected == CPU_SAVE_ROW {
+        " [↑↓] Move  [Enter] Save  [?] Help  [Esc] Cancel"
+    } else {
+        " [↑↓] Move  [Enter] Edit  [?] Help  [Esc] Cancel"
+    };
+    f.render_widget(
+        Paragraph::new(Span::styled(footer, Style::default().fg(c_dim()))),
+        chunks[4],
+    );
+}
+
+/// `?`-help popup describing the selected configurator row.
+fn draw_cpu_field_help(f: &mut Frame, area: Rect, row: usize) {
+    let text = super::cpu_field_help(row);
+    let popup = centered_rect(52, 50, area);
+    f.render_widget(Clear, popup);
+    let block = Block::default().borders(Borders::ALL).border_type(c_border_type())
+        .title(" Help ")
+        .title_style(Style::default().fg(c_accent()).add_modifier(Modifier::BOLD))
+        .border_style(Style::default().fg(c_accent()));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .split(inner);
+    f.render_widget(
+        Paragraph::new(text).style(Style::default().fg(c_fg())).wrap(Wrap { trim: true }),
+        chunks[0],
+    );
+    f.render_widget(
+        Paragraph::new(Span::styled(" Press any key to close", Style::default().fg(c_dim()))),
+        chunks[1],
+    );
 }
 
 fn draw_snapshot_manager(f: &mut Frame, area: Rect, app_name: &str, snaps: &[String], selected: usize) {
@@ -1389,6 +1516,7 @@ fn draw_settings_tab(f: &mut Frame, app: &mut App, area: Rect) {
         ("CPU info",    match config.spoof_cpuinfo.as_deref() {
             None           => "system".into(),
             Some("sample") => "sample".into(),
+            Some(s) if s.starts_with("custom:") || s == "custom" => "custom".into(),
             Some(s)        => s.chars().take(10).collect(),
         }),
         ("OS release",  match config.spoof_os.as_deref() {
@@ -1693,6 +1821,7 @@ fn draw_config(
         ("CPU info   ", match config.spoof_cpuinfo.as_deref() {
             None           => " system ".to_string(),
             Some("sample") => " sample ".to_string(),
+            Some(s) if s.starts_with("custom:") || s == "custom" => " custom ".to_string(),
             Some(s)        => { let t: String = s.chars().take(12).collect(); format!(" {t} ") }
         }),
         ("OS release ", match config.spoof_os.as_deref() {
@@ -1827,7 +1956,26 @@ fn draw_config(
 
 // ── Text input overlay ────────────────────────────────────────────────────────
 
-fn draw_text_input(f: &mut Frame, area: Rect, title: &str, value: &str, hint: &[&str]) {
+/// Build the spans for a text-input value with a caret drawn at `cursor` (a
+/// character index). The character under the caret is shown in reverse video;
+/// at the end of the string the caret is a block glyph.
+fn input_spans(value: &str, cursor: usize) -> Vec<Span<'static>> {
+    let chars: Vec<char> = value.chars().collect();
+    let cur = cursor.min(chars.len());
+    let before: String = chars[..cur].iter().collect();
+    let mut spans = vec![Span::styled(before, Style::default().fg(c_fg()))];
+    if cur < chars.len() {
+        let at: String = chars[cur..=cur].iter().collect();
+        spans.push(Span::styled(at, Style::default().fg(c_fg()).add_modifier(Modifier::REVERSED)));
+        let after: String = chars[cur + 1..].iter().collect();
+        spans.push(Span::styled(after, Style::default().fg(c_fg())));
+    } else {
+        spans.push(Span::styled("█", Style::default().fg(c_fg())));
+    }
+    spans
+}
+
+fn draw_text_input(f: &mut Frame, area: Rect, title: &str, value: &str, cursor: usize, hint: &[&str]) {
     // Grow the popup to fit a multi-line hint (1 border top + hint lines + input + footer).
     let popup = centered_rect(58, 34, area);
     f.render_widget(Clear, popup);
@@ -1850,8 +1998,10 @@ fn draw_text_input(f: &mut Frame, area: Rect, title: &str, value: &str, hint: &[
         .collect();
     f.render_widget(Paragraph::new(hint_lines), chunks[0]);
 
+    let mut spans = vec![Span::raw(" ")];
+    spans.extend(input_spans(value, cursor));
     f.render_widget(
-        Paragraph::new(format!(" {}█", value))
+        Paragraph::new(Line::from(spans))
             .block(Block::default().borders(Borders::ALL).border_type(c_border_type())
                 .border_style(Style::default().fg(c_accent())))
             .style(Style::default().fg(c_fg())),
@@ -1860,7 +2010,7 @@ fn draw_text_input(f: &mut Frame, area: Rect, title: &str, value: &str, hint: &[
 
     f.render_widget(
         Paragraph::new(Span::styled(
-            " [Enter] Confirm  [Esc] Cancel  [Backspace] Delete char",
+            " [Enter] Confirm  [Esc] Cancel  [←/→] Move  [Del] Delete",
             Style::default().fg(c_dim()),
         )),
         chunks[2],
@@ -2311,7 +2461,7 @@ fn draw_konami_overlay(
 
 // ── Rename app overlay ────────────────────────────────────────────────────────
 
-fn draw_rename_app(f: &mut Frame, area: Rect, app_name: &str, value: &str) {
+fn draw_rename_app(f: &mut Frame, area: Rect, app_name: &str, value: &str, cursor: usize) {
     let popup = centered_rect(54, 30, area);
     f.render_widget(Clear, popup);
 
@@ -2335,8 +2485,10 @@ fn draw_rename_app(f: &mut Frame, area: Rect, app_name: &str, value: &str) {
         chunks[0],
     );
 
+    let mut spans = vec![Span::raw(" ")];
+    spans.extend(input_spans(value, cursor));
     f.render_widget(
-        Paragraph::new(format!(" {}█", value))
+        Paragraph::new(Line::from(spans))
             .block(Block::default().borders(Borders::ALL).border_type(c_border_type())
                 .border_style(Style::default().fg(c_accent())))
             .style(Style::default().fg(c_fg())),
@@ -2345,7 +2497,7 @@ fn draw_rename_app(f: &mut Frame, area: Rect, app_name: &str, value: &str) {
 
     f.render_widget(
         Paragraph::new(Span::styled(
-            " [Enter] Confirm  [Esc] Cancel  [Backspace] Delete char",
+            " [Enter] Confirm  [Esc] Cancel  [←/→] Move  [Del] Delete",
             Style::default().fg(c_dim()),
         )),
         chunks[2],
@@ -2604,7 +2756,7 @@ fn draw_no_launcher_choice(f: &mut Frame, area: Rect, pkg: &str, available_bins:
 
 // ── Duplicate install overlay ─────────────────────────────────────────────────
 
-fn draw_duplicate_install(f: &mut Frame, area: Rect, pkg: &str, value: &str, into: Option<&str>) {
+fn draw_duplicate_install(f: &mut Frame, area: Rect, pkg: &str, value: &str, cursor: usize, into: Option<&str>) {
     let popup = centered_rect(54, 30, area);
     f.render_widget(Clear, popup);
 
@@ -2631,8 +2783,10 @@ fn draw_duplicate_install(f: &mut Frame, area: Rect, pkg: &str, value: &str, int
         chunks[0],
     );
 
+    let mut spans = vec![Span::raw(" ")];
+    spans.extend(input_spans(value, cursor));
     f.render_widget(
-        Paragraph::new(format!(" {}█", value))
+        Paragraph::new(Line::from(spans))
             .block(Block::default().borders(Borders::ALL).border_type(c_border_type())
                 .border_style(Style::default().fg(c_accent())))
             .style(Style::default().fg(c_fg())),
@@ -2641,7 +2795,7 @@ fn draw_duplicate_install(f: &mut Frame, area: Rect, pkg: &str, value: &str, int
 
     f.render_widget(
         Paragraph::new(Span::styled(
-            " [Enter] Install  [Esc] Cancel  [Backspace] Delete char",
+            " [Enter] Install  [Esc] Cancel  [←/→] Move  [Del] Delete",
             Style::default().fg(c_dim()),
         )),
         chunks[2],
@@ -2780,7 +2934,7 @@ fn draw_game_exe_pick(f: &mut Frame, area: Rect, game_dir: &str, exes: &[(String
     );
 }
 
-fn draw_game_name_input(f: &mut Frame, area: Rect, game_dir: &str, exe: &str, value: &str) {
+fn draw_game_name_input(f: &mut Frame, area: Rect, game_dir: &str, exe: &str, value: &str, cursor: usize) {
     let popup = centered_rect(60, 40, area);
     f.render_widget(Clear, popup);
 
@@ -2810,8 +2964,10 @@ fn draw_game_name_input(f: &mut Frame, area: Rect, game_dir: &str, exe: &str, va
         chunks[0],
     );
 
+    let mut spans = vec![Span::raw(" ")];
+    spans.extend(input_spans(value, cursor));
     f.render_widget(
-        Paragraph::new(format!(" {value}█"))
+        Paragraph::new(Line::from(spans))
             .block(Block::default().borders(Borders::ALL).border_type(c_border_type())
                 .title(" Name (~/.wryayer/<name>/ and ~/bin/<name>) ")
                 .title_style(Style::default().fg(c_fg()))
