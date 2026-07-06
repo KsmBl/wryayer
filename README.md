@@ -239,6 +239,10 @@ cargo build
 cp target/debug/wryayer ~/bin/
 ```
 
+Hacking on wryayer? See [`README-CODE.md`](README-CODE.md) for the architecture
+and internals, and [`README-PROGRAMMING.md`](README-PROGRAMMING.md) for a
+task-oriented guide to changing the code.
+
 ---
 
 ## Shell completions
@@ -532,6 +536,22 @@ wryayer config firefox share list
 | `share add <path>` | Any existing directory | — | Bind-mount `<path>` read-write inside the sandbox |
 | `ramlimit <MiB\|none>` | Integer (MiB) or `none` | `none` | Hard cap on RAM **and** swap combined, enforced via `systemd-run --scope -p MemoryMax=NM -p MemorySwapMax=0` (requires systemd). Both limits are necessary — without `MemorySwapMax=0` the kernel silently offloads pages to swap (including zram), letting the app exceed the cap. |
 | `portal_filter` | `on` `off` | `on` | Hide the host desktop portal so in-sandbox file pickers list only your shared directories instead of the whole home tree. Turn `off` if an app needs portal features (screen-share, portal-based file open). |
+| `bind_app <name>` | Another installed app | — | Let this app open links/files in `<name>`'s sandbox (see below) |
+
+### Open links in another app (bound apps)
+
+Sandboxes are isolated, so a chat app has no browser — click a link in a
+sandboxed Discord and nothing happens (or its bundled `xdg-open` errors). **Bind
+apps** bridges two containers: mark which other installed apps a sandbox may
+reach, and wryayer exposes them inside as host-delegated launchers. When the app
+runs `firefox <url>` — or calls `xdg-open`, which is routed to your bound browser
+automatically — the request is forwarded out and re-launched as
+`wryayer run firefox -- <url>` in Firefox's own container.
+
+Set it in the TUI (**Bound apps** row on an app's config → tick the apps to
+expose) or the GTK config page. No host-wide default-browser change is made; the
+routing exists only for the app you configure. Because browsers are
+single-instance, repeated links reuse the running Firefox as new tabs.
 
 ### File pickers only show shared directories
 
@@ -591,8 +611,17 @@ detection libraries see too. Pick from **ten built-in profiles** (`preset:<key>`
 spanning budget → flagship → server across Intel and AMD), or build your own in
 the TUI: choose **custom** on the *Spoof CPU info* row to open a field-by-field
 **configurator** (vendor, model name, family, model, stepping, cores, threads,
-MHz, cache). Press `?` on any field for help. The result spoofs both
-`/proc/cpuinfo` and `CPUID`.
+MHz, cache). Press `?` on any field for help.
+
+**The core and thread count is spoofed too.** Set a 64-core CPU and `htop`,
+`CPU-X`, `lscpu`, `nproc` and `sysconf` all report 64 cores / 128 threads — not
+your real count. This is done on four fronts at once: the rendered
+`/proc/cpuinfo`, the `CPUID` topology leaves, `/proc/stat` (per-core meters), and
+a rebuilt `/sys/devices/system/cpu`. In `htop` the **first N meters mirror your
+host's real cores** and show their live usage; the rest fill out the spoofed
+total. Symmetric CPUs (EPYC, Ryzen, Xeon) report exact counts; hybrid Intel
+parts (P+E cores) are approximated. Runtimes that read CPU count via the raw
+`sched_getaffinity` syscall instead of libc (e.g. Go) still see the real count.
 
 All settings are editable in the TUI config screen (`s` on an installed app). Each row uses a picker; press `?` on any row or option to see a description of what the setting does.
 
@@ -679,6 +708,8 @@ The config is stored as a human-readable INI file at `~/.wryayer/<app>/config.in
 - [ ] **Export/import via SSH or SFTP** — `wryayer export --remote user@host:/path`
 - [x] **TUI package search from AUR** — Install tab searches both official repos and the AUR
 - [x] **Identity spoofing** — spoof hostname, username, machine-id, OS release, and the CPU per app (fake `/proc/cpuinfo` **and** `CPUID`, with built-in profiles and a TUI configurator)
+- [x] **CPU core/thread spoofing** — a spoofed CPU's core/thread count is reflected in `htop`, CPU-X, `lscpu` and `nproc`, with the first meters mirroring the host's real per-core usage
+- [x] **Cross-container app binding** — bound apps open each other's links/files in the target app's own sandbox via a host portal (`bind_app`)
 - [x] **Global default settings** — Settings tab in TUI and `~/.wryayer/defaults.ini` set defaults inherited by all new apps
 - [x] **Multi-select install** — mark multiple search results with `Space`, install them all sequentially with `Enter`; marks persist across searches
 - [x] **Update all** — check every app for updates on TUI start and update the out-of-date ones with `Shift+U`
