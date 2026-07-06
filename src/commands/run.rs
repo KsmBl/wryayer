@@ -32,6 +32,13 @@ cache_alignment\t: 64\n\
 address sizes\t: 39 bits physical, 48 bits virtual\n\
 power management:\n";
 
+/// The statically-linked portal client (csrc/portal_client.c), embedded at
+/// build time. Symlinked into a sandbox under each bound app's name so that
+/// running e.g. `firefox <url>` there forwards the request to the host portal
+/// listener. Empty when the build had no C compiler / no static libc, in which
+/// case cross-container app binding is silently unavailable.
+const PORTAL_HELPER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/wryayer-portal"));
+
 pub fn run(app_name: &str, bin: Option<&str>, args: &[String]) -> Result<()> {
     // Strip a leading "--" separator (e.g. `wryayer run firefox -- file.pdf`)
     let args = match args {
@@ -171,7 +178,7 @@ pub fn run(app_name: &str, bin: Option<&str>, args: &[String]) -> Result<()> {
         // exec() hand-off (correct signal disposition, no extra wryayer in the
         // process tree). The dbus proxy carries PR_SET_PDEATHSIG, so it dies
         // with the app.
-        let (mut cmd, _, _dbus, _avahi) = bwrap_cmd(&app_root_str, &binary, &effective_args, &temp, &config, wine_ctx.as_ref(), &appimage_env);
+        let (mut cmd, _, _dbus, _avahi, _portal) = bwrap_cmd(&app_root_str, &binary, &effective_args, &temp, &config, wine_ctx.as_ref(), &appimage_env);
         set_bwrap_env(&mut cmd);
         if let Some(mib) = config.ram_limit {
             if has_systemd_run() {
@@ -236,7 +243,7 @@ fn launch_bwrap(
     wine: Option<&WineCtx>,
     appimage_env: &[(String, String)],
 ) -> Result<ExitStatus> {
-    let (mut cmd, spoof_dir, mut dbus_proxy, mut avahi_stub) = bwrap_cmd(app_root_str, binary, args, temp, config, wine, appimage_env);
+    let (mut cmd, spoof_dir, mut dbus_proxy, mut avahi_stub, mut portal) = bwrap_cmd(app_root_str, binary, args, temp, config, wine, appimage_env);
     set_bwrap_env(&mut cmd);
     let ram_mib = if let Some(mib) = config.ram_limit {
         if has_systemd_run() {
@@ -257,19 +264,26 @@ fn launch_bwrap(
     let meminfo_path = ram_mib.map(|_| Path::new(app_root_str).join(".spoof").join("meminfo"));
     let mut child = cmd.spawn().context("failed to run bwrap")?;
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let updater = match (ram_mib, meminfo_path) {
-        (Some(mib), Some(path)) if path.exists() => {
+    let mut updaters: Vec<std::thread::JoinHandle<()>> = Vec::new();
+    if let (Some(mib), Some(path)) = (ram_mib, meminfo_path) {
+        if path.exists() {
             let pid = child.id();
             let stop_clone = stop.clone();
-            Some(std::thread::spawn(move || {
-                meminfo_updater_loop(pid, mib, path, stop_clone);
-            }))
+            updaters.push(std::thread::spawn(move || meminfo_updater_loop(pid, mib, path, stop_clone)));
         }
-        _ => None,
-    };
+    }
+    // Keep the spoofed /proc/stat current so per-core CPU usage stays live: the
+    // first N cores track the host's real cores (see spoof_proc_stat).
+    if let Some((_, threads)) = config.spoof_cpuinfo.as_deref().and_then(crate::cpu::topology_for) {
+        let path = Path::new(app_root_str).join(".spoof").join("stat");
+        if path.exists() {
+            let stop_clone = stop.clone();
+            updaters.push(std::thread::spawn(move || proc_stat_updater_loop(path, threads, stop_clone)));
+        }
+    }
     let status = child.wait().context("failed to wait for bwrap")?;
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
-    if let Some(u) = updater {
+    for u in updaters {
         let _ = u.join();
     }
     // The dbus proxy has no self-terminate flag; stop it now that the app is gone.
@@ -282,10 +296,31 @@ fn launch_bwrap(
         let _ = child.kill();
         let _ = child.wait();
     }
+    // Tear down the cross-container portal listener.
+    if let Some(ref mut child) = portal {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
     if let Some(dir) = spoof_dir {
         let _ = std::fs::remove_dir_all(dir);
     }
     Ok(status)
+}
+
+/// True when `binary` (a sandbox path like `/usr/bin/firefox`) is a
+/// Mozilla-family program whose single-instance "remoting" collides with the
+/// host session. These all honour MOZ_NO_REMOTE.
+fn is_mozilla_family(binary: &str) -> bool {
+    let name = Path::new(binary)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    const TOKENS: &[&str] = &[
+        "firefox", "librewolf", "waterfox", "floorp", "mullvad-browser",
+        "thunderbird", "seamonkey", "palemoon", "basilisk", "icecat", "icedove",
+    ];
+    TOKENS.iter().any(|t| name.contains(t))
 }
 
 fn set_bwrap_env(cmd: &mut Command) {
@@ -431,6 +466,168 @@ fn format_meminfo(total_kb: u64, free_kb: u64) -> String {
          SReclaimable:        0 kB\n\
          SUnreclaim:          0 kB\n"
     )
+}
+
+/// Build a synthetic `/proc/stat` exposing exactly `threads` logical CPUs, so
+/// tools that count per-CPU lines (htop) report the spoofed number. The
+/// aggregate `cpu` counters and every non-CPU line are copied from the real
+/// file; each fake `cpuN` line reuses a real per-CPU sample so idle/used ratios
+/// look plausible. The values are a static snapshot, so live per-core usage
+/// bars read as flat — only the CPU *count* is spoofed.
+/// Render a spoofed `/proc/stat` for a machine with `threads` logical CPUs.
+///
+/// The container's first N per-CPU lines mirror the host's real N cores 1:1, so
+/// their busy/idle counters carry the host's actual usage; any surplus cores
+/// (when spoofing *up*) cycle back through the real cores so every meter still
+/// shows live activity. Because the counters are copied fresh from the host on
+/// each call, a periodic rewrite makes tools like htop compute correct per-core
+/// usage deltas.
+fn spoof_proc_stat(threads: u32) -> String {
+    let real = std::fs::read_to_string("/proc/stat").unwrap_or_default();
+    let mut agg: Option<String> = None;
+    let mut per_cpu: Vec<String> = Vec::new(); // counter fields of real cpu0, cpu1, …
+    let mut tail: Vec<String> = Vec::new();
+    for line in real.lines() {
+        if let Some(rest) = line.strip_prefix("cpu") {
+            if rest.starts_with(|c: char| c.is_whitespace()) {
+                agg = Some(line.to_string());
+            } else if rest.starts_with(|c: char| c.is_ascii_digit()) {
+                if let Some((_, v)) = line.split_once(|c: char| c.is_whitespace()) {
+                    per_cpu.push(v.trim().to_string());
+                }
+            } else {
+                tail.push(line.to_string());
+            }
+        } else {
+            tail.push(line.to_string());
+        }
+    }
+    let agg = agg.unwrap_or_else(|| "cpu  0 0 0 0 0 0 0 0 0 0".to_string());
+    if per_cpu.is_empty() {
+        per_cpu.push("0 0 0 0 0 0 0 0 0 0".to_string());
+    }
+    let realn = per_cpu.len();
+
+    let mut out = String::new();
+    out.push_str(&agg);
+    out.push('\n');
+    for i in 0..threads as usize {
+        out.push_str(&format!("cpu{i} {}\n", per_cpu[i % realn]));
+    }
+    for line in &tail {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+/// Rewrite the spoofed `/proc/stat` at `path` from the live host stats every
+/// ~500 ms until `stop` is set, so per-CPU usage stays current in the sandbox.
+fn proc_stat_updater_loop(path: PathBuf, threads: u32, stop: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+    while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+        let _ = std::fs::write(&path, spoof_proc_stat(threads));
+        for _ in 0..5 {
+            if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+}
+
+/// Count how many `cpuN` directories the host exposes under
+/// `/sys/devices/system/cpu` (i.e. the real logical CPU count).
+fn host_cpu_dir_count() -> usize {
+    let mut n = 0;
+    if let Ok(rd) = std::fs::read_dir("/sys/devices/system/cpu") {
+        for e in rd.flatten() {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            if let Some(rest) = name.strip_prefix("cpu") {
+                if !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()) {
+                    n += 1;
+                }
+            }
+        }
+    }
+    n.max(1)
+}
+
+/// Overlay `/sys/devices/system/cpu` so tools that count CPUs from the kernel's
+/// sysfs see the spoofed number. `online`/`present`/`possible` are overridden
+/// with the spoofed range (fixes sysconf/get_nprocs), and — because many tools
+/// (fastfetch, some htop builds) count the `cpuN` *directories* — the directory
+/// set is rebuilt to hold exactly `threads` of them. That needs a tmpfs, since
+/// bwrap can't mkdir inside the read-only `/sys` bind, so the real entries
+/// (cpufreq, cpuidle, real cpuN, …) are bound back on top of it.
+fn spoof_sys_cpu(cmd: &mut Command, spoof_dir: &Path, threads: u32) {
+    let threads = threads.max(1) as usize;
+    let real = host_cpu_dir_count();
+    let base = "/sys/devices/system/cpu";
+
+    // Only rebuild the directory set when the count actually differs.
+    if threads != real {
+        cmd.args(["--tmpfs", base]);
+        // Re-bind every real entry back, except the surplus cpuN dirs when
+        // spoofing *down*, and the online/present/possible files we override.
+        if let Ok(rd) = std::fs::read_dir(base) {
+            for e in rd.flatten() {
+                let name = e.file_name();
+                let name = name.to_string_lossy();
+                if matches!(name.as_ref(), "online" | "present" | "possible" | "offline") {
+                    continue;
+                }
+                if let Some(rest) = name.strip_prefix("cpu") {
+                    // Hide real CPUs beyond a spoofed-down count.
+                    if !rest.is_empty()
+                        && rest.bytes().all(|b| b.is_ascii_digit())
+                        && rest.parse::<usize>().map(|n| n >= threads).unwrap_or(false)
+                    {
+                        continue;
+                    }
+                }
+                let p = format!("{base}/{name}");
+                cmd.args(["--ro-bind-try", &p, &p]);
+            }
+        }
+        // Minimal fake cpuN dirs for the surplus when spoofing *up*. They mirror
+        // a real CPU's cpufreq base_frequency so tools that group CPUs by
+        // frequency (fastfetch's "core types") count all of them as one type
+        // rather than only the real ones that carry cpufreq data.
+        if threads > real {
+            let fake = spoof_dir.join("fakecpu");
+            let _ = std::fs::create_dir_all(fake.join("topology"));
+            let _ = std::fs::create_dir_all(fake.join("cpufreq"));
+            let _ = std::fs::write(fake.join("online"), "1\n");
+            let _ = std::fs::write(fake.join("topology").join("core_id"), "0\n");
+            let _ = std::fs::write(fake.join("topology").join("physical_package_id"), "0\n");
+            // Copy the host's frequency figures so the fake CPUs look identical
+            // to the real ones to frequency-grouping detectors.
+            for f in ["base_frequency", "cpuinfo_max_freq", "cpuinfo_min_freq",
+                      "scaling_max_freq", "scaling_min_freq", "scaling_cur_freq"] {
+                if let Ok(v) = std::fs::read_to_string(format!("{base}/cpu0/cpufreq/{f}")) {
+                    let _ = std::fs::write(fake.join("cpufreq").join(f), v);
+                }
+            }
+            if let Some(fs) = fake.to_str() {
+                for n in real..threads {
+                    cmd.args(["--ro-bind", fs, &format!("{base}/cpu{n}")]);
+                }
+            }
+        }
+    }
+
+    // Spoofed online/present/possible ranges (bound onto the tmpfs above, or
+    // straight onto the real /sys when the count matched and no tmpfs was used).
+    let range = if threads <= 1 { "0".to_string() } else { format!("0-{}", threads - 1) };
+    for leaf in &["online", "present", "possible"] {
+        let f = spoof_dir.join(format!("cpu-{leaf}"));
+        if std::fs::write(&f, format!("{range}\n")).is_ok() {
+            if let Some(s) = f.to_str() {
+                cmd.args(["--ro-bind-try", s, &format!("{base}/{leaf}")]);
+            }
+        }
+    }
 }
 
 /// Locate the cgroup memory.current file for `pid` (a systemd-run --scope
@@ -657,6 +854,66 @@ fn spawn_avahi_stub(spoof_dir: &Path) -> Option<(std::process::Child, String)> {
     None
 }
 
+/// Pick which bound app should handle generic URL/file openers (`xdg-open`,
+/// `x-www-browser`, …). Prefer a bound app whose name looks like a web browser;
+/// otherwise fall back to the first bound app. None when nothing is bound.
+fn pick_open_app(bound: &[String]) -> Option<&str> {
+    const BROWSER_HINTS: &[&str] = &[
+        "firefox", "librewolf", "waterfox", "chrom", "chromium", "brave",
+        "vivaldi", "opera", "edge", "epiphany", "falkon", "qutebrowser",
+        "midori", "zen", "tor-browser", "torbrowser", "min",
+    ];
+    bound.iter()
+        .find(|a| {
+            let low = a.to_ascii_lowercase();
+            BROWSER_HINTS.iter().any(|h| low.contains(h))
+        })
+        .or_else(|| bound.first())
+        .map(String::as_str)
+}
+
+/// Bring up the host-side portal listener for cross-container app binding.
+/// The socket lives under the app's isolated runtime dir (bind-mounted through
+/// /run, so the same absolute path is valid inside the sandbox). Returns the
+/// managed child — carrying PR_SET_PDEATHSIG so it dies with the sandbox even
+/// on the exec() retry path — and the socket path, or None if it didn't come up.
+fn spawn_portal_listener(
+    isolated_rt: &str,
+    allowed: &[String],
+) -> Option<(std::process::Child, String)> {
+    let sock = format!("{isolated_rt}/portal.sock");
+    let ready = format!("{sock}.ready");
+    // Stale files would make bind() fail or fake an early readiness signal.
+    let _ = std::fs::remove_file(&sock);
+    let _ = std::fs::remove_file(&ready);
+
+    let exe = std::env::current_exe().ok()?;
+    let mut c = Command::new(exe);
+    c.arg("portal-listener").arg(&sock).arg(allowed.join(","));
+    c.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    unsafe {
+        c.pre_exec(|| {
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+            Ok(())
+        });
+    }
+    let mut child = c.spawn().ok()?;
+
+    // Wait (up to ~2 s) for the listener to create the socket before the sandbox
+    // app can try to connect through the helper.
+    for _ in 0..80 {
+        if Path::new(&ready).exists() {
+            return Some((child, sock));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    None
+}
+
 /// A short, stable hash of a path — used to name a per-app socket without
 /// exposing the app name.
 fn short_hash(p: &Path) -> u64 {
@@ -755,7 +1012,7 @@ fn find_appimage_in_tree(app_root: &Path) -> Option<String> {
 // ── bwrap command builder ─────────────────────────────────────────────────────
 
 
-fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, config: &AppConfig, wine: Option<&WineCtx>, appimage_env: &[(String, String)]) -> (Command, Option<PathBuf>, Option<std::process::Child>, Option<std::process::Child>) {
+fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, config: &AppConfig, wine: Option<&WineCtx>, appimage_env: &[(String, String)]) -> (Command, Option<PathBuf>, Option<std::process::Child>, Option<std::process::Child>, Option<std::process::Child>) {
     // Terminal spoofing: exec bwrap through a symlink named after the detected
     // terminal. Linux sets task->comm from the exec basename, so fastfetch's
     // process-tree walk sees the terminal name instead of "bwrap".
@@ -1013,9 +1270,26 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
                         cmd.args(["--setenv", "WRYAYER_CPUID_VENDOR", &sp.vendor]);
                         cmd.args(["--setenv", "WRYAYER_CPUID_BRAND", &sp.brand]);
                         cmd.args(["--setenv", "WRYAYER_CPUID_FMS", &format!("0x{:08x}", sp.fms)]);
+                        cmd.args(["--setenv", "WRYAYER_CPUID_CORES", &sp.cores.to_string()]);
+                        cmd.args(["--setenv", "WRYAYER_CPUID_THREADS", &sp.threads.to_string()]);
                     }
                 }
             }
+        }
+
+        // Core/thread count spoofing for tools that count CPUs from the kernel
+        // rather than CPUID: htop reads /proc/stat's per-CPU lines, and
+        // sysconf()/get_nprocs() (used by CPU-X and others) reads
+        // /sys/devices/system/cpu/online. Overlay both with the spoofed count so
+        // they agree with the fake /proc/cpuinfo and CPUID topology above.
+        if let Some((_, threads)) = crate::cpu::topology_for(cpuinfo_path) {
+            let statf = spoof_dir.join("stat");
+            if std::fs::write(&statf, spoof_proc_stat(threads)).is_ok() {
+                if let Some(s) = statf.to_str() {
+                    cmd.args(["--ro-bind-try", s, "/proc/stat"]);
+                }
+            }
+            spoof_sys_cpu(&mut cmd, &spoof_dir, threads);
         }
     }
 
@@ -1137,6 +1411,7 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
     // Audio and Wayland are re-pointed explicitly so they keep working after the
     // runtime-dir change.
     let mut dbus_proxy_child: Option<std::process::Child> = None;
+    let mut portal_child: Option<std::process::Child> = None;
     {
         let host_rt = std::env::var("XDG_RUNTIME_DIR")
             .unwrap_or_else(|_| format!("/run/user/{}", unsafe { libc::getuid() }));
@@ -1219,6 +1494,70 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
                 ]);
             }
         }
+
+        // ── Cross-container app binding ────────────────────────────────────────
+        //
+        // For each app in `bound_apps`, expose a launcher inside the sandbox that
+        // forwards out to the host: a static helper (bound at /.wryayer-portal)
+        // reachable through symlinks named after the bound apps on a private PATH
+        // dir. When the sandboxed app runs `firefox <url>`, the helper connects
+        // to the portal socket and the host relaunches `wryayer run firefox --
+        // <url>` in Firefox's own container. The socket lives under the isolated
+        // runtime dir, which is bind-mounted through /run, so the same absolute
+        // path resolves both here and inside the sandbox.
+        if !config.bound_apps.is_empty() && !PORTAL_HELPER.is_empty() {
+            if let Some((child, sock)) = spawn_portal_listener(&isolated_rt, &config.bound_apps) {
+                portal_child = Some(child);
+
+                // Drop the static helper next to the other spoof files and bind
+                // it read-only into the sandbox.
+                let helper = spoof_dir.join("portal-helper");
+                let mut ok = std::fs::write(&helper, PORTAL_HELPER).is_ok();
+                if ok {
+                    ok = std::fs::set_permissions(
+                        &helper,
+                        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
+                    )
+                    .is_ok();
+                }
+                if ok {
+                    if let Some(hs) = helper.to_str() {
+                        cmd.args(["--ro-bind", hs, "/.wryayer-portal"]);
+                        // A private tmpfs dir holding one symlink per bound app,
+                        // prepended to PATH so it shadows anything in the tree.
+                        cmd.args(["--tmpfs", "/.wryayer-bin"]);
+                        for app in &config.bound_apps {
+                            cmd.args(["--symlink", "/.wryayer-portal", &format!("/.wryayer-bin/{app}")]);
+                        }
+                        // Route the generic URL/file openers (which apps like
+                        // Discord/Telegram call instead of a browser by name)
+                        // through the portal to a chosen bound app. Symlink them
+                        // on the private PATH *and* bind the helper over the real
+                        // /usr/bin/xdg-open so absolute-path callers are covered
+                        // too. Their real openers are often broken in-sandbox
+                        // anyway (they shell out to grep/sed that aren't present).
+                        const OPENERS: &[&str] = &[
+                            "xdg-open", "x-www-browser", "www-browser",
+                            "sensible-browser", "gnome-open", "kde-open", "kde-open5",
+                        ];
+                        if let Some(open_app) = pick_open_app(&config.bound_apps) {
+                            for opener in OPENERS {
+                                cmd.args(["--symlink", "/.wryayer-portal", &format!("/.wryayer-bin/{opener}")]);
+                                cmd.args(["--ro-bind", hs, &format!("/usr/bin/{opener}")]);
+                            }
+                            cmd.args(["--setenv", "WRYAYER_OPEN_APP", open_app]);
+                            // Point $BROWSER at the shim too, for CLI tools that
+                            // honour it directly.
+                            cmd.args(["--setenv", "BROWSER", "/.wryayer-bin/x-www-browser"]);
+                        }
+                        let path = std::env::var("PATH")
+                            .unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".to_string());
+                        cmd.args(["--setenv", "PATH", &format!("/.wryayer-bin:{path}")]);
+                        cmd.args(["--setenv", "WRYAYER_PORTAL_SOCK", &sock]);
+                    }
+                }
+            }
+        }
     }
 
     // ── Wine game ─────────────────────────────────────────────────────────────
@@ -1240,6 +1579,20 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
     // sandbox tree; extract-and-run makes them unpack into $TMPDIR instead.
     // Set unconditionally — it's ignored by non-AppImage binaries.
     cmd.args(["--setenv", "APPIMAGE_EXTRACT_AND_RUN", "1"]);
+
+    // ── Mozilla remoting ──────────────────────────────────────────────────────
+    //
+    // Firefox (and its forks/Thunderbird) try to hand a new invocation off to an
+    // already-running instance. On Linux that hand-off happens over the X11
+    // display and the profile lock, both of which the sandbox still shares with
+    // the host session — so `wryayer run firefox -- file.pdf` finds the host's
+    // Firefox and dies with "Firefox is already running, but is not responding".
+    // MOZ_NO_REMOTE=1 tells the browser to be its own standalone instance and
+    // never remote to another one; combined with the sandbox's private profile
+    // it launches cleanly. Harmless for anything that isn't Mozilla-based.
+    if is_mozilla_family(binary) {
+        cmd.args(["--setenv", "MOZ_NO_REMOTE", "1"]);
+    }
     // Env exported by an AppImage wrapper we bypassed (e.g. `HOME=/opt/Steam`).
     // Applied last so it wins over any earlier --setenv, matching the wrapper.
     for (k, v) in appimage_env {
@@ -1248,7 +1601,7 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
 
     cmd.args(["--", binary]);
     cmd.args(args);
-    (cmd, term_spoof_dir, dbus_proxy_child, avahi_stub_child)
+    (cmd, term_spoof_dir, dbus_proxy_child, avahi_stub_child, portal_child)
 }
 
 /// Scan the sandbox's `home/` subtree for ELF files with missing soname
