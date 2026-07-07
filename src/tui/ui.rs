@@ -10,7 +10,7 @@ use crate::commands::dedup::format_bytes;
 use crate::config::{AppConfig, AvahiMode, LocalDelete, TempMode};
 
 use super::{
-    App, Screen, Tab, CFG_SAVE, CFG_SHARES, CFG_CREATE_SHORTCUT, CFG_GAME_EXE, CFG_GAME_PREFIX,
+    App, Screen, Tab, CFG_SAVE, CFG_SHARES, CFG_GAME_EXE, CFG_GAME_PREFIX,
     CFG_RAM_LIMIT, CFG_SPOOF_CPUINFO, app_cfg_save_idx, setting_description, setting_options, setting_current, setting_title,
     HOSTNAME_SAMPLE, MACHINE_ID_SAMPLE, USERNAME_SAMPLE,
 };
@@ -1559,25 +1559,20 @@ fn draw_settings_tab(f: &mut Frame, app: &mut App, area: Rect) {
         }),
     ];
 
-    // The list is split into two labelled sections: "Default settings" (the
-    // per-app sandbox defaults, rows 0..CFG_CREATE_SHORTCUT) and "Application
-    // settings" (wryayer's own behaviour/appearance, the rest). Section headers
-    // are non-selectable lines between the rows. When the panel is too short to
-    // show everything, the list scrolls to keep the selected row visible; the
-    // separator + Save button stay pinned at the bottom.
-    let app_section_start = CFG_CREATE_SHORTCUT.min(rows.len());
-
-    // The visual sequence of headers and rows.
-    enum Item<'a> { Header(&'a str), Row(usize) }
-    let mut items: Vec<Item> = Vec::with_capacity(rows.len() + 2);
-    items.push(Item::Header("Default settings"));
-    for idx in 0..app_section_start {
-        items.push(Item::Row(idx));
-    }
-    if app_section_start < rows.len() {
-        items.push(Item::Header("Application settings"));
-        for idx in app_section_start..rows.len() {
-            items.push(Item::Row(idx));
+    // The list is split into labelled sections (Hardware / Privacy / Environment
+    // sandbox settings, then wryayer's own Application settings), driven by the
+    // shared `config_sections` table so rendering and ↑/↓ navigation agree.
+    // Section headers are non-selectable lines between the rows. When the panel
+    // is too short to show everything, the list scrolls to keep the selected row
+    // visible; the separator + Save button stay pinned at the bottom.
+    enum Item { Header(&'static str), Row(usize) }
+    let mut items: Vec<Item> = Vec::with_capacity(rows.len() + 4);
+    for (title, idxs) in super::config_sections(true, false) {
+        items.push(Item::Header(title));
+        for idx in idxs {
+            if idx < rows.len() {
+                items.push(Item::Row(idx));
+            }
         }
     }
 
@@ -1867,47 +1862,78 @@ fn draw_config(
     // Save is pinned to the bottom so it's always reachable on small terminals.
     let save_y = inner.y + inner.height.saturating_sub(2);
 
-    // One line per row, scrolled to keep the selected row on screen when the
-    // popup is too short for all of them.  The button sits at height-2 with its
-    // separator just above it, so reserve 3 lines (rows must stop before the
-    // separator, or the last one gets overwritten by it).
-    let visible_h = (inner.height as usize).saturating_sub(3);
-    let sel_row = selected.min(rows.len().saturating_sub(1)); // Save selection scrolls to the end
-    let max_offset = rows.len().saturating_sub(visible_h);
-    let mut offset = if sel_row >= visible_h { sel_row + 1 - visible_h } else { 0 };
-    offset = offset.min(max_offset);
-
-    for (idx, (label, value)) in rows.iter().enumerate() {
-        if idx < offset || idx >= offset + visible_h {
-            continue;
+    // Group the rows into labelled sections (Hardware / Privacy / Environment,
+    // then App binding) via the shared table so the popup matches the Settings
+    // tab and ↑/↓ navigation. Headers are non-selectable lines between rows.
+    enum Item { Header(&'static str), Row(usize) }
+    let mut items: Vec<Item> = Vec::with_capacity(rows.len() + 4);
+    for (title, idxs) in super::config_sections(false, has_wg) {
+        items.push(Item::Header(title));
+        for idx in idxs {
+            if idx < rows.len() {
+                items.push(Item::Row(idx));
+            }
         }
-        let y = inner.y + (idx - offset) as u16;
-        let is_sel = idx == selected;
-        let val_color = match value.trim() {
-            "on"  => c_green(),
-            "off" => c_red(),
-            _     => c_yellow(),
-        };
-        let bg = if is_sel { c_select() } else { Color::Reset };
-        f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(if is_sel { " ▶ " } else { "   " }, Style::default().fg(c_accent())),
-                Span::styled(format!("{label}  "), Style::default().fg(if is_sel { c_fg() } else { c_dim() }).bg(bg)),
-                Span::styled(format!("[{value}]"), Style::default().fg(val_color).bg(bg)
-                    .add_modifier(if is_sel { Modifier::BOLD } else { Modifier::empty() })),
-            ])),
-            Rect { x: inner.x, y, width: inner.width, height: 1 },
-        );
     }
 
-    // Scroll indicators when rows are clipped above/below.
+    // The button sits at height-2 with its separator just above it, so reserve 3
+    // lines (rows must stop before the separator, or the last is overwritten).
+    let visible_h = (inner.height as usize).saturating_sub(3);
+    let sel_visual = items
+        .iter()
+        .position(|it| matches!(it, Item::Row(i) if *i == selected))
+        .unwrap_or(items.len().saturating_sub(1));
+    let max_offset = items.len().saturating_sub(visible_h);
+    let mut offset = if sel_visual >= visible_h { sel_visual + 1 - visible_h } else { 0 };
+    offset = offset.min(max_offset);
+
+    for (vis, item) in items.iter().enumerate() {
+        if vis < offset || vis >= offset + visible_h {
+            continue;
+        }
+        let y = inner.y + (vis - offset) as u16;
+        match item {
+            Item::Header(label) => {
+                let used = label.chars().count() + 4;
+                let fill = (inner.width as usize).saturating_sub(used);
+                f.render_widget(
+                    Paragraph::new(Line::from(vec![
+                        Span::styled(format!("   {label} "), Style::default().fg(c_accent()).add_modifier(Modifier::BOLD)),
+                        Span::styled("─".repeat(fill), Style::default().fg(c_dim())),
+                    ])),
+                    Rect { x: inner.x, y, width: inner.width, height: 1 },
+                );
+            }
+            Item::Row(idx) => {
+                let (label, value) = &rows[*idx];
+                let is_sel = *idx == selected;
+                let val_color = match value.trim() {
+                    "on"  => c_green(),
+                    "off" => c_red(),
+                    _     => c_yellow(),
+                };
+                let bg = if is_sel { c_select() } else { Color::Reset };
+                f.render_widget(
+                    Paragraph::new(Line::from(vec![
+                        Span::styled(if is_sel { " ▶ " } else { "   " }, Style::default().fg(c_accent())),
+                        Span::styled(format!("{label}  "), Style::default().fg(if is_sel { c_fg() } else { c_dim() }).bg(bg)),
+                        Span::styled(format!("[{value}]"), Style::default().fg(val_color).bg(bg)
+                            .add_modifier(if is_sel { Modifier::BOLD } else { Modifier::empty() })),
+                    ])),
+                    Rect { x: inner.x, y, width: inner.width, height: 1 },
+                );
+            }
+        }
+    }
+
+    // Scroll indicators when content is clipped above/below.
     if visible_h > 0 && offset > 0 {
         f.render_widget(
             Paragraph::new(Span::styled("▲", Style::default().fg(c_dim()))),
             Rect { x: inner.x + inner.width.saturating_sub(1), y: inner.y, width: 1, height: 1 },
         );
     }
-    if visible_h > 0 && offset + visible_h < rows.len() {
+    if visible_h > 0 && offset + visible_h < items.len() {
         f.render_widget(
             Paragraph::new(Span::styled("▼", Style::default().fg(c_dim()))),
             Rect { x: inner.x + inner.width.saturating_sub(1), y: inner.y + visible_h as u16 - 1, width: 1, height: 1 },

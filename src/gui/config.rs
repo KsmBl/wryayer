@@ -116,9 +116,13 @@ pub fn open(ctx: &Ctx, app_name: &str) {
 // ── Form construction ──────────────────────────────────────────────────────────
 
 fn header(form: &gtk::Box, text: &str) {
+    // A divider line above each section, so the groups read as separated bands.
+    let sep = gtk::Separator::new(gtk::Orientation::Horizontal);
+    sep.set_margin_top(10);
+    form.append(&sep);
     let l = gtk::Label::new(None);
     l.set_xalign(0.0);
-    l.set_margin_top(8);
+    l.set_margin_top(6);
     l.set_markup(&format!("<b>{}</b>", glib::markup_escape_text(text)));
     form.append(&l);
 }
@@ -271,33 +275,9 @@ fn open_cpu_configurator(parent: &impl IsA<gtk::Window>, initial: crate::cpu::Cu
 /// Build the form widgets into `form` and return a closure that reconstructs an
 /// `AppConfig` from them (carrying over anything not shown from the original).
 fn build_form(form: &gtk::Box, cfg: AppConfig, is_global: bool, app_name: Option<&str>, ctx: &Ctx) -> Rc<dyn Fn() -> AppConfig> {
-    header(form, "Sandbox");
-    let network = check(form, "Network access", cfg.network);
-    let camera = check(form, "Camera (/dev/video*)", cfg.camera);
-    let microphone = check(form, "Microphone", cfg.microphone);
-    let audio = check(form, "Audio output", cfg.audio);
-    let portal = check(form, "Portal filter (hide host desktop portal)", cfg.portal_filter);
-
-    header(form, "Temporary files & discovery");
-    let temp_mode = dropdown(form, "Temp mode",
-        &["Share host /tmp", "Private RAM disk", "Persistent per-app", "Per-instance UUID"],
-        match cfg.temp_mode {
-            TempMode::System => 0, TempMode::Ramdisk => 1, TempMode::Local => 2, TempMode::Uuid => 3,
-        });
-    let temp_delete = dropdown(form, "Temp cleanup (local)",
-        &["Never", "On launch", "On close"],
-        match cfg.temp_delete {
-            LocalDelete::Never => 0, LocalDelete::OnStart => 1, LocalDelete::OnClose => 2,
-        });
-    let avahi = dropdown(form, "Avahi / zeroconf",
-        &["Private stub", "Use host daemon", "Off"],
-        match cfg.avahi { AvahiMode::Stub => 0, AvahiMode::Host => 1, AvahiMode::Off => 2 });
-
-    header(form, "Identity");
-    let spoof_hostname = entry_random(form, "Hostname", cfg.spoof_hostname.as_deref().unwrap_or(""), random_hostname);
-    let spoof_username = entry_random(form, "Username ($USER)", cfg.spoof_username.as_deref().unwrap_or(""), random_username);
-    let spoof_machine_id = entry(form, "Machine ID / \"random\"", cfg.spoof_machine_id.as_deref().unwrap_or(""));
-    let spoof_os = entry(form, "OS name", cfg.spoof_os.as_deref().unwrap_or(""));
+    // Sections mirror the TUI: Hardware (CPU/RAM), Privacy (access), Environment
+    // (identity/temp/OS). See `tui::SANDBOX_SECTIONS` for the canonical grouping.
+    header(form, "Hardware settings");
     // CPU spoof: a preset picker, plus an optional custom cpuinfo file path.
     let mut cpu_labels: Vec<&str> = vec!["Real CPU"];
     cpu_labels.extend(CPU_PROFILES.iter().map(|p| p.label));
@@ -378,10 +358,34 @@ fn build_form(form: &gtk::Box, cfg: AppConfig, is_global: bool, app_name: Option
         _ => "",
     };
     let spoof_cpuinfo = entry(form, "…or custom cpuinfo file", cpu_custom_init);
-    let spoof_terminal = check(form, "Forward terminal identity (TERM_PROGRAM)", cfg.spoof_terminal);
-
-    header(form, "Resources");
     let ram = entry(form, "RAM limit (e.g. 2 GB)", &cfg.ram_limit.map(format_ram_limit).unwrap_or_default());
+
+    header(form, "Privacy settings");
+    let network = check(form, "Network access", cfg.network);
+    let camera = check(form, "Camera (/dev/video*)", cfg.camera);
+    let microphone = check(form, "Microphone", cfg.microphone);
+    let audio = check(form, "Audio output", cfg.audio);
+    let portal = check(form, "Portal filter (hide host desktop portal)", cfg.portal_filter);
+    let avahi = dropdown(form, "Avahi / zeroconf",
+        &["Private stub", "Use host daemon", "Off"],
+        match cfg.avahi { AvahiMode::Stub => 0, AvahiMode::Host => 1, AvahiMode::Off => 2 });
+
+    header(form, "Environment settings");
+    let temp_mode = dropdown(form, "Temp mode",
+        &["Share host /tmp", "Private RAM disk", "Persistent per-app", "Per-instance UUID"],
+        match cfg.temp_mode {
+            TempMode::System => 0, TempMode::Ramdisk => 1, TempMode::Local => 2, TempMode::Uuid => 3,
+        });
+    let temp_delete = dropdown(form, "Temp cleanup (local)",
+        &["Never", "On launch", "On close"],
+        match cfg.temp_delete {
+            LocalDelete::Never => 0, LocalDelete::OnStart => 1, LocalDelete::OnClose => 2,
+        });
+    let spoof_hostname = entry_random(form, "Hostname", cfg.spoof_hostname.as_deref().unwrap_or(""), random_hostname);
+    let spoof_username = entry_random(form, "Username ($USER)", cfg.spoof_username.as_deref().unwrap_or(""), random_username);
+    let spoof_machine_id = entry(form, "Machine ID / \"random\"", cfg.spoof_machine_id.as_deref().unwrap_or(""));
+    let spoof_os = entry(form, "OS name", cfg.spoof_os.as_deref().unwrap_or(""));
+    let spoof_terminal = check(form, "Forward terminal identity (TERM_PROGRAM)", cfg.spoof_terminal);
 
     // Bound apps (per-app only): tick other installed apps to expose as
     // host-delegated launchers inside this app's sandbox.

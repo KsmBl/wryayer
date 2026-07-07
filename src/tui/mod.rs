@@ -2117,6 +2117,14 @@ fn on_op_done(app: &mut App, code: KeyCode) -> Result<()> {
 // Per-app Config (wine_game):     15=bound_apps 16=game_exe 17=game_prefix 18=Save
 // Global Settings:                15=create_shortcut 16=confirm_install 17=ask_shortcut
 //                                 18=clean_cache 19=theme 20=layout 21=Save
+// Named aliases for the boolean/temp rows so the section table and helpers can
+// refer to every row symbolically (the values match the historical literals).
+pub const CFG_NETWORK: usize = 0;
+pub const CFG_CAMERA: usize = 1;
+pub const CFG_MICROPHONE: usize = 2;
+pub const CFG_AUDIO: usize = 3;
+pub const CFG_TEMP_MODE: usize = 4;
+pub const CFG_TEMP_DELETE: usize = 5;
 pub const CFG_SHARES: usize = 6;
 pub const CFG_SPOOF_HOSTNAME: usize = 7;
 pub const CFG_SPOOF_USERNAME: usize = 8;
@@ -2150,6 +2158,72 @@ pub fn app_cfg_save_idx(has_wine_game: bool) -> usize {
     if has_wine_game { 18 } else { 16 }
 }
 
+/// The sandbox config rows grouped into labelled sections, in display order.
+/// Row indices are the stored `CFG_*` values, so the visual grouping is
+/// independent of how the settings are numbered internally. Both renderers and
+/// ↑/↓ navigation walk this table, letting the on-screen order and section
+/// separators differ from the storage layout.
+pub const SANDBOX_SECTIONS: &[(&str, &[usize])] = &[
+    ("Hardware settings", &[CFG_SPOOF_CPUINFO, CFG_RAM_LIMIT]),
+    (
+        "Privacy settings",
+        &[CFG_NETWORK, CFG_CAMERA, CFG_MICROPHONE, CFG_AUDIO, CFG_SHARES, CFG_AVAHI],
+    ),
+    (
+        "Environment settings",
+        &[
+            CFG_SPOOF_HOSTNAME, CFG_SPOOF_USERNAME, CFG_SPOOF_MACHINE_ID,
+            CFG_SPOOF_OS, CFG_SPOOF_TERMINAL, CFG_TEMP_MODE, CFG_TEMP_DELETE,
+        ],
+    ),
+];
+
+/// The config/settings screen as an ordered list of `(section title, row
+/// indices)`. `is_global` chooses the trailing block: wryayer's own behaviour on
+/// the Settings tab, or a per-app Config's bound-apps (+ optional wine-game)
+/// rows.
+pub fn config_sections(is_global: bool, has_wine_game: bool) -> Vec<(&'static str, Vec<usize>)> {
+    let mut out: Vec<(&'static str, Vec<usize>)> =
+        SANDBOX_SECTIONS.iter().map(|(t, idxs)| (*t, idxs.to_vec())).collect();
+    if is_global {
+        out.push((
+            "Application settings",
+            vec![
+                CFG_CREATE_SHORTCUT, CFG_CONFIRM_INSTALL, CFG_ASK_SHORTCUT,
+                CFG_CLEAN_CACHE, CFG_THEME, CFG_LAYOUT,
+            ],
+        ));
+    } else {
+        let mut rows = vec![CFG_BOUND];
+        if has_wine_game {
+            rows.push(CFG_GAME_EXE);
+            rows.push(CFG_GAME_PREFIX);
+        }
+        out.push(("App binding", rows));
+    }
+    out
+}
+
+/// The selectable row indices in display order (Save excluded), used to step
+/// ↑/↓ through the screen in the same order it is drawn.
+pub fn config_nav_order(is_global: bool, has_wine_game: bool) -> Vec<usize> {
+    config_sections(is_global, has_wine_game)
+        .into_iter()
+        .flat_map(|(_, idxs)| idxs)
+        .collect()
+}
+
+/// Step from `selected` to the previous (`-1`) or next (`+1`) row in display
+/// order, wrapping around, with the Save button (`save_idx`) as the final stop.
+pub fn config_nav_step(is_global: bool, has_wine_game: bool, save_idx: usize, selected: usize, dir: i32) -> usize {
+    let mut order = config_nav_order(is_global, has_wine_game);
+    order.push(save_idx);
+    let pos = order.iter().position(|&i| i == selected).unwrap_or(0);
+    let len = order.len();
+    let next = if dir < 0 { (pos + len - 1) % len } else { (pos + 1) % len };
+    order[next]
+}
+
 /// Total navigable rows in the per-app Config screen.
 pub fn app_cfg_total_rows(has_wine_game: bool) -> usize {
     if has_wine_game { 19 } else { 17 }
@@ -2167,7 +2241,6 @@ fn on_config(app: &mut App, code: KeyCode) {
     // count is known without dropping the borrow.
     let has_wg = app.editing_wine_game.is_some();
     let save_idx = app_cfg_save_idx(has_wg);
-    let total = app_cfg_total_rows(has_wg);
 
     let Screen::Config { app_name, config, selected } = &mut app.screen else { return };
 
@@ -2179,10 +2252,10 @@ fn on_config(app: &mut App, code: KeyCode) {
             app.needs_clear = true;
         }
         KeyCode::Up | KeyCode::Char('k') => {
-            *selected = if *selected == 0 { total - 1 } else { *selected - 1 };
+            *selected = config_nav_step(false, has_wg, save_idx, *selected, -1);
         }
         KeyCode::Down | KeyCode::Char('j') => {
-            *selected = (*selected + 1) % total;
+            *selected = config_nav_step(false, has_wg, save_idx, *selected, 1);
         }
         KeyCode::Right | KeyCode::Char(' ') => {
             if *selected == save_idx {
@@ -2994,10 +3067,10 @@ fn on_space_tab(app: &mut App, code: KeyCode) {
 fn on_settings_tab(app: &mut App, code: KeyCode) {
     match code {
         KeyCode::Up | KeyCode::Char('k') => {
-            app.global_selected = if app.global_selected == 0 { CFG_LEN - 1 } else { app.global_selected - 1 };
+            app.global_selected = config_nav_step(true, false, CFG_SAVE, app.global_selected, -1);
         }
         KeyCode::Down | KeyCode::Char('j') => {
-            app.global_selected = (app.global_selected + 1) % CFG_LEN;
+            app.global_selected = config_nav_step(true, false, CFG_SAVE, app.global_selected, 1);
         }
         KeyCode::Right | KeyCode::Char(' ') => {
             if app.global_selected == CFG_SAVE {
