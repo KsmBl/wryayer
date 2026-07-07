@@ -274,8 +274,9 @@ fn launch_bwrap(
     }
     // Keep the spoofed /proc/stat current so per-core CPU usage stays live: the
     // first N cores track the host's real cores (see spoof_proc_stat).
-    if let Some((_, threads)) = config.spoof_cpuinfo.as_deref().and_then(crate::cpu::topology_for) {
-        let path = Path::new(app_root_str).join(".spoof").join("stat");
+    let stat_spoof_dir = Path::new(app_root_str).join(".spoof");
+    if let Some(threads) = spoofed_thread_count(config, &stat_spoof_dir) {
+        let path = stat_spoof_dir.join("stat");
         if path.exists() {
             let stop_clone = stop.clone();
             updaters.push(std::thread::spawn(move || proc_stat_updater_loop(path, threads, stop_clone)));
@@ -305,22 +306,6 @@ fn launch_bwrap(
         let _ = std::fs::remove_dir_all(dir);
     }
     Ok(status)
-}
-
-/// True when `binary` (a sandbox path like `/usr/bin/firefox`) is a
-/// Mozilla-family program whose single-instance "remoting" collides with the
-/// host session. These all honour MOZ_NO_REMOTE.
-fn is_mozilla_family(binary: &str) -> bool {
-    let name = Path::new(binary)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    const TOKENS: &[&str] = &[
-        "firefox", "librewolf", "waterfox", "floorp", "mullvad-browser",
-        "thunderbird", "seamonkey", "palemoon", "basilisk", "icecat", "icedove",
-    ];
-    TOKENS.iter().any(|t| name.contains(t))
 }
 
 fn set_bwrap_env(cmd: &mut Command) {
@@ -521,6 +506,25 @@ fn spoof_proc_stat(threads: u32) -> String {
     out
 }
 
+/// The number of logical CPUs the spoofed `/proc/cpuinfo` presents, or None when
+/// no CPU spoofing is configured. It counts the actual `processor` blocks, so it
+/// works uniformly for presets, custom CPUs, the raw-editor file, and a file
+/// path — not just the values `topology_for` knows about.
+fn spoofed_thread_count(config: &AppConfig, spoof_dir: &Path) -> Option<u32> {
+    let spec = config.spoof_cpuinfo.as_deref()?;
+    let text = if spec == "sample" {
+        CPUINFO_SAMPLE.to_string()
+    } else if spec == "custom" {
+        std::fs::read_to_string(spoof_dir.join("cpuinfo")).ok()?
+    } else if let Some(t) = crate::cpu::cpuinfo_for(spec) {
+        t
+    } else {
+        std::fs::read_to_string(spec).ok()?
+    };
+    let n = text.lines().filter(|l| l.starts_with("processor")).count() as u32;
+    (n >= 1).then_some(n)
+}
+
 /// Rewrite the spoofed `/proc/stat` at `path` from the live host stats every
 /// ~500 ms until `stop` is set, so per-CPU usage stays current in the sandbox.
 fn proc_stat_updater_loop(path: PathBuf, threads: u32, stop: std::sync::Arc<std::sync::atomic::AtomicBool>) {
@@ -612,6 +616,59 @@ fn spoof_sys_cpu(cmd: &mut Command, spoof_dir: &Path, threads: u32) {
             if let Some(fs) = fake.to_str() {
                 for n in real..threads {
                     cmd.args(["--ro-bind", fs, &format!("{base}/cpu{n}")]);
+                }
+            }
+        }
+
+        // Frequency "policy" dirs: fastfetch (and similar) count CPUs by the
+        // per-CPU cpufreq policies (each governs one CPU via affected_cpus), so
+        // rebuild the policy set to the spoofed size too.
+        let cpufreq = format!("{base}/cpufreq");
+        if std::path::Path::new(&cpufreq).is_dir() {
+            cmd.args(["--tmpfs", &cpufreq]);
+            // Re-bind real entries, dropping surplus real policies when down.
+            if let Ok(rd) = std::fs::read_dir(&cpufreq) {
+                for e in rd.flatten() {
+                    let name = e.file_name();
+                    let name = name.to_string_lossy();
+                    if let Some(rest) = name.strip_prefix("policy") {
+                        if !rest.is_empty()
+                            && rest.bytes().all(|b| b.is_ascii_digit())
+                            && rest.parse::<usize>().map(|n| n >= threads).unwrap_or(false)
+                        {
+                            continue;
+                        }
+                    }
+                    let p = format!("{cpufreq}/{name}");
+                    cmd.args(["--ro-bind-try", &p, &p]);
+                }
+            }
+            // One fake policy per surplus CPU, cloned from a real policy but with
+            // its own affected/related CPU so detectors count them individually.
+            if threads > real {
+                let src = format!("{cpufreq}/policy0");
+                const FREQ_FILES: &[&str] = &[
+                    "base_frequency", "cpuinfo_max_freq", "cpuinfo_min_freq",
+                    "scaling_max_freq", "scaling_min_freq", "scaling_cur_freq",
+                    "scaling_governor", "scaling_driver",
+                ];
+                let snapshot: Vec<(&str, String)> = FREQ_FILES.iter()
+                    .filter_map(|f| std::fs::read_to_string(format!("{src}/{f}")).ok().map(|v| (*f, v)))
+                    .collect();
+                let pol_root = spoof_dir.join("policies");
+                for n in real..threads {
+                    let d = pol_root.join(format!("policy{n}"));
+                    if std::fs::create_dir_all(&d).is_err() {
+                        continue;
+                    }
+                    let _ = std::fs::write(d.join("affected_cpus"), format!("{n}\n"));
+                    let _ = std::fs::write(d.join("related_cpus"), format!("{n}\n"));
+                    for (f, v) in &snapshot {
+                        let _ = std::fs::write(d.join(f), v);
+                    }
+                    if let Some(s) = d.to_str() {
+                        cmd.args(["--ro-bind", s, &format!("{cpufreq}/policy{n}")]);
+                    }
                 }
             }
         }
@@ -1278,11 +1335,10 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
         }
 
         // Core/thread count spoofing for tools that count CPUs from the kernel
-        // rather than CPUID: htop reads /proc/stat's per-CPU lines, and
-        // sysconf()/get_nprocs() (used by CPU-X and others) reads
-        // /sys/devices/system/cpu/online. Overlay both with the spoofed count so
-        // they agree with the fake /proc/cpuinfo and CPUID topology above.
-        if let Some((_, threads)) = crate::cpu::topology_for(cpuinfo_path) {
+        // rather than CPUID: htop reads /proc/stat's per-CPU lines; fastfetch and
+        // sysconf()/get_nprocs() read /sys/devices/system/cpu. Overlay both with
+        // the count implied by the fake /proc/cpuinfo so everything agrees.
+        if let Some(threads) = spoofed_thread_count(config, &spoof_dir) {
             let statf = spoof_dir.join("stat");
             if std::fs::write(&statf, spoof_proc_stat(threads)).is_ok() {
                 if let Some(s) = statf.to_str() {
@@ -1582,17 +1638,21 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
 
     // ── Mozilla remoting ──────────────────────────────────────────────────────
     //
-    // Firefox (and its forks/Thunderbird) try to hand a new invocation off to an
-    // already-running instance. On Linux that hand-off happens over the X11
-    // display and the profile lock, both of which the sandbox still shares with
-    // the host session — so `wryayer run firefox -- file.pdf` finds the host's
-    // Firefox and dies with "Firefox is already running, but is not responding".
-    // MOZ_NO_REMOTE=1 tells the browser to be its own standalone instance and
-    // never remote to another one; combined with the sandbox's private profile
-    // it launches cleanly. Harmless for anything that isn't Mozilla-based.
-    if is_mozilla_family(binary) {
-        cmd.args(["--setenv", "MOZ_NO_REMOTE", "1"]);
-    }
+    // Firefox (and its forks/Thunderbird) hand a new invocation off to an
+    // already-running instance of the same profile, so a URL opens as a new tab
+    // instead of a second, profile-locked process. The cross-container app
+    // binding depends on this: a bound app opening a link runs
+    // `wryayer run firefox -- <url>`, which must land in the running Firefox and
+    // add a tab — not die with "Firefox is already running, but is not
+    // responding". That failure is what `MOZ_NO_REMOTE` used to cause: it makes
+    // an instance neither send nor *accept* remote commands, so the running
+    // browser wasn't reachable and the opener collided with its profile lock.
+    //
+    // We therefore leave remoting enabled. Both wryayer instances of the app
+    // share its profile and display, so they find each other. The historical
+    // reason for MOZ_NO_REMOTE — a sandbox Firefox remoting into one on the host
+    // session because their profile *paths* collide — only bites if a browser is
+    // run BOTH on the host and via wryayer, which the per-app model avoids.
     // Env exported by an AppImage wrapper we bypassed (e.g. `HOME=/opt/Steam`).
     // Applied last so it wins over any earlier --setenv, matching the wrapper.
     for (k, v) in appimage_env {
