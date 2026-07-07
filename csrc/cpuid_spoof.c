@@ -95,9 +95,10 @@ struct lc_raw_front {
     uint32_t ext_cpuid[32][4];     /* leaves 0x80000000..0x8000001F */
 };
 /* struct cpu_raw_data_array_t: { bool with_affinity; int32_t num_raw;
- * cpu_raw_data_t* raw; } — on LP64 the raw pointer sits at offset 8. */
+ * cpu_raw_data_t* raw; } — on LP64 num_raw is at offset 4, raw at offset 8. */
 struct lc_raw_array {
-    unsigned char head[8];
+    unsigned char with_affinity;
+    int32_t num_raw;
     struct lc_raw_front *raw;
 };
 typedef int (*get_raw_fn)(struct lc_raw_front *);
@@ -313,11 +314,20 @@ int sched_setaffinity(pid_t pid, size_t cpusetsize, const cpu_set_t *mask) {
     return -1;
 }
 
-/* Rewrite the identity and topology leaves of a libcpuid raw dump in place so
+/* Number of low bits needed to enumerate `n` items (ceil(log2(n))). */
+static uint32_t bits_for(uint32_t n) {
+    uint32_t b = 0;
+    while ((1u << b) < n) b++;
+    return b;
+}
+
+/* Rewrite the identity and topology leaves of one libcpuid raw dump in place so
  * cpu_identify() derives the spoofed CPU. Mirrors the SIGSEGV handler's spoof,
- * but writes the stored dump instead of live registers — the path used on AMD,
- * where CPUID can't be trapped. */
-static void patch_front(struct lc_raw_front *r) {
+ * but writes a stored dump instead of live registers — the path used on AMD,
+ * where CPUID can't be trapped. `apic` is the synthetic APIC id to give this
+ * logical CPU (so the multi-CPU enumeration sees the spoofed core layout), or
+ * -1 to leave the APIC id untouched (single-CPU dump). */
+static void patch_leaves(struct lc_raw_front *r, int apic) {
     if (!r) return;
     uint32_t (*b)[4] = r->basic_cpuid;
     uint32_t (*e)[4] = r->ext_cpuid;
@@ -342,15 +352,27 @@ static void patch_front(struct lc_raw_front *r) {
         uint32_t threads = g_threads ? g_threads : cores;
         uint32_t tpc = cores ? threads / cores : 1;
         if (tpc < 1) tpc = 1;
+        uint32_t smt_bits = bits_for(tpc);
         /* leaf 1: EBX[23:16] = logical CPUs per package; EDX[28] = HTT. */
         b[1][1] = (b[1][1] & 0x00FFFFFFu) | ((threads & 0xFFu) << 16);
         if (threads > 1) b[1][3] |= (1u << 28);
         /* AMD leaf 0x80000008 ECX[7:0] = NC = physical cores - 1. */
         e[8][2] = (e[8][2] & 0xFFFFFF00u) | ((cores - 1) & 0xFFu);
         /* AMD leaf 0x8000001E EBX[15:8] = threads per core - 1 (needs TopoExt). */
-        e[0x1E][1] = (e[0x1E][1] & 0xFFFF00FFu) | (((tpc - 1) & 0xFFu) << 8);
+        e[0x1E][1] = (e[0x1E][1] & 0xFFFF0000u) | (((tpc - 1) & 0xFFu) << 8);
         e[1][2] |= (1u << 22);             /* leaf 0x80000001 ECX[22] = TopoExt */
         if (e[0][0] < 0x8000001Eu) e[0][0] = 0x8000001Eu;
+
+        if (apic >= 0) {
+            uint32_t id = (uint32_t)apic;
+            uint32_t core_id = id >> smt_bits;   /* APIC = core<<smt_bits | thread */
+            /* leaf 1 EBX[31:24] = initial APIC id (legacy path). */
+            b[1][1] = (b[1][1] & 0x00FFFFFFu) | ((id & 0xFFu) << 24);
+            /* leaf 0x8000001E: EAX = extended APIC id, EBX[7:0] = core id. */
+            e[0x1E][0] = id;
+            e[0x1E][1] = (e[0x1E][1] & 0xFFFFFF00u) | (core_id & 0xFFu);
+            e[0x1E][2] = 0;                       /* node 0, one node per socket */
+        }
     }
 }
 
@@ -361,18 +383,57 @@ int cpuid_get_raw_data(void *data) {
     if (!real_cpuid_get_raw_data)
         real_cpuid_get_raw_data = (get_raw_fn)dlsym(RTLD_NEXT, "cpuid_get_raw_data");
     int rc = real_cpuid_get_raw_data ? real_cpuid_get_raw_data((struct lc_raw_front *)data) : -1;
-    if (!g_active) patch_front((struct lc_raw_front *)data);
+    if (!g_active) patch_leaves((struct lc_raw_front *)data, -1);
     return rc;
 }
 
+/* Find the stride between consecutive cpu_raw_data_t entries in the array
+ * libcpuid allocated. sizeof(cpu_raw_data_t) grows across versions, so instead
+ * of hard-coding it we locate the next entry by its leaf-0 vendor signature
+ * (identical in every entry, and — being "AuthenticAMD"/"GenuineIntel" — unique
+ * within an entry). Returns 0 if it can't be found. Safe: the first match is at
+ * the true stride, which is entry 1's offset and therefore inside the (>=2
+ * entry) allocation, so the scan never reads past it. */
+static size_t find_stride(struct lc_raw_front *base, int32_t num) {
+    if (num < 2) return 0;
+    uint32_t s0 = base->basic_cpuid[0][1];
+    uint32_t s1 = base->basic_cpuid[0][3];
+    uint32_t s2 = base->basic_cpuid[0][2];
+    const char *p0 = (const char *)base;
+    /* An entry is at least basic_cpuid[32][4] + ext_cpuid[32][4] = 1024 bytes. */
+    for (size_t off = 1024; off <= 262144; off += 4) {
+        const struct lc_raw_front *c = (const struct lc_raw_front *)(p0 + off);
+        if (c->basic_cpuid[0][1] == s0 && c->basic_cpuid[0][3] == s1 &&
+            c->basic_cpuid[0][2] == s2) {
+            return off;
+        }
+    }
+    return 0;
+}
+
 /* Interpose libcpuid's all-CPU raw dump. The affinity interposers already make
- * this enumerate g_threads logical CPUs; patch the representative entry so the
- * derived identity and per-core counts match the spoof. */
-int cpuid_get_all_raw_data(void *arr) {
+ * this enumerate g_threads logical CPUs; give each entry a synthetic APIC id so
+ * libcpuid's topology pass counts the spoofed cores (not the host's real ones),
+ * and patch every entry's identity/topology leaves to match. */
+int cpuid_get_all_raw_data(void *arrv) {
     if (!real_cpuid_get_all_raw_data)
         real_cpuid_get_all_raw_data = (get_all_raw_fn)dlsym(RTLD_NEXT, "cpuid_get_all_raw_data");
-    int rc = real_cpuid_get_all_raw_data ? real_cpuid_get_all_raw_data((struct lc_raw_array *)arr) : -1;
-    if (!g_active && arr) patch_front(((struct lc_raw_array *)arr)->raw);
+    int rc = real_cpuid_get_all_raw_data ? real_cpuid_get_all_raw_data((struct lc_raw_array *)arrv) : -1;
+    if (g_active || !arrv) return rc;
+
+    struct lc_raw_array *arr = (struct lc_raw_array *)arrv;
+    struct lc_raw_front *base = arr->raw;
+    int32_t num = arr->num_raw;
+    if (!base || num < 1) return rc;
+    if (num == 1) { patch_leaves(base, g_have_topo ? 0 : -1); return rc; }
+
+    size_t stride = find_stride(base, num);
+    if (!stride) { patch_leaves(base, -1); return rc; } /* can't walk it safely */
+
+    for (int32_t i = 0; i < num; i++) {
+        struct lc_raw_front *r = (struct lc_raw_front *)((char *)base + (size_t)i * stride);
+        patch_leaves(r, g_have_topo ? i : -1);
+    }
     return rc;
 }
 
