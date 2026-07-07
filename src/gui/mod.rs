@@ -236,17 +236,25 @@ fn build_app_list_tab(ctx: &Ctx, games: bool) -> (gtk::Box, Rc<dyn Fn()>) {
     let bar = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     let run_btn = gtk::Button::with_label("Run");
     let update_btn = gtk::Button::with_label("Update");
+    let check_btn = gtk::Button::with_label("Check updates");
+    let update_all_btn = gtk::Button::with_label("Update all");
     let config_btn = gtk::Button::with_label("Configure");
     let remove_btn = gtk::Button::with_label("Remove");
     bar.append(&run_btn);
     bar.append(&update_btn);
+    if !games {
+        bar.append(&check_btn);
+        bar.append(&update_all_btn);
+    }
     bar.append(&config_btn);
     let rename_btn = gtk::Button::with_label("Rename");
+    let into_btn = gtk::Button::with_label("Install into…");
     let snapshot_btn = gtk::Button::with_label("Snapshot");
     let rollback_btn = gtk::Button::with_label("Snapshots…");
     let export_btn = gtk::Button::with_label("Export");
     if !games {
         bar.append(&rename_btn);
+        bar.append(&into_btn);
         bar.append(&snapshot_btn);
         bar.append(&rollback_btn);
         bar.append(&export_btn);
@@ -295,8 +303,42 @@ fn build_app_list_tab(ctx: &Ctx, games: bool) -> (gtk::Box, Rc<dyn Fn()>) {
             move |_| ctx.refresh()
         });
     });
+    act!(check_btn, |ctx: &Ctx, name: &str| {
+        op::run_operation(&ctx.window, "Check updates", vec!["update".into(), name.into(), "--check".into()], {
+            let ctx = ctx.clone();
+            move |_| ctx.refresh()
+        });
+    });
+    {
+        // "Update all" needs no selection — update every out-of-date app.
+        let ctx = ctx.clone();
+        update_all_btn.connect_clicked(move |_| {
+            let ctx2 = ctx.clone();
+            confirm(&ctx, "Update all apps?", "Re-resolves and updates every installed app that has a newer version.", false, move || {
+                op::run_operation(&ctx2.window, "Update all apps", vec!["update".into()], {
+                    let ctx = ctx2.clone();
+                    move |_| ctx.refresh()
+                });
+            });
+        });
+    }
     act!(config_btn, |ctx: &Ctx, name: &str| config::open(ctx, name));
     act!(rename_btn, |ctx: &Ctx, name: &str| rename_app(ctx, name));
+    act!(into_btn, |ctx: &Ctx, name: &str| {
+        // Merge a package into this app's tree (`install <pkg> --into <name>`).
+        let target = name.to_string();
+        let ctx_op = ctx.clone();
+        text_prompt(ctx, &format!("Install into “{target}”"), "Package to add:", "", move |pkg| {
+            let pkg = pkg.trim().to_string();
+            if pkg.is_empty() {
+                return;
+            }
+            op::run_operation(&ctx_op.window, "Install into", vec!["install".into(), pkg, "--into".into(), target.clone()], {
+                let ctx = ctx_op.clone();
+                move |_| ctx.refresh()
+            });
+        });
+    });
     act!(snapshot_btn, |ctx: &Ctx, name: &str| {
         op::run_operation(&ctx.window, "Snapshot", vec!["snapshot".into(), name.into()], {
             let ctx = ctx.clone();

@@ -183,6 +183,88 @@ fn entry_random(form: &gtk::Box, caption: &str, value: &str, gen: fn() -> String
     e
 }
 
+/// A modal field-by-field custom-CPU configurator (the GUI counterpart of the
+/// TUI's configurator). Calls `on_ok` with the serialized `custom:…` value.
+fn open_cpu_configurator(parent: &impl IsA<gtk::Window>, initial: crate::cpu::CustomCpu, on_ok: Rc<dyn Fn(String)>) {
+    let win = gtk::Window::builder()
+        .title("Configure custom CPU")
+        .transient_for(parent)
+        .modal(true)
+        .default_width(440)
+        .build();
+
+    let form = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    form.set_margin_top(12);
+    form.set_margin_bottom(12);
+    form.set_margin_start(12);
+    form.set_margin_end(12);
+
+    let vendor = dropdown(&form, "Vendor", &["GenuineIntel (Intel)", "AuthenticAMD (AMD)"],
+        if initial.vendor_id == "AuthenticAMD" { 1 } else { 0 });
+    let name = entry(&form, "Model name", &initial.model_name);
+    let family = entry(&form, "CPU family", &initial.family.to_string());
+    let model = entry(&form, "Model", &initial.model.to_string());
+    let stepping = entry(&form, "Stepping", &initial.stepping.to_string());
+    let cores = entry(&form, "Cores", &initial.cores.to_string());
+    let threads = entry(&form, "Threads", &initial.threads.to_string());
+    let mhz = entry(&form, "CPU MHz", &initial.mhz.to_string());
+    let cache = entry(&form, "Cache (KB)", &initial.cache_kb.to_string());
+
+    let hint = gtk::Label::new(Some(
+        "Family: Intel Core = 6, AMD Zen 3/4 = 25. Threads = Cores for no SMT, 2× for SMT.",
+    ));
+    hint.set_xalign(0.0);
+    hint.set_wrap(true);
+    hint.set_margin_top(6);
+    hint.add_css_class("dim-label");
+    form.append(&hint);
+
+    let btns = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    btns.set_margin_top(10);
+    let spacer = gtk::Label::new(None);
+    spacer.set_hexpand(true);
+    let cancel = gtk::Button::with_label("Cancel");
+    let save = gtk::Button::with_label("Save");
+    save.add_css_class("suggested-action");
+    btns.append(&spacer);
+    btns.append(&cancel);
+    btns.append(&save);
+    form.append(&btns);
+
+    win.set_child(Some(&form));
+
+    {
+        let win = win.clone();
+        cancel.connect_clicked(move |_| win.close());
+    }
+    {
+        let win = win.clone();
+        save.connect_clicked(move |_| {
+            let num = |e: &gtk::Entry, d: u32| e.text().trim().parse::<u32>().unwrap_or(d);
+            let cores_v = num(&cores, 1).max(1);
+            let threads_v = num(&threads, cores_v).max(cores_v);
+            let name_v = {
+                let t = name.text().trim().to_string();
+                if t.is_empty() { "Custom CPU".to_string() } else { t }
+            };
+            let cc = crate::cpu::CustomCpu {
+                vendor_id: if vendor.selected() == 1 { "AuthenticAMD" } else { "GenuineIntel" }.to_string(),
+                family: num(&family, 6),
+                model: num(&model, 0),
+                stepping: num(&stepping, 1),
+                cores: cores_v,
+                threads: threads_v,
+                mhz: num(&mhz, 3000),
+                cache_kb: num(&cache, 8192),
+                model_name: name_v,
+            };
+            on_ok(cc.serialize());
+            win.close();
+        });
+    }
+    win.present();
+}
+
 /// Build the form widgets into `form` and return a closure that reconstructs an
 /// `AppConfig` from them (carrying over anything not shown from the original).
 fn build_form(form: &gtk::Box, cfg: AppConfig, is_global: bool, app_name: Option<&str>, ctx: &Ctx) -> Rc<dyn Fn() -> AppConfig> {
@@ -225,8 +307,71 @@ fn build_form(form: &gtk::Box, cfg: AppConfig, is_global: bool, app_name: Option
             .unwrap_or(0),
     };
     let spoof_cpu = dropdown(form, "Spoof CPU", &cpu_labels, cpu_sel);
+
+    // Custom CPU built field-by-field (stored as a `custom:…` value), mirroring
+    // the TUI configurator. Held in a cell so the dialog and `gather` share it.
+    let custom_cpu: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(
+        cfg.spoof_cpuinfo.as_deref().filter(|v| v.starts_with("custom:")).map(str::to_string),
+    ));
+    let cpu_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let cpu_caption = gtk::Label::new(Some("Custom CPU"));
+    cpu_caption.set_xalign(0.0);
+    cpu_caption.set_width_chars(22);
+    cpu_row.append(&cpu_caption);
+    let cpu_status = gtk::Label::new(None);
+    cpu_status.set_xalign(0.0);
+    cpu_status.set_hexpand(true);
+    cpu_row.append(&cpu_status);
+    let cpu_btn = gtk::Button::with_label("Configure…");
+    cpu_row.append(&cpu_btn);
+    form.append(&cpu_row);
+
+    let refresh_cpu_status: Rc<dyn Fn()> = {
+        let custom_cpu = custom_cpu.clone();
+        let cpu_status = cpu_status.clone();
+        Rc::new(move || {
+            let txt = custom_cpu.borrow().as_deref()
+                .and_then(crate::cpu::CustomCpu::parse)
+                .map(|c| format!("{} · {}C/{}T", c.model_name, c.cores, c.threads))
+                .unwrap_or_else(|| "not set".to_string());
+            cpu_status.set_text(&txt);
+        })
+    };
+    refresh_cpu_status();
+    {
+        let ctx = ctx.clone();
+        let custom_cpu = custom_cpu.clone();
+        let spoof_cpu = spoof_cpu.clone();
+        let refresh = refresh_cpu_status.clone();
+        cpu_btn.connect_clicked(move |_| {
+            let initial = custom_cpu.borrow().as_deref()
+                .and_then(crate::cpu::CustomCpu::parse)
+                .unwrap_or_else(crate::cpu::CustomCpu::starter);
+            let custom_cpu = custom_cpu.clone();
+            let spoof_cpu = spoof_cpu.clone();
+            let refresh = refresh.clone();
+            let on_ok: Rc<dyn Fn(String)> = Rc::new(move |spec| {
+                *custom_cpu.borrow_mut() = Some(spec);
+                spoof_cpu.set_selected(0); // custom wins; clear the preset picker
+                refresh();
+            });
+            open_cpu_configurator(&ctx.window, initial, on_ok);
+        });
+    }
+    // Picking a preset clears any configured custom CPU so exactly one applies.
+    {
+        let custom_cpu = custom_cpu.clone();
+        let refresh = refresh_cpu_status.clone();
+        spoof_cpu.connect_selected_notify(move |d| {
+            if d.selected() != 0 && custom_cpu.borrow().is_some() {
+                *custom_cpu.borrow_mut() = None;
+                refresh();
+            }
+        });
+    }
+
     let cpu_custom_init = match cfg.spoof_cpuinfo.as_deref() {
-        Some(v) if v != "sample" && !v.starts_with("preset:") => v,
+        Some(v) if v != "sample" && !v.starts_with("preset:") && !v.starts_with("custom:") => v,
         _ => "",
     };
     let spoof_cpuinfo = entry(form, "…or custom cpuinfo file", cpu_custom_init);
@@ -382,9 +527,11 @@ fn build_form(form: &gtk::Box, cfg: AppConfig, is_global: bool, app_name: Option
         c.spoof_os = opt(&spoof_os);
         // A custom path wins; otherwise use the CPU-preset dropdown selection.
         c.spoof_cpuinfo = {
-            let custom = spoof_cpuinfo.text().trim().to_string();
-            if !custom.is_empty() {
-                Some(custom)
+            let file = spoof_cpuinfo.text().trim().to_string();
+            if !file.is_empty() {
+                Some(file) // an explicit cpuinfo file path wins
+            } else if let Some(cc) = custom_cpu.borrow().clone() {
+                Some(cc) // a configured custom CPU
             } else {
                 match spoof_cpu.selected() {
                     0 => None,
