@@ -209,9 +209,11 @@ fn open_cpu_configurator(parent: &impl IsA<gtk::Window>, initial: crate::cpu::Cu
     let threads = entry(&form, "Threads", &initial.threads.to_string());
     let mhz = entry(&form, "CPU MHz", &initial.mhz.to_string());
     let cache = entry(&form, "Cache (KB)", &initial.cache_kb.to_string());
+    let host = entry(&form, "Host (mainboard)", &initial.host);
 
     let hint = gtk::Label::new(Some(
-        "Family: Intel Core = 6, AMD Zen 3/4 = 25. Threads = Cores for no SMT, 2× for SMT.",
+        "Family: Intel Core = 6, AMD Zen 3/4 = 25. Threads = Cores for no SMT, 2× for SMT.\n\
+         Host: mainboard shown as fastfetch 'Host:' (e.g. ASUS ROG STRIX X670E-E). Blank = auto.",
     ));
     hint.set_xalign(0.0);
     hint.set_wrap(true);
@@ -257,6 +259,7 @@ fn open_cpu_configurator(parent: &impl IsA<gtk::Window>, initial: crate::cpu::Cu
                 mhz: num(&mhz, 3000),
                 cache_kb: num(&cache, 8192),
                 model_name: name_v,
+                host: host.text().trim().to_string(),
             };
             on_ok(cc.serialize());
             win.close();

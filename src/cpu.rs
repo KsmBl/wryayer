@@ -144,9 +144,11 @@ pub fn cpuinfo_for(spec: &str) -> Option<String> {
 }
 
 /// A user-defined CPU built with the TUI configurator. Serialized into the
-/// config as `custom:<vendor>|<family>|<model>|<stepping>|<cores>|<threads>|<mhz>|<cache_kb>|<model name>`.
-/// The model name is the last field so it may safely contain any character
-/// except a newline. Flags and address sizes are derived from the vendor.
+/// config as `custom:<vendor>|<family>|<model>|<stepping>|<cores>|<threads>|<mhz>|<cache_kb>|<model name>|<host>`.
+/// The model name may contain `|`; the host (mainboard string, always pipe-free)
+/// is peeled off the end, so the model name is recovered from everything in
+/// between. A legacy 9-field value with no trailing host still parses (host
+/// empty). Flags and address sizes are derived from the vendor.
 #[derive(Clone, PartialEq)]
 pub struct CustomCpu {
     pub vendor_id: String,
@@ -158,6 +160,9 @@ pub struct CustomCpu {
     pub mhz: u32,
     pub cache_kb: u32,
     pub model_name: String,
+    /// Optional mainboard / "Host" string presented via DMI (e.g. what
+    /// fastfetch shows as `Host:`). Empty means "derive a board from the CPU".
+    pub host: String,
 }
 
 impl CustomCpu {
@@ -173,15 +178,22 @@ impl CustomCpu {
             mhz: 3200,
             cache_kb: 16384,
             model_name: "Custom CPU @ 3.20GHz".to_string(),
+            host: String::new(),
         }
     }
 
-    /// Serialize into the `custom:...` config value.
+    /// Serialize into the `custom:...` config value. The host is always appended
+    /// as a final pipe-delimited field (even when empty) so the trailing `|`
+    /// terminates a model name that itself contains `|`, keeping the round-trip
+    /// unambiguous.
     pub fn serialize(&self) -> String {
+        // Guard against a stray '|' or newline sneaking into the host field and
+        // breaking the "host is the last, pipe-free field" invariant.
+        let host: String = self.host.chars().filter(|&c| c != '|' && c != '\n').collect();
         format!(
-            "custom:{}|{}|{}|{}|{}|{}|{}|{}|{}",
+            "custom:{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
             self.vendor_id, self.family, self.model, self.stepping,
-            self.cores, self.threads, self.mhz, self.cache_kb, self.model_name,
+            self.cores, self.threads, self.mhz, self.cache_kb, self.model_name, host,
         )
     }
 
@@ -189,7 +201,8 @@ impl CustomCpu {
     /// including the bare legacy `custom` (raw-editor) value.
     pub fn parse(spec: &str) -> Option<CustomCpu> {
         let body = spec.strip_prefix("custom:")?;
-        // 9 fields; the model name (last) may contain '|', so split with a cap.
+        // 8 fixed fields, then a remainder holding the model name and (for
+        // current values) a trailing host field.
         let mut it = body.splitn(9, '|');
         let vendor_id = it.next()?.to_string();
         let family = it.next()?.parse().ok()?;
@@ -199,10 +212,17 @@ impl CustomCpu {
         let threads = it.next()?.parse().ok()?;
         let mhz = it.next()?.parse().ok()?;
         let cache_kb = it.next()?.parse().ok()?;
-        let model_name = it.next()?.to_string();
+        let rest = it.next()?;
+        // The host is pipe-free and sits last; peel it off the end. A legacy
+        // 9-field value (no host) has no trailing '|', so `model_name` is the
+        // whole remainder and the host defaults to empty.
+        let (model_name, host) = match rest.rsplit_once('|') {
+            Some((name, host)) => (name.to_string(), host.to_string()),
+            None => (rest.to_string(), String::new()),
+        };
         Some(CustomCpu {
             vendor_id, family, model, stepping,
-            cores, threads, mhz, cache_kb, model_name,
+            cores, threads, mhz, cache_kb, model_name, host,
         })
     }
 
@@ -216,6 +236,7 @@ impl CustomCpu {
             family: p.family, model: p.model, stepping: 1,
             cores: p.cores, threads: p.threads, mhz: p.mhz, cache_kb: p.cache_kb,
             model_name: p.model_name.to_string(),
+            host: String::new(),
         })
     }
 
@@ -302,6 +323,113 @@ pub fn cpuid_spoof_for(spec: &str) -> Option<CpuidSpoof> {
         cores: p.cores.max(1),
         threads: p.threads.max(p.cores).max(1),
     })
+}
+
+/// The DMI/SMBIOS identity presented to the sandbox so board-reading tools
+/// (fastfetch's `Host:`, hostnamectl, inxi, …) see a plausible mainboard that
+/// matches the spoofed CPU instead of the real machine. Fields map 1:1 onto the
+/// files under `/sys/devices/virtual/dmi/id/`.
+pub struct DmiInfo {
+    pub sys_vendor: String,
+    pub product_name: String,
+    pub product_version: String,
+    pub product_family: String,
+    pub board_vendor: String,
+    pub board_name: String,
+    pub board_version: String,
+}
+
+impl DmiInfo {
+    /// Build a DMI identity from a single user-supplied "Host" string (what the
+    /// user wants tools to display). The board vendor is inferred from the text
+    /// when it names a known OEM, otherwise left blank.
+    fn from_display(host: &str) -> DmiInfo {
+        let vendor = detect_oem_vendor(host);
+        DmiInfo {
+            sys_vendor: vendor.clone(),
+            product_name: host.to_string(),
+            product_version: String::new(),
+            product_family: String::new(),
+            board_vendor: vendor,
+            board_name: host.to_string(),
+            board_version: String::new(),
+        }
+    }
+}
+
+/// Map a free-text host/board string to a canonical DMI `sys_vendor`, or "" when
+/// no known OEM is recognised.
+fn detect_oem_vendor(host: &str) -> String {
+    let up = host.to_ascii_uppercase();
+    const OEMS: &[(&str, &str)] = &[
+        ("ASUS", "ASUSTeK COMPUTER INC."),
+        ("ROG", "ASUSTeK COMPUTER INC."),
+        ("PROART", "ASUSTeK COMPUTER INC."),
+        ("MSI", "Micro-Star International Co., Ltd."),
+        ("GIGABYTE", "Gigabyte Technology Co., Ltd."),
+        ("AORUS", "Gigabyte Technology Co., Ltd."),
+        ("ASROCK", "ASRock"),
+        ("SUPERMICRO", "Supermicro"),
+        ("DELL", "Dell Inc."),
+        ("THINKPAD", "LENOVO"),
+        ("LENOVO", "LENOVO"),
+        ("HP", "HP"),
+    ];
+    for (needle, canon) in OEMS {
+        if up.contains(needle) {
+            return canon.to_string();
+        }
+    }
+    String::new()
+}
+
+/// A believable mainboard for a CPU when the user hasn't named one explicitly:
+/// server boards for EPYC/Xeon, enthusiast desktop boards otherwise, matched to
+/// the vendor.
+fn default_dmi(vendor_id: &str, model_name: &str) -> DmiInfo {
+    let (vendor, board) = if model_name.contains("EPYC") {
+        ("Supermicro", "H12SSL-i")
+    } else if model_name.contains("Xeon") {
+        ("Supermicro", "X12DPi-N6")
+    } else if vendor_id == "AuthenticAMD" {
+        ("ASUSTeK COMPUTER INC.", "ROG STRIX X670E-E GAMING WIFI")
+    } else if vendor_id == "GenuineIntel" {
+        ("ASUSTeK COMPUTER INC.", "ROG STRIX Z790-E GAMING WIFI")
+    } else {
+        ("ASUSTeK COMPUTER INC.", "PRIME B650-PLUS")
+    };
+    DmiInfo {
+        sys_vendor: vendor.to_string(),
+        product_name: board.to_string(),
+        product_version: String::new(),
+        product_family: String::new(),
+        board_vendor: vendor.to_string(),
+        board_name: board.to_string(),
+        board_version: String::new(),
+    }
+}
+
+/// The DMI identity to present for a CPU-spoofing config value, if it names a
+/// CPU. A `custom:<...>` with a non-empty host uses that string; every other
+/// CPU (custom without a host, `preset:<key>`, or the legacy `sample`) gets a
+/// reasonable board derived from the CPU. Returns None for values that don't
+/// name a known CPU (bare `custom`, raw file paths), where the real board shows.
+pub fn host_dmi_for(spec: &str) -> Option<DmiInfo> {
+    if let Some(c) = CustomCpu::parse(spec) {
+        if !c.host.trim().is_empty() {
+            return Some(DmiInfo::from_display(c.host.trim()));
+        }
+        return Some(default_dmi(&c.vendor_id, &c.model_name));
+    }
+    if spec == "sample" {
+        return Some(default_dmi(
+            "GenuineIntel",
+            "Intel(R) Core(TM) i7-8550U CPU @ 1.80GHz",
+        ));
+    }
+    let key = spec.strip_prefix("preset:")?;
+    let p = CPU_PROFILES.iter().find(|p| p.key == key)?;
+    Some(default_dmi(p.vendor_id, p.model_name))
 }
 
 /// Pack family/model/stepping into the CPUID leaf-1 EAX layout.
@@ -433,10 +561,11 @@ mod tests {
             family: 25, model: 97, stepping: 2,
             cores: 12, threads: 24, mhz: 4200, cache_kb: 65536,
             model_name: "My Fancy Chip @ 4.20GHz | rev A".to_string(),
+            host: "ASUS ROG STRIX X670E-E GAMING".to_string(),
         };
         let spec = c.serialize();
         assert!(spec.starts_with("custom:"));
-        // Round-trips even though the model name contains '|'.
+        // Round-trips even though the model name contains '|' and a host follows.
         assert!(CustomCpu::parse(&spec).unwrap() == c);
         // Renders one block per thread with the custom name and vendor.
         let text = cpuinfo_for(&spec).expect("renders");
@@ -447,6 +576,36 @@ mod tests {
         let sp = cpuid_spoof_for(&spec).expect("cpuid");
         assert_eq!(sp.vendor, "AuthenticAMD");
         assert_eq!(sp.fms, leaf1_eax(25, 97, 2));
+    }
+
+    #[test]
+    fn legacy_9_field_custom_parses_with_empty_host() {
+        // A value saved before the host field existed (no trailing '|host').
+        let c = CustomCpu::parse(
+            "custom:AuthenticAMD|25|1|1|64|128|2450|512|AMD EPYC 7763 64-Core Processor",
+        )
+        .expect("parses");
+        assert_eq!(c.model_name, "AMD EPYC 7763 64-Core Processor");
+        assert_eq!(c.host, "");
+        assert_eq!(c.cores, 64);
+    }
+
+    #[test]
+    fn host_dmi_prefers_explicit_then_derives() {
+        // Explicit host wins and the OEM vendor is inferred.
+        let c = CustomCpu { host: "ASUS ROG STRIX B550-F".to_string(), ..CustomCpu::starter() };
+        let d = host_dmi_for(&c.serialize()).expect("dmi");
+        assert_eq!(d.product_name, "ASUS ROG STRIX B550-F");
+        assert_eq!(d.sys_vendor, "ASUSTeK COMPUTER INC.");
+
+        // No host on an EPYC → a server board is derived.
+        let d = host_dmi_for("preset:epyc-7763").expect("dmi");
+        assert_eq!(d.sys_vendor, "Supermicro");
+        assert!(d.board_name.contains("H12SSL"));
+
+        // Values that don't name a CPU get no DMI override.
+        assert!(host_dmi_for("custom").is_none());
+        assert!(host_dmi_for("/etc/cpuinfo").is_none());
     }
 
     #[test]

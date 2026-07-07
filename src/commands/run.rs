@@ -687,6 +687,42 @@ fn spoof_sys_cpu(cmd: &mut Command, spoof_dir: &Path, threads: u32) {
     }
 }
 
+/// Overlay the sandbox's DMI/SMBIOS identity (`/sys/devices/virtual/dmi/id/*`)
+/// so board-reading tools present `dmi` instead of the real mainboard. Only the
+/// world-readable identity files are touched, and each is overlaid only if it
+/// actually exists on the host — binding over a missing path in the read-only
+/// `/sys` would abort the whole sandbox. `/sys/class/dmi/id` is a symlink to
+/// this directory, so tools reaching either path see the fakes.
+fn spoof_dmi(cmd: &mut Command, spoof_dir: &Path, dmi: &crate::cpu::DmiInfo) {
+    let dmi_dir = spoof_dir.join("dmi");
+    let _ = std::fs::create_dir_all(&dmi_dir);
+    let base = "/sys/devices/virtual/dmi/id";
+    let fields = [
+        ("sys_vendor", dmi.sys_vendor.as_str()),
+        ("product_name", dmi.product_name.as_str()),
+        ("product_version", dmi.product_version.as_str()),
+        ("product_family", dmi.product_family.as_str()),
+        ("board_vendor", dmi.board_vendor.as_str()),
+        ("board_name", dmi.board_name.as_str()),
+        ("board_version", dmi.board_version.as_str()),
+    ];
+    for (name, val) in fields {
+        let dest = format!("{base}/{name}");
+        // Overlay even empty values (to hide the real entry), but only where the
+        // host already exposes the file.
+        if !Path::new(&dest).exists() {
+            continue;
+        }
+        let src = dmi_dir.join(name);
+        // sysfs DMI files are newline-terminated.
+        if std::fs::write(&src, format!("{val}\n")).is_ok() {
+            if let Some(s) = src.to_str() {
+                cmd.args(["--ro-bind", s, &dest]);
+            }
+        }
+    }
+}
+
 /// Locate the cgroup memory.current file for `pid` (a systemd-run --scope
 /// child).  systemd-run moves itself into the new scope only after talking to
 /// systemd, so the process spends a brief window in the parent's cgroup.
@@ -1355,6 +1391,14 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
                 }
             }
             spoof_sys_cpu(&mut cmd, &spoof_dir, threads);
+        }
+
+        // A spoofed CPU on the real mainboard is a giveaway (an EPYC on a
+        // consumer B550, say). Overlay the DMI/SMBIOS identity so board-reading
+        // tools — fastfetch's `Host:`, hostnamectl, inxi — show a plausible
+        // board that matches the CPU, or the user's explicit custom Host string.
+        if let Some(dmi) = crate::cpu::host_dmi_for(cpuinfo_path) {
+            spoof_dmi(&mut cmd, &spoof_dir, &dmi);
         }
     }
 

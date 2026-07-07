@@ -234,14 +234,18 @@ pub struct CpuDraft {
     pub threads: String,
     pub mhz: String,
     pub cache_kb: String,
+    pub host: String,
 }
 
 /// Field rows in the CPU configurator, in display order. The Save button is an
 /// extra row after these (index `CPU_FIELDS.len()`).
 pub const CPU_FIELDS: &[&str] = &[
     "Vendor", "Model name", "CPU family", "Model", "Stepping",
-    "Cores", "Threads", "CPU MHz", "Cache (KB)",
+    "Cores", "Threads", "CPU MHz", "Cache (KB)", "Host",
 ];
+
+/// Row index of the free-text Host field (mainboard string).
+pub const CPU_HOST_ROW: usize = 9;
 
 /// Row index of the Save button in the configurator.
 pub const CPU_SAVE_ROW: usize = CPU_FIELDS.len();
@@ -258,6 +262,7 @@ pub fn cpu_field_hint(row: usize) -> &'static str {
         6 => "Total logical CPUs (threads). =Cores for no SMT, 2×Cores for SMT.",
         7 => "Reported clock speed in MHz (3200 = 3.2 GHz).",
         8 => "Cache size in KB (16384 = 16 MB).",
+        9 => "Mainboard shown as fastfetch 'Host:'. Blank = auto-pick a board.",
         _ => "Save this CPU and apply it to the sandbox.",
     }
 }
@@ -274,6 +279,7 @@ pub fn cpu_field_help(row: usize) -> &'static str {
         6 => "Threads\n\nThe total number of logical CPUs (hardware threads). One processor block per thread is written to /proc/cpuinfo.\n\nSet equal to Cores for a chip with no SMT/Hyper-Threading, or 2× Cores for one with SMT. Values below Cores are clamped up to Cores.",
         7 => "CPU MHz\n\nThe reported clock speed in megahertz, shown as 'cpu MHz' in /proc/cpuinfo (e.g. 3200 = 3.2 GHz). It also drives the synthetic 'bogomips' value.",
         8 => "Cache (KB)\n\nThe CPU cache size in kilobytes, shown as 'cache size' in /proc/cpuinfo (e.g. 16384 = 16 MB).",
+        9 => "Host (mainboard)\n\nThe motherboard / system identity presented over DMI (SMBIOS), i.e. what fastfetch shows as 'Host:' and hostnamectl as the hardware model. Type the board you want to appear, e.g.:\n• ASUS ROG STRIX X670E-E GAMING\n• Supermicro H12SSL-i\n\nThe OEM vendor is inferred from the text when recognised. Leave blank to auto-pick a believable board that matches the CPU (a server board for EPYC/Xeon, an enthusiast desktop board otherwise).",
         _ => "Save\n\nStore this CPU as a custom profile (custom:…) and apply it. It overrides /proc/cpuinfo and the CPUID instruction inside the sandbox, so both file-parsing tools and detection libraries (CPU-X / libcpuid) see the fake CPU.",
     }
 }
@@ -296,6 +302,7 @@ impl CpuDraft {
             threads: base.threads.to_string(),
             mhz: base.mhz.to_string(),
             cache_kb: base.cache_kb.to_string(),
+            host: base.host,
         }
     }
 
@@ -311,6 +318,7 @@ impl CpuDraft {
             6 => &self.threads,
             7 => &self.mhz,
             8 => &self.cache_kb,
+            9 => &self.host,
             _ => "",
         }
     }
@@ -326,6 +334,7 @@ impl CpuDraft {
             6 => self.threads = v,
             7 => self.mhz = v,
             8 => self.cache_kb = v,
+            9 => self.host = v,
             _ => {}
         }
     }
@@ -347,6 +356,7 @@ impl CpuDraft {
             mhz: num(&self.mhz, 3000),
             cache_kb: num(&self.cache_kb, 8192),
             model_name: name,
+            host: self.host.trim().to_string(),
         }.serialize()
     }
 }
@@ -1105,9 +1115,10 @@ fn on_cpu_config(app: &mut App, code: KeyCode) {
                 draft.set_field(*selected, v);
                 *editing = None;
             }
-            // Model name (row 1) is free text; numeric rows accept digits only.
+            // Model name (row 1) and Host (row 9) are free text; the numeric
+            // rows in between accept digits only.
             _ => {
-                let numeric = *selected >= 2;
+                let numeric = *selected >= 2 && *selected != CPU_HOST_ROW;
                 edit_input(buf, cur, code, 64, |c| !numeric || c.is_ascii_digit());
             }
         }

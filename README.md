@@ -611,7 +611,7 @@ detection libraries see too. Pick from **ten built-in profiles** (`preset:<key>`
 spanning budget → flagship → server across Intel and AMD), or build your own in
 the TUI: choose **custom** on the *Spoof CPU info* row to open a field-by-field
 **configurator** (vendor, model name, family, model, stepping, cores, threads,
-MHz, cache). Press `?` on any field for help.
+MHz, cache, host/mainboard). Press `?` on any field for help.
 
 **The core and thread count is spoofed too.** Set a 64-core CPU and `htop`,
 `CPU-X`, `lscpu`, `nproc` and `sysconf` all report 64 cores / 128 threads — not
@@ -622,6 +622,14 @@ host's real cores** and show their live usage; the rest fill out the spoofed
 total. Symmetric CPUs (EPYC, Ryzen, Xeon) report exact counts; hybrid Intel
 parts (P+E cores) are approximated. Runtimes that read CPU count via the raw
 `sched_getaffinity` syscall instead of libc (e.g. Go) still see the real count.
+
+**The mainboard is spoofed alongside the CPU.** An EPYC on your real consumer
+board is a giveaway, so whenever a CPU is spoofed wryayer also overlays the
+DMI/SMBIOS identity (`/sys/devices/virtual/dmi/id/*`) that drives `fastfetch`'s
+`Host:`, `hostnamectl` and `inxi`. Leave it blank and a believable board is
+picked to match the CPU (a Supermicro server board for EPYC/Xeon, an enthusiast
+desktop board otherwise); or type your own in the configurator's **Host** field
+(e.g. `ASUS ROG STRIX X670E-E GAMING`) — the OEM vendor is inferred from the text.
 
 All settings are editable in the TUI config screen (`s` on an installed app). Each row uses a picker; press `?` on any row or option to see a description of what the setting does.
 
