@@ -121,6 +121,15 @@ pub const CPU_PROFILES: &[CpuProfile] = &[
         cores: 64, threads: 128, mhz: 2450, cache_kb: 512,
         address_sizes: "48 bits physical, 48 bits virtual", flags: AMD_FLAGS,
     },
+    CpuProfile {
+        key: "epyc-9965",
+        label: "AMD EPYC 9965 (192C server)",
+        desc: "AMD EPYC 9965 — 192-core/384-thread Zen 5c. Top-tier server/datacenter.",
+        vendor_id: "AuthenticAMD", family: 26, model: 17,
+        model_name: "AMD EPYC 9965 192-Core Processor",
+        cores: 192, threads: 384, mhz: 2250, cache_kb: 393216,
+        address_sizes: "52 bits physical, 57 bits virtual", flags: AMD_FLAGS,
+    },
 ];
 
 /// If `spec` names a built-in preset (`preset:<key>`) or a user-defined CPU
