@@ -230,6 +230,88 @@ cargo test --all-features -- --test-threads=1 # serial: avoids races on shared
 | CPU / topology spoofing | `cpu.rs` (data) + `csrc/cpuid_spoof.c` (CPUID/affinity) + `run.rs` (`/proc`, `/sys`) |
 | cross-container app binding | `csrc/portal_client.c` + `commands/portal.rs` + `run.rs` |
 | a TUI screen or row | `tui/mod.rs` (state/keys) + `tui/ui.rs` (render) |
-| a GUI form field | `gui/config.rs` |
+| a GUI form field or button | `gui/config.rs` / `gui/mod.rs` |
 | install / extract / deps | `package/` + `commands/install.rs` |
 | snapshots / dedup / export | the same-named files in `commands/` |
+
+---
+
+## 10. File-by-file reference
+
+Every source file, what it's responsible for, and when you'd open it. See
+README-CODE.md for the diagram version.
+
+**Entry points & wiring**
+
+| File | Responsibility |
+|---|---|
+| `main.rs` | The `clap` CLI: every subcommand and flag is defined here and dispatched to a `commands::*` function. Add a CLI command/flag here. |
+| `lib.rs` | Module wiring; re-exports used by the integration tests in `tests/`. |
+| `build.rs` | Compiles the two C helpers in `csrc/` and embeds them; best-effort (empty blob + warning if no compiler). |
+
+**Core data & shared helpers**
+
+| File | Responsibility |
+|---|---|
+| `config.rs` | `AppConfig` (every per-app / global setting), INI parse (`parse_ini`) and format (`format_ini`), `defaults.ini`, and the alias-merge copy. **Start here for a new setting.** |
+| `manifest.rs` | `.manifest.toml` read/write, `app_dir`/`wryayer_root` path helpers, `list_all_apps`, `tree_order`, the alias/merge model. |
+| `cpu.rs` | Built-in CPU profiles + the `CustomCpu` type; renders `/proc/cpuinfo`, and provides `cpuid_spoof_for` / `topology_for` for the launcher and shim. |
+| `distro.rs` | Detects the host distro and selects the package backend (pacman/apt/dnf). |
+| `launcher.rs` | Creates/removes the `~/bin/<app>` shell wrapper. |
+| `avahi_stub.rs` | Config/data for the in-sandbox Avahi stub bus. |
+
+**`commands/` — one file per subcommand**
+
+| File | Responsibility |
+|---|---|
+| `run.rs` | **The sandbox launcher.** `bwrap_cmd` assembles the bwrap command line (all binds, spoofs, env, portal, CPU); `launch_bwrap` spawns it, runs updater threads, waits, tears down. The biggest and most important runtime file. |
+| `install.rs` | resolve → download → extract → write manifest → dedup. |
+| `install_game.rs` | Wine-container import (game folder → `.exe` → prefix). |
+| `update.rs` | Re-resolve + re-extract; version checks (`--check`). |
+| `remove.rs` | Delete tree + launcher; alias-aware (`--cascade`). |
+| `snapshot.rs` | Hard-linked snapshots, list, rollback, delete, prune. |
+| `export.rs` / `import.rs` | Zip an app tree / recreate one from a zip. |
+| `dedup.rs` | Cross-app hard-link identical files; disk-usage accounting (`format_bytes`, `all_du`). |
+| `repair.rs` | Resolve + install packages for missing sonames. |
+| `list.rs` | The `wryayer list` table + size totals. |
+| `clean.rs` | Wipe the shared download/build cache. |
+| `config.rs` | The `wryayer config` CLI surface (reads/writes `AppConfig`). |
+| `portal.rs` | Host-side listener for cross-container app binding (`wryayer portal-listener`). |
+| `mod.rs` | `pub mod` wiring for the above. |
+
+**`package/` — resolving and unpacking packages**
+
+| File | Responsibility |
+|---|---|
+| `deps.rs` | BFS dependency resolver; virtual-package and soname fallback; pacman-output parsers. |
+| `download.rs` | Official repo download + AUR git clone/`makepkg` build. |
+| `extract.rs` | Unpack `.pkg.tar.zst` / `.deb` / `.rpm` into an app tree. |
+| `soname_check.rs` | Scan ELF `NEEDED` entries; find owning packages for missing libs. |
+| `mod.rs` | Module wiring. |
+
+**`tui/` — terminal UI (feature `tui`)**
+
+| File | Responsibility |
+|---|---|
+| `mod.rs` | `App` state, the event loop, the `Screen` enum, and **all** key handling. Config-row indices (`CFG_*`) and the `setting_*` helpers live here — read §4 before editing. |
+| `ui.rs` | `ratatui` rendering for every screen/overlay. |
+| `konami.rs` | Easter-egg state machine. |
+
+**`gui/` — GTK4 desktop UI (feature `gui`)**
+
+| File | Responsibility |
+|---|---|
+| `mod.rs` | Window, the six tabs, the installed/games list + toolbar buttons, snapshots dialog, space tab, small dialogs (`confirm`, `text_prompt`). |
+| `config.rs` | Per-app + global settings forms and the custom-CPU configurator dialog. Mirrors the TUI's config surface. |
+| `install.rs` | Search + multi-select install flow, already-installed dialog, game wizard. |
+| `op.rs` | Runs a wryayer subcommand in a console dialog (`run_operation`, `run_jobs`). |
+
+**`csrc/` — C helpers (compiled by `build.rs`)**
+
+| File | Responsibility |
+|---|---|
+| `cpuid_spoof.c` | `LD_PRELOAD` shim: CPUID faulting + emulation, and `sched_get/setaffinity` interposition. See §6 and README-CODE.md. |
+| `portal_client.c` | Static helper symlinked into sandboxes as each bound app / opener; forwards launch requests to the host portal. |
+
+**`tests/`** — integration tests, one file per area (`config_tests.rs`,
+`option_picker_tests.rs`, `snapshot_tests.rs`, …). See §7.
