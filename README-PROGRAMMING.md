@@ -174,8 +174,11 @@ Gotchas:
   is present.
 - The LD_PRELOAD shim is built **without** `-fvisibility=hidden`, so its
   interposers (`sigaction`, `sched_getaffinity`, …) win symbol resolution.
-- CPUID faulting is **Intel-only**; on AMD/unsupported CPUs the shim quietly
-  no-ops for the CPUID leaves (the file/`/sys` layers still apply).
+- CPUID faulting is **Intel-only**. On AMD/unsupported CPUs the shim instead
+  interposes libcpuid's public raw-data API (`cpuid_get_raw_data` /
+  `cpuid_get_all_raw_data`) and rewrites the identity/topology leaves of the
+  returned dump, so CPU-X still sees the spoofed vendor, brand, family/model and
+  core count. Tools that don't use libcpuid keep the file/`/sys`/affinity layers.
 - Avoid glibc symbols newer than your baseline (e.g. `strtoul` pulled a
   `GLIBC_2.38` dependency — it was replaced with a hand-rolled parser) so the shim
   loads against older glibc inside app trees.

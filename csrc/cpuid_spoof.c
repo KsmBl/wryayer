@@ -20,8 +20,13 @@
  *   WRYAYER_CPUID_BRAND   — up to 48-char brand string (the displayed name)
  *   WRYAYER_CPUID_FMS     — leaf-1 EAX (family/model/stepping), hex; 0 = keep real
  *
- * CPUID faulting is Intel-only; on unsupported CPUs the shim quietly does
- * nothing and CPUID passes through unchanged (so the app still runs fine).
+ * CPUID faulting is Intel-only. On AMD (and other unsupported CPUs) it cannot
+ * be enabled, so the SIGSEGV path above never activates. For those machines we
+ * fall back to interposing libcpuid's public raw-data API (cpuid_get_raw_data /
+ * cpuid_get_all_raw_data, used by CPU-X): we let the real call read the silicon,
+ * then overwrite the identity and topology leaves in the returned dump so the
+ * library derives the spoofed vendor, brand, family/model, socket and core
+ * counts. Tools that don't use libcpuid keep the /proc + affinity spoofing.
  */
 #if defined(__x86_64__)
 
@@ -80,6 +85,25 @@ static setaffinity_fn real_sched_setaffinity;
 /* The logical CPU libcpuid last "pinned" to; fed back as the x2APIC id in leaf
  * 0xB/0x1F so its per-CPU enumeration sees g_threads distinct logical CPUs. */
 static uint32_t g_cur_cpu;
+
+/* libcpuid raw-dump fallback (used when CPUID faulting is unavailable, i.e. AMD).
+ * We only need the two leading arrays of struct cpu_raw_data_t — everything we
+ * patch lives there, and they sit at the front of the struct in every libcpuid
+ * version, so we never depend on the (growing) tail or on its exact size. */
+struct lc_raw_front {
+    uint32_t basic_cpuid[32][4];   /* leaves 0x00000000..0x0000001F */
+    uint32_t ext_cpuid[32][4];     /* leaves 0x80000000..0x8000001F */
+};
+/* struct cpu_raw_data_array_t: { bool with_affinity; int32_t num_raw;
+ * cpu_raw_data_t* raw; } — on LP64 the raw pointer sits at offset 8. */
+struct lc_raw_array {
+    unsigned char head[8];
+    struct lc_raw_front *raw;
+};
+typedef int (*get_raw_fn)(struct lc_raw_front *);
+typedef int (*get_all_raw_fn)(struct lc_raw_array *);
+static get_raw_fn real_cpuid_get_raw_data;
+static get_all_raw_fn real_cpuid_get_all_raw_data;
 
 /* The handler the app tried to install for SIGSEGV; we chain real faults here. */
 static struct sigaction g_app_sa;
@@ -287,6 +311,69 @@ int sched_setaffinity(pid_t pid, size_t cpusetsize, const cpu_set_t *mask) {
         return real_sched_setaffinity(pid, cpusetsize, mask);
     errno = ENOSYS;
     return -1;
+}
+
+/* Rewrite the identity and topology leaves of a libcpuid raw dump in place so
+ * cpu_identify() derives the spoofed CPU. Mirrors the SIGSEGV handler's spoof,
+ * but writes the stored dump instead of live registers — the path used on AMD,
+ * where CPUID can't be trapped. */
+static void patch_front(struct lc_raw_front *r) {
+    if (!r) return;
+    uint32_t (*b)[4] = r->basic_cpuid;
+    uint32_t (*e)[4] = r->ext_cpuid;
+
+    if (g_have_vendor) {
+        memcpy(&b[0][1], g_vendor + 0, 4); /* EBX */
+        memcpy(&b[0][3], g_vendor + 4, 4); /* EDX */
+        memcpy(&b[0][2], g_vendor + 8, 4); /* ECX */
+    }
+    if (g_fms) b[1][0] = g_fms;            /* leaf 1 EAX: family/model/stepping */
+    if (g_have_brand) {
+        for (int i = 0; i < 3; i++) {      /* leaves 0x80000002..4: brand string */
+            memcpy(&e[2 + i][0], g_brand + i * 16 + 0, 4);
+            memcpy(&e[2 + i][1], g_brand + i * 16 + 4, 4);
+            memcpy(&e[2 + i][2], g_brand + i * 16 + 8, 4);
+            memcpy(&e[2 + i][3], g_brand + i * 16 + 12, 4);
+        }
+        if (e[0][0] < 0x80000004u) e[0][0] = 0x80000004u; /* advertise the leaves */
+    }
+    if (g_have_topo) {
+        uint32_t cores = g_cores ? g_cores : 1;
+        uint32_t threads = g_threads ? g_threads : cores;
+        uint32_t tpc = cores ? threads / cores : 1;
+        if (tpc < 1) tpc = 1;
+        /* leaf 1: EBX[23:16] = logical CPUs per package; EDX[28] = HTT. */
+        b[1][1] = (b[1][1] & 0x00FFFFFFu) | ((threads & 0xFFu) << 16);
+        if (threads > 1) b[1][3] |= (1u << 28);
+        /* AMD leaf 0x80000008 ECX[7:0] = NC = physical cores - 1. */
+        e[8][2] = (e[8][2] & 0xFFFFFF00u) | ((cores - 1) & 0xFFu);
+        /* AMD leaf 0x8000001E EBX[15:8] = threads per core - 1 (needs TopoExt). */
+        e[0x1E][1] = (e[0x1E][1] & 0xFFFF00FFu) | (((tpc - 1) & 0xFFu) << 8);
+        e[1][2] |= (1u << 22);             /* leaf 0x80000001 ECX[22] = TopoExt */
+        if (e[0][0] < 0x8000001Eu) e[0][0] = 0x8000001Eu;
+    }
+}
+
+/* Interpose libcpuid's single-CPU raw dump: fill it for real, then spoof it.
+ * Only engaged when CPUID faulting is off (g_active == 0) — with faulting the
+ * dump already reads through the spoofing handler. */
+int cpuid_get_raw_data(void *data) {
+    if (!real_cpuid_get_raw_data)
+        real_cpuid_get_raw_data = (get_raw_fn)dlsym(RTLD_NEXT, "cpuid_get_raw_data");
+    int rc = real_cpuid_get_raw_data ? real_cpuid_get_raw_data((struct lc_raw_front *)data) : -1;
+    if (!g_active) patch_front((struct lc_raw_front *)data);
+    return rc;
+}
+
+/* Interpose libcpuid's all-CPU raw dump. The affinity interposers already make
+ * this enumerate g_threads logical CPUs; patch the representative entry so the
+ * derived identity and per-core counts match the spoof. */
+int cpuid_get_all_raw_data(void *arr) {
+    if (!real_cpuid_get_all_raw_data)
+        real_cpuid_get_all_raw_data = (get_all_raw_fn)dlsym(RTLD_NEXT, "cpuid_get_all_raw_data");
+    int rc = real_cpuid_get_all_raw_data ? real_cpuid_get_all_raw_data((struct lc_raw_array *)arr) : -1;
+    if (!g_active && arr) patch_front(((struct lc_raw_array *)arr)->raw);
+    return rc;
 }
 
 __attribute__((constructor)) static void init(void) {
