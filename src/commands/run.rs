@@ -791,6 +791,15 @@ fn spawn_dbus_proxy(host_bus: &str, socket_path: &str) -> Option<std::process::C
     }
     // Apps register their own MPRIS name to expose media controls.
     proxy.arg("--own=org.mpris.MediaPlayer2.*");
+    // Firefox (and Thunderbird) remote to an already-running instance over the
+    // session bus via `org.mozilla.<app>.<profile-hash>`. A bound app opening a
+    // link spawns a second `wryayer run firefox`; sharing the same profile and
+    // this bus name lets it hand the URL to the running browser as a new tab
+    // instead of colliding with the profile lock ("Firefox is already running,
+    // but is not responding"). Without this the `--filter` proxy hides the name
+    // and remoting silently fails. Owning implies talk, so the second instance
+    // can also reach the name the first one owns on the real bus.
+    proxy.arg("--own=org.mozilla.*");
     // Steam's pressure-vessel launcher-service owns names under its own
     // namespace so it can place launched games into the right runtime; without
     // this it crash-loops ("Unable to acquire bus name …") and Steam disables
