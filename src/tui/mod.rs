@@ -984,78 +984,80 @@ fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
         konami_step(app, code);
     }
 
-    let tag = match &app.screen {
-        Screen::Main => 0u8,
-        Screen::Confirm { .. } => 1,
-        Screen::Operation { done: false, .. } => 2,
-        Screen::Operation { done: true, .. } => 3,
-        Screen::Config { .. } => 4,
-        Screen::FileBrowser { .. } => 5,
-        Screen::SharedDirs { .. } => 6,
-        Screen::InstallTarget { .. } => 7,
-        Screen::OptionPicker { .. } => 8,
-        Screen::SettingHelp { .. } => 9,
-        Screen::OptionHelp { .. } => 10,
-        Screen::TextInput { .. } => 11,
-        Screen::KeyHelp => 12,
-        Screen::RenameApp { .. } => 13,
-        Screen::DuplicateInstall { .. } => 14,
-        Screen::AlreadyInstalled { .. } => 15,
-        Screen::NoLauncherChoice { .. } => 16,
-        Screen::OutdatedPackages { .. } => 17,
-        Screen::AskShortcut { .. } => 18,
-        Screen::GameExePick { .. } => 19,
-        Screen::GameNameInput { .. } => 20,
-        Screen::GameConfirm { .. } => 21,
-        Screen::SnapshotManager { .. } => 22,
-        Screen::CpuConfig { .. } => 23,
-        Screen::BoundApps { .. } => 24,
-    };
-
-    match tag {
-        0 => on_main(app, code)?,
-        1 => on_confirm(app, code)?,
-        2 => on_op_running(app, code),
-        3 => on_op_done(app, code)?,
-        4 => on_config(app, code),
-        5 => on_file_browser(app, code),
-        6 => on_shared_dirs(app, code),
-        7 => on_install_target(app, code),
-        8 => on_option_picker(app, code),
-        9 => on_setting_help(app, code),
-        10 => on_option_help(app, code),
-        11 => on_text_input(app, code),
-        12 => on_key_help(app),
-        13 => on_rename_app(app, code),
-        14 => on_duplicate_install(app, code),
-        15 => on_already_installed(app, code),
-        16 => on_no_launcher_choice(app, code),
-        17 => on_outdated_packages(app, code),
-        18 => on_ask_shortcut(app, code),
-        19 => on_game_exe_pick(app, code),
-        20 => on_game_name_input(app, code),
-        21 => on_game_confirm(app, code),
-        22 => on_snapshot_manager(app, code),
-        23 => on_cpu_config(app, code),
-        24 => on_bound_apps(app, code),
-        _ => {}
+    // Single exhaustive dispatch on the current screen. The scrutinee borrow of
+    // `app.screen` ends at the match arm, leaving each handler free to take
+    // `&mut app` (handlers replace `app.screen` on transitions). One arm per
+    // screen — no second parallel table, and a new variant is a compile error
+    // here until it's routed.
+    match &app.screen {
+        Screen::Main => on_main(app, code)?,
+        Screen::Confirm { .. } => on_confirm(app, code)?,
+        Screen::Operation { done: false, .. } => on_op_running(app, code),
+        Screen::Operation { done: true, .. } => on_op_done(app, code)?,
+        Screen::Config { .. } => on_config(app, code),
+        Screen::FileBrowser { .. } => on_file_browser(app, code),
+        Screen::SharedDirs { .. } => on_shared_dirs(app, code),
+        Screen::InstallTarget { .. } => on_install_target(app, code),
+        Screen::OptionPicker { .. } => on_option_picker(app, code),
+        Screen::SettingHelp { .. } => on_setting_help(app, code),
+        Screen::OptionHelp { .. } => on_option_help(app, code),
+        Screen::TextInput { .. } => on_text_input(app, code),
+        Screen::KeyHelp => on_key_help(app),
+        Screen::RenameApp { .. } => on_rename_app(app, code),
+        Screen::DuplicateInstall { .. } => on_duplicate_install(app, code),
+        Screen::AlreadyInstalled { .. } => on_already_installed(app, code),
+        Screen::NoLauncherChoice { .. } => on_no_launcher_choice(app, code),
+        Screen::OutdatedPackages { .. } => on_outdated_packages(app, code),
+        Screen::AskShortcut { .. } => on_ask_shortcut(app, code),
+        Screen::GameExePick { .. } => on_game_exe_pick(app, code),
+        Screen::GameNameInput { .. } => on_game_name_input(app, code),
+        Screen::GameConfirm { .. } => on_game_confirm(app, code),
+        Screen::SnapshotManager { .. } => on_snapshot_manager(app, code),
+        Screen::CpuConfig { .. } => on_cpu_config(app, code),
+        Screen::BoundApps { .. } => on_bound_apps(app, code),
     }
     Ok(())
+}
+
+/// Standard vertical list navigation for the picker popups: ↑/k and ↓/j wrap at
+/// the ends, Home/End jump to the edges. Moves `*selected` within `0..len` and
+/// returns true when it consumed the key, so a handler can `if list_nav(..) {
+/// return; }` before matching its own action keys. A no-op on an empty list.
+fn list_nav(selected: &mut usize, len: usize, code: KeyCode) -> bool {
+    if len == 0 {
+        return false;
+    }
+    match code {
+        KeyCode::Up | KeyCode::Char('k') => {
+            *selected = if *selected == 0 { len - 1 } else { *selected - 1 };
+            true
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            *selected = (*selected + 1) % len;
+            true
+        }
+        KeyCode::Home => {
+            *selected = 0;
+            true
+        }
+        KeyCode::End => {
+            *selected = len - 1;
+            true
+        }
+        _ => false,
+    }
 }
 
 /// Snapshot manager: ↑/↓ to choose, Enter to roll back, Esc to close.
 fn on_snapshot_manager(app: &mut App, code: KeyCode) {
     let Screen::SnapshotManager { app_name, snaps, selected } = &mut app.screen else { return };
+    if list_nav(selected, snaps.len(), code) {
+        return;
+    }
     match code {
         KeyCode::Esc | KeyCode::Char('q') => {
             app.screen = Screen::Main;
             app.needs_clear = true;
-        }
-        KeyCode::Up | KeyCode::Char('k') if !snaps.is_empty() => {
-            *selected = if *selected == 0 { snaps.len() - 1 } else { *selected - 1 };
-        }
-        KeyCode::Down | KeyCode::Char('j') if !snaps.is_empty() => {
-            *selected = (*selected + 1) % snaps.len();
         }
         KeyCode::Enter => {
             if let Some(snap) = snaps.get(*selected).cloned() {
@@ -1563,15 +1565,14 @@ fn on_duplicate_install(app: &mut App, code: KeyCode) {
 
 fn on_already_installed(app: &mut App, code: KeyCode) {
     let Screen::AlreadyInstalled { pkg, selected } = &mut app.screen else { return };
+    if list_nav(selected, 2, code) {
+        return;
+    }
     match code {
         KeyCode::Esc | KeyCode::Char('q') => {
             app.screen = Screen::Main;
             app.needs_clear = true;
         }
-        KeyCode::Up | KeyCode::Char('k')
-            if *selected > 0 => { *selected -= 1; }
-        KeyCode::Down | KeyCode::Char('j')
-            if *selected < 1 => { *selected += 1; }
         KeyCode::Enter | KeyCode::Char(' ') => {
             let pkg = pkg.clone();
             match *selected {
@@ -1628,15 +1629,14 @@ fn on_already_installed(app: &mut App, code: KeyCode) {
 
 fn on_no_launcher_choice(app: &mut App, code: KeyCode) {
     let Screen::NoLauncherChoice { pkg, selected, into_target, .. } = &mut app.screen else { return };
+    if list_nav(selected, 2, code) {
+        return;
+    }
     match code {
         KeyCode::Esc | KeyCode::Char('q') => {
             app.screen = Screen::Main;
             app.needs_clear = true;
         }
-        KeyCode::Up | KeyCode::Char('k')
-            if *selected > 0 => { *selected -= 1; }
-        KeyCode::Down | KeyCode::Char('j')
-            if *selected < 1 => { *selected += 1; }
         KeyCode::Enter | KeyCode::Char(' ') => {
             let pkg = pkg.clone();
             let into_target = into_target.clone();
@@ -1668,15 +1668,14 @@ fn on_no_launcher_choice(app: &mut App, code: KeyCode) {
 
 fn on_outdated_packages(app: &mut App, code: KeyCode) {
     let Screen::OutdatedPackages { selected, install_args, pkg, .. } = &mut app.screen else { return };
+    if list_nav(selected, 2, code) {
+        return;
+    }
     match code {
         KeyCode::Esc | KeyCode::Char('q') => {
             app.screen = Screen::Main;
             app.needs_clear = true;
         }
-        KeyCode::Up | KeyCode::Char('k')
-            if *selected > 0 => { *selected -= 1; }
-        KeyCode::Down | KeyCode::Char('j')
-            if *selected < 1 => { *selected += 1; }
         KeyCode::Enter | KeyCode::Char(' ') => {
             let s = *selected;
             let pkg = pkg.clone();
@@ -1820,18 +1819,15 @@ fn trigger_search(app: &mut App) {
 fn on_install_target(app: &mut App, code: KeyCode) {
     let Screen::InstallTarget { pkg, targets, selected } = &mut app.screen else { return };
     let rows = targets.len() + 1; // row 0 = fresh; rest = merge targets
+    if list_nav(selected, rows, code) {
+        return;
+    }
 
     match code {
         KeyCode::Esc | KeyCode::Char('q') => {
             app.install_queue.clear(); // cancel any pending queue
             app.screen = Screen::Main;
             app.needs_clear = true;
-        }
-        KeyCode::Up | KeyCode::Char('k') => {
-            *selected = if *selected == 0 { rows - 1 } else { *selected - 1 };
-        }
-        KeyCode::Down | KeyCode::Char('j') => {
-            *selected = (*selected + 1) % rows;
         }
         KeyCode::Enter | KeyCode::Char(' ') => {
             let pkg = pkg.clone();
@@ -2762,6 +2758,9 @@ fn on_option_picker(app: &mut App, code: KeyCode) {
         app.needs_clear = true;
         return;
     }
+    if list_nav(selected, n, code) {
+        return;
+    }
 
     match code {
         KeyCode::Esc | KeyCode::Char('q') => {
@@ -2780,12 +2779,6 @@ fn on_option_picker(app: &mut App, code: KeyCode) {
                 app.screen = Screen::Config { app_name: name, config: cfg, selected: idx };
             }
             app.needs_clear = true;
-        }
-        KeyCode::Up | KeyCode::Char('k') => {
-            *selected = if *selected == 0 { n - 1 } else { *selected - 1 };
-        }
-        KeyCode::Down | KeyCode::Char('j') => {
-            *selected = (*selected + 1) % n;
         }
         KeyCode::Enter | KeyCode::Char(' ') => {
             let name = app_name.clone();
@@ -3162,6 +3155,9 @@ fn write_shared_cfg(app_name: &str, cfg: &AppConfig) {
 
 fn on_shared_dirs(app: &mut App, code: KeyCode) {
     let Screen::SharedDirs { app_name, dirs, selected } = &mut app.screen else { return };
+    if list_nav(selected, dirs.len(), code) {
+        return;
+    }
     match code {
         KeyCode::Esc | KeyCode::Char('q') => {
             let name = app_name.clone();
@@ -3178,12 +3174,6 @@ fn on_shared_dirs(app: &mut App, code: KeyCode) {
                 app.screen = Screen::Config { app_name: name, config, selected: CFG_SHARES };
             }
             app.needs_clear = true;
-        }
-        KeyCode::Up | KeyCode::Char('k') if !dirs.is_empty() => {
-            *selected = if *selected == 0 { dirs.len() - 1 } else { *selected - 1 };
-        }
-        KeyCode::Down | KeyCode::Char('j') if !dirs.is_empty() => {
-            *selected = (*selected + 1) % dirs.len();
         }
         KeyCode::Char('d') | KeyCode::Delete
             if !dirs.is_empty() => {
@@ -3228,6 +3218,9 @@ fn open_bound_apps(app: &mut App, app_name: String) {
 
 fn on_bound_apps(app: &mut App, code: KeyCode) {
     let Screen::BoundApps { app_name, apps, selected } = &mut app.screen else { return };
+    if list_nav(selected, apps.len(), code) {
+        return;
+    }
     match code {
         KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => {
             // Persist the ticked set into config.bound_apps and return to Config.
@@ -3242,12 +3235,6 @@ fn on_bound_apps(app: &mut App, code: KeyCode) {
             let config = read_config(&name).unwrap_or_default();
             app.screen = Screen::Config { app_name: name, config, selected: CFG_BOUND };
             app.needs_clear = true;
-        }
-        KeyCode::Up | KeyCode::Char('k') if !apps.is_empty() => {
-            *selected = if *selected == 0 { apps.len() - 1 } else { *selected - 1 };
-        }
-        KeyCode::Down | KeyCode::Char('j') if !apps.is_empty() => {
-            *selected = (*selected + 1) % apps.len();
         }
         KeyCode::Char(' ') if !apps.is_empty() => {
             if let Some(entry) = apps.get_mut(*selected) {
@@ -3471,16 +3458,15 @@ fn process_install_queue(app: &mut App) {
 
 fn on_ask_shortcut(app: &mut App, code: KeyCode) {
     let Screen::AskShortcut { selected, .. } = &mut app.screen else { return };
+    if list_nav(selected, 2, code) {
+        return;
+    }
     match code {
         KeyCode::Esc | KeyCode::Char('q') => {
             app.install_queue.clear();
             app.screen = Screen::Main;
             app.needs_clear = true;
         }
-        KeyCode::Up | KeyCode::Char('k')
-            if *selected > 0 => { *selected -= 1; }
-        KeyCode::Down | KeyCode::Char('j')
-            if *selected < 1 => { *selected += 1; }
         KeyCode::Enter | KeyCode::Char(' ') => {
             let screen = std::mem::replace(&mut app.screen, Screen::Main);
             if let Screen::AskShortcut { title, mut args, selected, .. } = screen {
@@ -3740,18 +3726,14 @@ fn enter_game_wizard(app: &mut App, game_dir: PathBuf) {
 
 fn on_game_exe_pick(app: &mut App, code: KeyCode) {
     let Screen::GameExePick { game_dir, exes, selected } = &mut app.screen else { return };
-    let len = exes.len();
+    if list_nav(selected, exes.len(), code) {
+        return;
+    }
     match code {
         KeyCode::Esc | KeyCode::Char('q') => {
             app.screen = Screen::Main;
             app.tab = Tab::Games;
             app.needs_clear = true;
-        }
-        KeyCode::Up | KeyCode::Char('k') => {
-            *selected = if *selected == 0 { len - 1 } else { *selected - 1 };
-        }
-        KeyCode::Down | KeyCode::Char('j') => {
-            *selected = (*selected + 1) % len;
         }
         KeyCode::Enter | KeyCode::Char(' ') => {
             let gd = game_dir.clone();
