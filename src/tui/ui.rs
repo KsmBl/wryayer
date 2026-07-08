@@ -526,15 +526,7 @@ fn draw_cpu_field_help(f: &mut Frame, area: Rect, row: usize) {
 fn draw_snapshot_manager(f: &mut Frame, area: Rect, app_name: &str, snaps: &[String], selected: usize) {
     let needed_h = (snaps.len() as u16) + 4;
     let h_pct = ((needed_h as f32 / area.height.max(1) as f32) * 100.0).clamp(25.0, 65.0) as u16;
-    let popup = centered_rect(46, h_pct, area);
-    f.render_widget(Clear, popup);
-
-    let block = Block::default().borders(Borders::ALL).border_type(c_border_type())
-        .title(format!(" Snapshots — {app_name} "))
-        .title_style(Style::default().fg(c_accent()).add_modifier(Modifier::BOLD))
-        .border_style(Style::default().fg(c_accent()));
-    let inner = block.inner(popup);
-    f.render_widget(block, popup);
+    let inner = popup_frame(f, area, 46, h_pct, &format!("Snapshots — {app_name}"), c_accent());
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -2260,16 +2252,8 @@ fn draw_option_help(f: &mut Frame, area: Rect, setting_idx: usize, choice_idx: u
 // ── Shared dirs overlay ───────────────────────────────────────────────────────
 
 fn draw_shared_dirs(f: &mut Frame, area: Rect, app_name: &str, dirs: &[String], selected: usize) {
-    let popup = centered_rect(60, 70, area);
-    f.render_widget(Clear, popup);
-
     let title_target = if app_name.is_empty() { "Defaults" } else { app_name };
-    let block = Block::default().borders(Borders::ALL).border_type(c_border_type())
-        .title(format!(" Shared Folders — {title_target} "))
-        .title_style(Style::default().fg(c_accent()).add_modifier(Modifier::BOLD))
-        .border_style(Style::default().fg(c_accent()));
-    let inner = block.inner(popup);
-    f.render_widget(block, popup);
+    let inner = popup_frame(f, area, 60, 70, &format!("Shared Folders — {title_target}"), c_accent());
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -2285,26 +2269,7 @@ fn draw_shared_dirs(f: &mut Frame, area: Rect, app_name: &str, dirs: &[String], 
             chunks[0],
         );
     } else {
-        let items: Vec<ListItem> = dirs.iter().enumerate().map(|(i, d)| {
-            let is_sel = i == selected;
-            let style = if is_sel {
-                Style::default().fg(c_fg()).bg(c_select()).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(c_accent())
-            };
-            ListItem::new(Line::from(vec![
-                Span::styled(if is_sel { " ▶ " } else { "   " }, Style::default().fg(c_accent())),
-                Span::styled(d.as_str(), style),
-            ]))
-        }).collect();
-
-        let mut list_state = ListState::default();
-        list_state.select(if dirs.is_empty() { None } else { Some(selected) });
-
-        let list = List::new(items)
-            .block(Block::default())
-            .highlight_style(Style::default().bg(c_select()));
-        f.render_stateful_widget(list, chunks[0], &mut list_state);
+        draw_menu_list(f, chunks[0], dirs, selected);
     }
 
     f.render_widget(
@@ -2317,15 +2282,7 @@ fn draw_shared_dirs(f: &mut Frame, area: Rect, app_name: &str, dirs: &[String], 
 }
 
 fn draw_bound_apps(f: &mut Frame, area: Rect, app_name: &str, apps: &[(String, bool)], selected: usize) {
-    let popup = centered_rect(60, 70, area);
-    f.render_widget(Clear, popup);
-
-    let block = Block::default().borders(Borders::ALL).border_type(c_border_type())
-        .title(format!(" Bind apps into — {app_name} "))
-        .title_style(Style::default().fg(c_accent()).add_modifier(Modifier::BOLD))
-        .border_style(Style::default().fg(c_accent()));
-    let inner = block.inner(popup);
-    f.render_widget(block, popup);
+    let inner = popup_frame(f, area, 60, 70, &format!("Bind apps into — {app_name}"), c_accent());
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -2384,15 +2341,7 @@ fn draw_bound_apps(f: &mut Frame, area: Rect, app_name: &str, apps: &[(String, b
 // ── Install target picker overlay ─────────────────────────────────────────────
 
 fn draw_install_target(f: &mut Frame, area: Rect, pkg: &str, targets: &[String], selected: usize) {
-    let popup = centered_rect(60, 70, area);
-    f.render_widget(Clear, popup);
-
-    let block = Block::default().borders(Borders::ALL).border_type(c_border_type())
-        .title(format!(" Install '{pkg}' "))
-        .title_style(Style::default().fg(c_accent()).add_modifier(Modifier::BOLD))
-        .border_style(Style::default().fg(c_accent()));
-    let inner = block.inner(popup);
-    f.render_widget(block, popup);
+    let inner = popup_frame(f, area, 60, 70, &format!("Install '{pkg}'"), c_accent());
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -2609,15 +2558,7 @@ fn draw_rename_app(f: &mut Frame, area: Rect, app_name: &str, value: &str, curso
 // ── Already installed choice overlay ─────────────────────────────────────────
 
 fn draw_already_installed(f: &mut Frame, area: Rect, pkg: &str, selected: usize) {
-    let popup = centered_rect(56, 40, area);
-    f.render_widget(Clear, popup);
-
-    let block = Block::default().borders(Borders::ALL).border_type(c_border_type())
-        .title(format!(" '{pkg}' is already installed "))
-        .title_style(Style::default().fg(c_accent()).add_modifier(Modifier::BOLD))
-        .border_style(Style::default().fg(c_accent()));
-    let inner = block.inner(popup);
-    f.render_widget(block, popup);
+    let inner = popup_frame(f, area, 56, 40, &format!("'{pkg}' is already installed"), c_accent());
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -2667,15 +2608,7 @@ fn draw_already_installed(f: &mut Frame, area: Rect, pkg: &str, selected: usize)
 // ── No-launcher choice overlay ────────────────────────────────────────────────
 
 fn draw_outdated_packages(f: &mut Frame, area: Rect, pkg: &str, selected: usize) {
-    let popup = centered_rect(62, 40, area);
-    f.render_widget(Clear, popup);
-
-    let block = Block::default().borders(Borders::ALL).border_type(c_border_type())
-        .title(" Package databases may be out of date ")
-        .title_style(Style::default().fg(c_yellow()).add_modifier(Modifier::BOLD))
-        .border_style(Style::default().fg(c_yellow()));
-    let inner = block.inner(popup);
-    f.render_widget(block, popup);
+    let inner = popup_frame(f, area, 62, 40, "Package databases may be out of date", c_yellow());
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -2732,16 +2665,7 @@ fn draw_outdated_packages(f: &mut Frame, area: Rect, pkg: &str, selected: usize)
 }
 
 fn draw_ask_shortcut(f: &mut Frame, area: Rect, pkg: &str, selected: usize) {
-    let popup = centered_rect(52, 40, area);
-    f.render_widget(Clear, popup);
-
-    let block = Block::default()
-        .borders(Borders::ALL).border_type(c_border_type())
-        .title(" Create shortcut? ")
-        .title_style(Style::default().fg(c_accent()).add_modifier(Modifier::BOLD))
-        .border_style(Style::default().fg(c_accent()));
-    let inner = block.inner(popup);
-    f.render_widget(block, popup);
+    let inner = popup_frame(f, area, 52, 40, "Create shortcut?", c_accent());
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -2785,15 +2709,7 @@ fn draw_ask_shortcut(f: &mut Frame, area: Rect, pkg: &str, selected: usize) {
 }
 
 fn draw_no_launcher_choice(f: &mut Frame, area: Rect, pkg: &str, available_bins: &[String], selected: usize) {
-    let popup = centered_rect(60, 50, area);
-    f.render_widget(Clear, popup);
-
-    let block = Block::default().borders(Borders::ALL).border_type(c_border_type())
-        .title(format!(" '{pkg}' — no launcher binary found "))
-        .title_style(Style::default().fg(c_yellow()).add_modifier(Modifier::BOLD))
-        .border_style(Style::default().fg(c_yellow()));
-    let inner = block.inner(popup);
-    f.render_widget(block, popup);
+    let inner = popup_frame(f, area, 60, 50, &format!("'{pkg}' — no launcher binary found"), c_yellow());
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -2988,15 +2904,7 @@ fn draw_games(f: &mut Frame, app: &mut App, area: Rect) {
 // ── Wine game wizard overlays ─────────────────────────────────────────────────
 
 fn draw_game_exe_pick(f: &mut Frame, area: Rect, game_dir: &str, exes: &[(String, u64)], selected: usize) {
-    let popup = centered_rect(70, 70, area);
-    f.render_widget(Clear, popup);
-
-    let block = Block::default().borders(Borders::ALL).border_type(c_border_type())
-        .title(" 1/3 — Pick main .exe ")
-        .title_style(Style::default().fg(c_accent()).add_modifier(Modifier::BOLD))
-        .border_style(Style::default().fg(c_accent()));
-    let inner = block.inner(popup);
-    f.render_widget(block, popup);
+    let inner = popup_frame(f, area, 70, 70, "1/3 — Pick main .exe", c_accent());
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -3198,6 +3106,50 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(v)[1]
+}
+
+/// Draw the standard popup chrome — a `w%`×`h%` centred box, cleared behind,
+/// with a titled `color` border — and return the inner Rect for content. Every
+/// modal popup shares this frame; callers just fill the returned area.
+fn popup_frame(f: &mut Frame, area: Rect, w: u16, h: u16, title: &str, color: Color) -> Rect {
+    let popup = centered_rect(w, h, area);
+    f.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(c_border_type())
+        .title(format!(" {title} "))
+        .title_style(Style::default().fg(color).add_modifier(Modifier::BOLD))
+        .border_style(Style::default().fg(color));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+    inner
+}
+
+/// Render a single-choice menu into `area`: one row per label, with a ▶ marker
+/// and highlight on the selected row. Shared by the picker popups so a new one
+/// needs only its labels and a `selected` index.
+fn draw_menu_list(f: &mut Frame, area: Rect, labels: &[String], selected: usize) {
+    let items: Vec<ListItem> = labels
+        .iter()
+        .enumerate()
+        .map(|(i, label)| {
+            let is_sel = i == selected;
+            let style = if is_sel {
+                Style::default().fg(c_fg()).bg(c_select()).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(c_accent())
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(if is_sel { " ▶ " } else { "   " }, Style::default().fg(c_accent())),
+                Span::styled(label.as_str(), style),
+            ]))
+        })
+        .collect();
+    let mut list_state = ListState::default();
+    if !labels.is_empty() {
+        list_state.select(Some(selected));
+    }
+    f.render_stateful_widget(List::new(items).block(Block::default()), area, &mut list_state);
 }
 
 #[cfg(test)]
