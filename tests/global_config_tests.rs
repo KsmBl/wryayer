@@ -1,11 +1,18 @@
 // Tests intentionally build a Default config and tweak individual fields.
 #![allow(clippy::field_reassign_with_default)]
 
+use std::sync::Mutex;
 use wryayer::config::{
     read_global_config, write_global_config, AppConfig, TempMode,
 };
 
+// Tests in this binary mutate the process-global $HOME and run in parallel
+// threads by default; without this lock two tests racing on HOME read each
+// other's temp config. Same guard the other HOME-touching test files use.
+static HOME_LOCK: Mutex<()> = Mutex::new(());
+
 fn with_temp_home<F: FnOnce(&std::path::Path)>(f: F) {
+    let _guard = HOME_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let tmp = tempfile::TempDir::new().unwrap();
     let old = std::env::var_os("HOME");
     std::env::set_var("HOME", tmp.path());
