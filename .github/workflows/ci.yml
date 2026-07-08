@@ -19,6 +19,12 @@ jobs:
           rustup toolchain install stable --component clippy --no-self-update
           rustup default stable
 
+      # GTK4 dev libraries so the `gui` feature builds and lints in CI.
+      - name: Install GTK4 dev libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-4-dev
+
       - name: Cache cargo + target
         uses: actions/cache@v4
         with:
@@ -32,11 +38,15 @@ jobs:
       - name: Build
         run: cargo build --release --all-targets
 
+      # Build the opt-in GTK front-end too so gui regressions can't ship silently.
+      - name: Build (gui feature)
+        run: cargo build --release --features gui
+
       # Deny warnings so lint regressions fail the build. Formatting is not
       # checked: the codebase uses deliberate manual alignment that rustfmt
-      # would flatten.
+      # would flatten. --all-features lints the gui code path as well.
       - name: Clippy
-        run: cargo clippy --release --all-targets -- -D warnings
+        run: cargo clippy --release --all-targets --all-features -- -D warnings
 
       - name: Test
         run: cargo test --release
