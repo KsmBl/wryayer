@@ -371,12 +371,12 @@ mod arch {
             .with_context(|| format!("cannot parse filename from URL: {url}"))?;
         let dest = cache_dir.join(filename);
         if dest.exists() {
-            return Ok(dest);
+            return verified(pkg, url, dest);
         }
 
         eprintln!("  Downloading {pkg}...");
         let primary_err = match download_url(url, &dest) {
-            Ok(()) => return Ok(dest),
+            Ok(()) => return verified(pkg, url, dest),
             Err(e) => {
                 let _ = std::fs::remove_file(&dest);
                 e
@@ -391,7 +391,7 @@ mod arch {
             for fallback_url in mirror_fallback_urls(url, filename) {
                 eprintln!("  Retrying with fallback mirror...");
                 if download_url(&fallback_url, &dest).is_ok() {
-                    return Ok(dest);
+                    return verified(pkg, &fallback_url, dest);
                 }
                 let _ = std::fs::remove_file(&dest);
             }
@@ -431,6 +431,61 @@ mod arch {
         }
 
         Err(primary_err).with_context(|| format!("failed to download '{pkg}'"))
+    }
+
+    /// Authenticate a downloaded package against the pacman keyring and return
+    /// its path, or delete it and error out. wryayer fetches packages straight
+    /// from a mirror URL, bypassing pacman's own signature check, so without
+    /// this a compromised or MITM'd mirror could drop arbitrary files into the
+    /// sandbox root. Set WRYAYER_SKIP_SIG_VERIFY=1 to bypass (e.g. a private
+    /// unsigned repo).
+    fn verified(pkg: &str, url: &str, dest: PathBuf) -> Result<PathBuf> {
+        if std::env::var_os("WRYAYER_SKIP_SIG_VERIFY").is_some() {
+            return Ok(dest);
+        }
+        match verify_signature(url, &dest) {
+            Ok(()) => Ok(dest),
+            Err(e) => {
+                // A file that fails verification is untrustworthy — drop it so a
+                // later run re-downloads instead of reusing the bad cache entry.
+                let _ = std::fs::remove_file(&dest);
+                Err(e).with_context(|| format!("refusing to install unverified package '{pkg}'"))
+            }
+        }
+    }
+
+    /// Download `<pkg_url>.sig` and verify the detached PGP signature against the
+    /// pacman keyring. Official Arch (and CachyOS) packages are always signed and
+    /// the mirror serves the `.sig` alongside the package.
+    fn verify_signature(pkg_url: &str, pkg_path: &Path) -> Result<()> {
+        const KEYRING: &str = "/etc/pacman.d/gnupg";
+        if !Path::new(KEYRING).is_dir() {
+            bail!("pacman keyring {KEYRING} not found; cannot verify package signature");
+        }
+        let sig_path = PathBuf::from(format!("{}.sig", pkg_path.display()));
+        download_url(&format!("{pkg_url}.sig"), &sig_path)
+            .with_context(|| format!("failed to download signature for {}", pkg_path.display()))?;
+
+        let out = Command::new("gpg")
+            .args(["--homedir", KEYRING, "--status-fd", "1", "--verify"])
+            .arg(&sig_path)
+            .arg(pkg_path)
+            .output();
+        let _ = std::fs::remove_file(&sig_path);
+        let out = out.context("failed to run gpg (is gnupg installed?)")?;
+
+        // gpg exits 0 and prints a VALIDSIG status line only when the signature
+        // is good AND made by a key already in the pacman keyring. Benign
+        // warnings (unsafe homedir ownership, unwritable trustdb) go to stderr
+        // and don't affect the verdict.
+        let status = String::from_utf8_lossy(&out.stdout);
+        if out.status.success() && status.contains("VALIDSIG") {
+            return Ok(());
+        }
+        bail!(
+            "package signature invalid or not signed by a trusted key:\n{}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
     }
 
     /// Return alternative download URLs for `filename` by substituting the same
