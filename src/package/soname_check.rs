@@ -1,9 +1,7 @@
 use crate::package::{download_official, extract_package};
 use anyhow::{Context, Result};
 use std::collections::{HashSet, VecDeque};
-use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// Walk `app_dir`, find every ELF NEEDED soname that is absent from the tree,
 /// and extract the owning package for each one. Loops until convergence so that
@@ -183,28 +181,17 @@ fn collect_needed_impl(start_dir: &Path, skip_hidden: bool) -> Result<HashSet<St
 
 
 fn elf_needed(path: &Path) -> Result<Vec<String>> {
-    let mut f = std::fs::File::open(path)?;
-    let mut magic = [0u8; 4];
-    f.read_exact(&mut magic)?;
-    if &magic != b"\x7fELF" {
+    let Ok(data) = std::fs::read(path) else { return Ok(vec![]) };
+    if !data.starts_with(b"\x7fELF") {
         return Ok(vec![]);
     }
-    drop(f);
-
-    let out = Command::new("readelf")
-        .args(["-d", &path.to_string_lossy()])
-        .output()
-        .context("readelf failed")?;
-
-    let mut libs = vec![];
-    for line in String::from_utf8_lossy(&out.stdout).lines() {
-        if line.contains("(NEEDED)") {
-            if let (Some(s), Some(e)) = (line.find('['), line.rfind(']')) {
-                libs.push(line[s + 1..e].to_string());
-            }
-        }
+    // goblin reads the DT_NEEDED entries directly from the dynamic section.
+    // A parse error (truncated/exotic ELF) is treated as "no deps" — same as
+    // the old readelf path, which produced nothing on such files.
+    match goblin::elf::Elf::parse(&data) {
+        Ok(elf) => Ok(elf.libraries.iter().map(|s| s.to_string()).collect()),
+        Err(_) => Ok(vec![]),
     }
-    Ok(libs)
 }
 
 /// True for files likely to dlopen other libraries at runtime: shared
@@ -221,19 +208,28 @@ fn is_plugin_host(path: &Path) -> bool {
 /// its argument as a runtime string, so the linker can't record them.
 /// Returns sonames found (no path prefix, version-suffixed only).
 fn collect_dlopen_sonames(path: &Path) -> Vec<String> {
-    let Ok(mut f) = std::fs::File::open(path) else { return vec![] };
-    let mut magic = [0u8; 4];
-    if f.read_exact(&mut magic).is_err() || &magic != b"\x7fELF" {
+    let Ok(data) = std::fs::read(path) else { return vec![] };
+    if !data.starts_with(b"\x7fELF") {
         return vec![];
     }
-    drop(f);
-    let Ok(out) = Command::new("strings").args(["-a"]).arg(path).output() else { return vec![] };
-    let text = String::from_utf8_lossy(&out.stdout);
+    // Replicate `strings -a`: every maximal run of printable ASCII bytes (space
+    // included, matching GNU strings' isprint runs) is a candidate; keep only
+    // the ones shaped like a versioned dlopen soname.
     let mut sonames: HashSet<String> = HashSet::new();
-    for line in text.lines() {
-        if is_versioned_soname(line) {
-            sonames.insert(line.to_string());
+    let mut run_start = 0usize;
+    for i in 0..=data.len() {
+        let printable = i < data.len() && matches!(data[i], 0x20..=0x7e);
+        if printable {
+            continue;
         }
+        if i > run_start {
+            if let Ok(tok) = std::str::from_utf8(&data[run_start..i]) {
+                if is_versioned_soname(tok) {
+                    sonames.insert(tok.to_string());
+                }
+            }
+        }
+        run_start = i + 1;
     }
     sonames.into_iter().collect()
 }

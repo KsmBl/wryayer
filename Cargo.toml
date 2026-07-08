@@ -27,6 +27,9 @@ ratatui = { version = "0.29", optional = true }
 crossterm = { version = "0.28", optional = true }
 shellexpand = "3"
 libc = "0.2"
+# Pure-Rust ELF parser: reads NEEDED sonames (and ELF class) in-process instead
+# of forking readelf/strings per file across a whole container tree.
+goblin = "0.9"
 gtk4 = { version = "0.11", features = ["v4_10"], optional = true }
 
 [features]
