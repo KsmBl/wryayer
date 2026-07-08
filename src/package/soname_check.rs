@@ -32,9 +32,12 @@ fn satisfy_missing_sonames_impl(
     cache_dir: &Path,
     seed_paths: Option<&[PathBuf]>,
 ) -> Result<Vec<String>> {
+    // Per-soname progress/warnings are a wall of output on big apps (Steam et al).
+    // Off by default: collapse to a one-line summary, full detail behind the env.
+    let verbose = std::env::var_os("WRYAYER_VERBOSE").is_some();
     let mut installed: Vec<String> = Vec::new();
     let mut visited: HashSet<String> = HashSet::new();
-    let mut already_missing: HashSet<String> = HashSet::new();
+    let mut unresolved: HashSet<String> = HashSet::new();
     // Files to scan on the next iteration. Starts as the caller-supplied seed
     // (when None, the full tree is scanned), then narrows to only files added
     // by satisfy-loop installs so we never re-walk the full container.
@@ -48,7 +51,7 @@ fn satisfy_missing_sonames_impl(
         // Drop sonames we already reported as unresolved last iteration — they
         // are still unresolvable and re-querying costs 8 pacman/apt forks each.
         let missing: Vec<String> = missing.into_iter()
-            .filter(|s| !already_missing.contains(s))
+            .filter(|s| !unresolved.contains(s))
             .collect();
         if missing.is_empty() {
             break;
@@ -59,7 +62,9 @@ fn satisfy_missing_sonames_impl(
         for soname in &missing {
             match crate::distro::soname_owner(soname) {
                 Ok(Some(pkg)) if !visited.contains(&pkg) => {
-                    eprintln!("  installing {pkg} (provides {soname})...");
+                    if verbose {
+                        eprintln!("  installing {pkg} (provides {soname})...");
+                    }
                     let path = download_official(&pkg, cache_dir)
                         .with_context(|| format!("failed to download {pkg}"))?;
                     extract_package(&path, app_dir)
@@ -72,20 +77,42 @@ fn satisfy_missing_sonames_impl(
                     progress = true;
                 }
                 Ok(None) => {
-                    already_missing.insert(soname.clone());
+                    unresolved.insert(soname.clone());
                 }
                 Ok(_) => {}
-                Err(e) => eprintln!("  warning: soname lookup for {soname}: {e:#}"),
+                Err(e) => {
+                    if verbose {
+                        eprintln!("  warning: soname lookup for {soname}: {e:#}");
+                    }
+                    unresolved.insert(soname.clone());
+                }
             }
         }
 
         if !progress {
             for soname in &missing {
-                eprintln!("  warning: no package found for {soname}");
+                unresolved.insert(soname.clone());
             }
             break;
         }
         next_scan = Some(iter_new_paths);
+    }
+
+    if !installed.is_empty() || !unresolved.is_empty() {
+        let mut msg = format!("  sonames: installed {} package(s)", installed.len());
+        if !unresolved.is_empty() {
+            let mut names: Vec<&str> = unresolved.iter().map(String::as_str).collect();
+            names.sort_unstable();
+            if verbose {
+                msg.push_str(&format!(", {} unresolved: {}", names.len(), names.join(", ")));
+            } else {
+                msg.push_str(&format!(
+                    ", {} unresolved (set WRYAYER_VERBOSE=1 for the list)",
+                    names.len()
+                ));
+            }
+        }
+        eprintln!("{msg}");
     }
 
     Ok(installed)
