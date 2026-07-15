@@ -186,6 +186,7 @@ fn round_trip_all_non_default_values() {
         spoof_cpuinfo:       None,
         spoof_os:            None,
         spoof_terminal:      false,
+        spoof_uptime:        None,
         ram_limit:           None,
         create_shortcut:     true,
         confirm_install:     false,
@@ -287,6 +288,30 @@ fn ram_limit_round_trips_through_format() {
     for s in ["512KB", "512MB", "2GB", "1.5G"] {
         let kib = parse_ram_limit(s).unwrap();
         assert_eq!(parse_ram_limit(&format_ram_limit(kib)), Some(kib), "round-trip {s}");
+    }
+}
+
+#[test]
+fn parse_uptime_units() {
+    assert_eq!(parse_uptime("45"), Some(45)); // bare = seconds
+    assert_eq!(parse_uptime("90m"), Some(5400));
+    assert_eq!(parse_uptime("1h"), Some(3600));
+    assert_eq!(parse_uptime("1d"), Some(86400));
+    assert_eq!(parse_uptime("1w"), Some(604800));
+    assert_eq!(parse_uptime("3d4h"), Some(3 * 86400 + 4 * 3600));
+    assert_eq!(parse_uptime("1w 2d"), Some(604800 + 2 * 86400));
+    assert_eq!(parse_uptime("1h30m45s"), Some(3600 + 1800 + 45));
+    assert_eq!(parse_uptime("system"), None);
+    assert_eq!(parse_uptime("off"), None);
+    assert_eq!(parse_uptime("0"), None);
+    assert_eq!(parse_uptime(""), None);
+    assert_eq!(parse_uptime("3x"), None); // unknown unit
+}
+
+#[test]
+fn uptime_round_trips_through_format() {
+    for secs in [45u64, 3600, 86400, 604800, 3 * 86400 + 4 * 3600, 5400] {
+        assert_eq!(parse_uptime(&format_uptime(secs)), Some(secs), "round-trip {secs}s");
     }
 }
 

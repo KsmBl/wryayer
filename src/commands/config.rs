@@ -18,6 +18,7 @@ pub fn run(
     spoof_cpuinfo: Option<&str>,
     spoof_os: Option<&str>,
     spoof_terminal: Option<&str>,
+    spoof_uptime: Option<&str>,
     ram_limit: Option<&str>,
 ) -> Result<()> {
     read_manifest(app_name)
@@ -27,7 +28,7 @@ pub fn run(
     let changed = [
         temp_mode, temp_delete, network, camera, microphone, audio,
         spoof_hostname, spoof_username, spoof_machine_id, spoof_cpuinfo, spoof_os,
-        spoof_terminal, ram_limit,
+        spoof_terminal, spoof_uptime, ram_limit,
     ]
     .iter()
     .any(Option::is_some);
@@ -82,6 +83,17 @@ pub fn run(
             "off" | "false" | "0" => false,
             other => bail!("unknown spoof_terminal value '{other}'\n  valid: on, off"),
         };
+    }
+
+    if let Some(v) = spoof_uptime {
+        if matches!(v, "system" | "off" | "0" | "") {
+            config.spoof_uptime = None;
+        } else {
+            match crate::config::parse_uptime(v) {
+                Some(secs) => config.spoof_uptime = Some(secs),
+                None => bail!("invalid spoof_uptime '{v}' — expected a duration like 3d4h, 90m, bare seconds, or 'system'"),
+            }
+        }
     }
 
     if let Some(v) = ram_limit {
@@ -191,6 +203,7 @@ fn print_config(app_name: &str, config: &AppConfig) {
         || config.spoof_cpuinfo.is_some()
         || config.spoof_os.is_some()
         || config.spoof_terminal
+        || config.spoof_uptime.is_some()
     {
         eprintln!("  spoof:");
         eprintln!("    hostname   = {}", spoof_str(&config.spoof_hostname));
@@ -199,6 +212,7 @@ fn print_config(app_name: &str, config: &AppConfig) {
         eprintln!("    cpuinfo    = {}", spoof_str(&config.spoof_cpuinfo));
         eprintln!("    os-release = {}", spoof_str(&config.spoof_os));
         eprintln!("    terminal   = {}", b(config.spoof_terminal));
+        eprintln!("    uptime     = {}", config.spoof_uptime.map(crate::config::format_uptime).unwrap_or_else(|| "off".into()));
     }
     match config.ram_limit {
         None      => eprintln!("  ram_limit   = none"),

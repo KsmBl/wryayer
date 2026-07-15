@@ -693,6 +693,11 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
         }
     }
 
+    // Guest paths of every LD_PRELOAD shim to inject. Collected here and set as
+    // a single colon-joined LD_PRELOAD below, so the CPUID and uptime shims can
+    // both be active without one overwriting the other.
+    let mut preloads: Vec<String> = Vec::new();
+
     if let Some(ref cpuinfo_path) = config.spoof_cpuinfo {
         if cpuinfo_path == "sample" {
             let cf = spoof_dir.join("cpuinfo");
@@ -729,7 +734,7 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
                 if std::fs::write(&so, SHIM).is_ok() {
                     if let Some(s) = so.to_str() {
                         cmd.args(["--ro-bind", s, "/.wryayer-cpuidspoof.so"]);
-                        cmd.args(["--setenv", "LD_PRELOAD", "/.wryayer-cpuidspoof.so"]);
+                        preloads.push("/.wryayer-cpuidspoof.so".to_string());
                         cmd.args(["--setenv", "WRYAYER_CPUID_VENDOR", &sp.vendor]);
                         cmd.args(["--setenv", "WRYAYER_CPUID_BRAND", &sp.brand]);
                         cmd.args(["--setenv", "WRYAYER_CPUID_FMS", &format!("0x{:08x}", sp.fms)]);
@@ -761,6 +766,41 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
         if let Some(dmi) = crate::cpu::host_dmi_for(cpuinfo_path) {
             spoof_dmi(&mut cmd, &spoof_dir, &dmi);
         }
+    }
+
+    // ── Uptime spoof ─────────────────────────────────────────────────────────
+    //
+    // Two readers to fool: file-parsers (uptime, w) read /proc/uptime; fastfetch
+    // and sysinfo(2)-based tools read the boot clock, which the vDSO serves so
+    // it can't be bound. Overlay /proc/uptime AND inject an LD_PRELOAD shim that
+    // rewrites clock_gettime(CLOCK_BOOTTIME)/sysinfo() by a constant offset.
+    if let Some(secs) = config.spoof_uptime {
+        // /proc/uptime = "<uptime> <idle>"; idle ~ uptime × logical CPUs is a
+        // plausible sum of per-CPU idle time.
+        let idle = secs.saturating_mul(host_cpu_dir_count() as u64);
+        let uf = spoof_dir.join("uptime");
+        if std::fs::write(&uf, format!("{secs}.00 {idle}.00\n")).is_ok() {
+            if let Some(s) = uf.to_str() {
+                cmd.args(["--ro-bind-try", s, "/proc/uptime"]);
+            }
+        }
+        const UPTIME_SHIM: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/libuptimespoof.so"));
+        if !UPTIME_SHIM.is_empty() {
+            let so = spoof_dir.join("uptimespoof.so");
+            if std::fs::write(&so, UPTIME_SHIM).is_ok() {
+                if let Some(s) = so.to_str() {
+                    cmd.args(["--ro-bind", s, "/.wryayer-uptimespoof.so"]);
+                    preloads.push("/.wryayer-uptimespoof.so".to_string());
+                    cmd.args(["--setenv", "WRYAYER_UPTIME", &secs.to_string()]);
+                }
+            }
+        }
+    }
+
+    // Inject every collected shim as one LD_PRELOAD (colon-joined) so multiple
+    // spoof shims coexist instead of clobbering each other.
+    if !preloads.is_empty() {
+        cmd.args(["--setenv", "LD_PRELOAD", &preloads.join(":")]);
     }
 
     // ── RAM limit: fake /proc/meminfo ────────────────────────────────────────

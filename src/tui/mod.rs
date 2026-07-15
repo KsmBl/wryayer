@@ -2146,12 +2146,19 @@ pub const CFG_CLEAN_CACHE: usize = 18;
 pub const CFG_THEME: usize = 19;
 pub const CFG_LAYOUT: usize = 20;
 pub const CFG_SAVE: usize = 21;
-pub const CFG_LEN: usize = 22;
+/// Spoofed system uptime. Its storage index sits past every other row (per-app
+/// and global) so adding it needs no renumbering of the literal-indexed
+/// setting_* arms; its display position is set by SANDBOX_SECTIONS.
+pub const CFG_SPOOF_UPTIME: usize = 22;
+pub const CFG_LEN: usize = 23;
 
 /// Index of the Save button in the per-app Config screen. Shifts down by 2 when
 /// the screen carries wine_game rows.
 pub fn app_cfg_save_idx(has_wine_game: bool) -> usize {
-    if has_wine_game { 18 } else { 16 }
+    // The Save button is drawn right after the last selectable row, so its
+    // position is simply the number of navigable rows. Deriving it from
+    // config_nav_order keeps it correct as rows are added or removed.
+    config_nav_order(false, has_wine_game).len()
 }
 
 /// The sandbox config rows grouped into labelled sections, in display order.
@@ -2169,7 +2176,8 @@ pub const SANDBOX_SECTIONS: &[(&str, &[usize])] = &[
         "Environment settings",
         &[
             CFG_SPOOF_HOSTNAME, CFG_SPOOF_USERNAME, CFG_SPOOF_MACHINE_ID,
-            CFG_SPOOF_OS, CFG_SPOOF_TERMINAL, CFG_TEMP_MODE, CFG_TEMP_DELETE,
+            CFG_SPOOF_OS, CFG_SPOOF_TERMINAL, CFG_SPOOF_UPTIME,
+            CFG_TEMP_MODE, CFG_TEMP_DELETE,
         ],
     ),
 ];
@@ -2396,6 +2404,7 @@ pub fn setting_options(idx: usize) -> Vec<&'static str> {
         }
         CFG_SPOOF_MACHINE_ID => vec!["system", "random", "sample", "input"],
         CFG_SPOOF_TERMINAL => vec!["off", "detect"],
+        CFG_SPOOF_UPTIME => vec!["system", "1 hour", "1 day", "1 week", "custom"],
         CFG_RAM_LIMIT => vec!["none", "512 MB", "1 GB", "2 GB", "4 GB", "8 GB", "custom"],
         CFG_AVAHI => vec!["stub", "host", "off"],
         CFG_CREATE_SHORTCUT => vec!["yes", "no"],
@@ -2430,6 +2439,7 @@ pub fn setting_title(idx: usize) -> &'static str {
         18 => "Clean cache",
         19 => "Colour theme",
         20 => "Layout",
+        CFG_SPOOF_UPTIME => "Spoof uptime",
         _ => "Option",
     }
 }
@@ -2458,6 +2468,7 @@ pub fn setting_description(idx: usize) -> &'static str {
         18 => "Delete the shared download/build cache (~/.cache/wryayer) after each successful install.\n\n• on  — wipe the cache every install; leaves no record of installed packages outside ~/.wryayer (useful when that dir is an encrypted container)\n• off — keep the cache to speed up re-installs (default)",
         19 => "Colour palette for the TUI (independent of Layout). Applies immediately.\n\n• default — cool: cyan accent on a dark-blue selection\n• amber   — warm: amber accent on a dark-brown selection\n• matrix  — green-phosphor: the body text itself is green, not white",
         20 => "Structural layout for the TUI (independent of Colour theme). Applies immediately.\n\n• default — horizontal tab strip on top, single-line borders\n• sidebar — vertical tab bar down the left, double-line borders, prompt-style cursor\n• bottom  — horizontal tab strip along the bottom, rounded borders, chevron cursor",
+        CFG_SPOOF_UPTIME => "Report a fake system uptime inside the sandbox.\n\nFools fastfetch's 'Uptime', the uptime/w commands, and any sysinfo(2)/CLOCK_BOOTTIME reader via a /proc/uptime overlay plus an LD_PRELOAD shim. Time still advances from the fake value.\n\n• system — show the real uptime\n• 1 hour / 1 day / 1 week — fixed presets\n• custom — type a duration (3d4h, 90m) or bare seconds",
         _ => "No description available.",
     }
 }
@@ -2522,6 +2533,12 @@ pub fn option_description(setting_idx: usize, choice_idx: usize) -> &'static str
         // Spoof terminal
         (12, 0) => "off — Do not override terminal identity. Tools like fastfetch may show 'bwrap' as the terminal.",
         (12, 1) => "detect — Walk the process tree to find the real terminal (kitty, foot, alacritty, WezTerm, …) and set the correct env var inside the sandbox. Fixes fastfetch showing 'bwrap'.",
+        // Uptime
+        (CFG_SPOOF_UPTIME, 0) => "system — Report the machine's real uptime.",
+        (CFG_SPOOF_UPTIME, 1) => "1 hour — Report a fixed uptime of one hour.",
+        (CFG_SPOOF_UPTIME, 2) => "1 day — Report a fixed uptime of one day.",
+        (CFG_SPOOF_UPTIME, 3) => "1 week — Report a fixed uptime of one week.",
+        (CFG_SPOOF_UPTIME, 4) => "custom — Type a duration (3d4h, 90m) or bare seconds. Fools fastfetch, uptime/w, and sysinfo(2)/CLOCK_BOOTTIME readers.",
         // RAM limit
         (13, 0) => "none — No RAM limit. The app may use as much memory as the system allows.",
         (13, 1) => "512 MB — Hard cap at 512 MB (RAM + swap). Processes are OOM-killed if they exceed this.",
@@ -2617,6 +2634,14 @@ pub fn setting_current(config: &AppConfig, idx: usize) -> usize {
             _                  => 5,
         },
         CFG_SPOOF_TERMINAL => usize::from(config.spoof_terminal),
+        // Seconds. Exact preset -> its index; any other value -> "custom".
+        CFG_SPOOF_UPTIME => match config.spoof_uptime {
+            None            => 0,
+            Some(3600)      => 1, // 1 hour
+            Some(86400)     => 2, // 1 day
+            Some(604800)    => 3, // 1 week
+            Some(_)         => 4, // custom
+        },
         // Values are KiB. Exact preset -> its index; any other value -> "custom".
         CFG_RAM_LIMIT => match config.ram_limit {
             None             => 0,
@@ -2694,6 +2719,12 @@ pub fn apply_setting(config: &mut AppConfig, idx: usize, choice: usize) {
         // (11, 5) = "input" — handled by on_option_picker which opens TextInput
         (12, 0) => config.spoof_terminal = false,
         (12, 1) => config.spoof_terminal = true,
+        // Uptime values are seconds. "custom" (_, 4) opens a text input instead.
+        (CFG_SPOOF_UPTIME, 0) => config.spoof_uptime = None,
+        (CFG_SPOOF_UPTIME, 1) => config.spoof_uptime = Some(3600),   // 1 hour
+        (CFG_SPOOF_UPTIME, 2) => config.spoof_uptime = Some(86400),  // 1 day
+        (CFG_SPOOF_UPTIME, 3) => config.spoof_uptime = Some(604800), // 1 week
+        // (CFG_SPOOF_UPTIME, 4) = "custom" — handled by on_option_picker's TextInput
         // RAM-limit values are KiB. "custom" (13, 6) opens a text input instead.
         (13, 0) => config.ram_limit = None,
         (13, 1) => config.ram_limit = Some(524288),  // 512 MiB
@@ -2819,6 +2850,7 @@ fn on_option_picker(app: &mut App, code: KeyCode) {
                 CFG_SPOOF_HOSTNAME | CFG_SPOOF_USERNAME => choice == 2,
                 CFG_SPOOF_OS => choice == 5,
                 CFG_SPOOF_MACHINE_ID => choice == 3,
+                CFG_SPOOF_UPTIME => choice == 4, // "custom"
                 CFG_RAM_LIMIT => choice == 6, // "custom"
                 _ => false,
             };
@@ -2828,6 +2860,8 @@ fn on_option_picker(app: &mut App, code: KeyCode) {
                     CFG_SPOOF_USERNAME    => cfg.spoof_username.clone().unwrap_or_default(),
                     CFG_SPOOF_MACHINE_ID  => cfg.spoof_machine_id.clone().unwrap_or_default(),
                     CFG_SPOOF_OS          => cfg.spoof_os.clone().unwrap_or_default(),
+                    // Pre-fill the uptime input with the current value as e.g. "3d4h".
+                    CFG_SPOOF_UPTIME      => cfg.spoof_uptime.map(crate::config::format_uptime).unwrap_or_default(),
                     // Pre-fill the RAM input with the current limit as e.g. "2 GB".
                     CFG_RAM_LIMIT         => cfg.ram_limit.map(crate::config::format_ram_limit).unwrap_or_default(),
                     _ => String::new(),
@@ -2838,6 +2872,8 @@ fn on_option_picker(app: &mut App, code: KeyCode) {
                     CFG_SPOOF_USERNAME    => current == USERNAME_SAMPLE,
                     CFG_SPOOF_MACHINE_ID  => current == "random" || current == MACHINE_ID_SAMPLE,
                     CFG_SPOOF_OS          => matches!(current.as_str(), "ubuntu" | "arch" | "windows" | "arduinoide"),
+                    // format_uptime renders the presets as these compact strings.
+                    CFG_SPOOF_UPTIME      => matches!(current.as_str(), "1h" | "1d" | "1w"),
                     _ => false,
                 };
                 let value = if is_preset || current.is_empty() { String::new() } else { current };
@@ -2923,6 +2959,11 @@ fn set_spoof_field(config: &mut AppConfig, idx: usize, value: String) {
     // RAM limit is numeric-with-units, not a free string.
     if idx == CFG_RAM_LIMIT {
         config.ram_limit = crate::config::parse_ram_limit(&value);
+        return;
+    }
+    // Uptime is a duration (e.g. "3d4h") or bare seconds, not a free string.
+    if idx == CFG_SPOOF_UPTIME {
+        config.spoof_uptime = crate::config::parse_uptime(&value);
         return;
     }
     let v = if value.is_empty() { None } else { Some(value) };

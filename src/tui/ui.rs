@@ -347,6 +347,12 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                     "  e.g.  256 MB   ·   2 GB   ·   500000 KB",
                     "  Leave blank to disable the limit.",
                 ]
+            } else if field_idx == super::CFG_SPOOF_UPTIME {
+                &[
+                    "  Type a duration:  <n>w <n>d <n>h <n>m <n>s",
+                    "  e.g.  3d4h   ·   90m   ·   604800   (bare = seconds)",
+                    "  Leave blank to show the real uptime.",
+                ]
             } else {
                 &["  Leave blank to disable. Press Enter to confirm."]
             };

@@ -90,6 +90,10 @@ pub struct AppConfig {
     /// Detect the real terminal emulator and pass it into the sandbox via TERM_PROGRAM
     /// so tools like fastfetch report the correct terminal instead of "bwrap".
     pub spoof_terminal: bool,
+    /// Report a fake system uptime (in seconds) inside the sandbox — fools
+    /// fastfetch's "Uptime", `uptime`/`w`, and any `sysinfo(2)`/CLOCK_BOOTTIME
+    /// reader. None = show the real uptime.
+    pub spoof_uptime: Option<u64>,
     /// Maximum RAM the app may use, in KiB — enforced via systemd-run (None = no limit).
     /// Stored in KiB so limits can be set in KB/MB/GB with full precision.
     pub ram_limit: Option<u64>,
@@ -136,6 +140,7 @@ impl Default for AppConfig {
             spoof_cpuinfo: None,
             spoof_os: None,
             spoof_terminal: false,
+            spoof_uptime: None,
             ram_limit: None,
             create_shortcut: true,
             confirm_install: true,
@@ -244,6 +249,7 @@ fn sync_container_aliases(root_name: &str, root_config: &AppConfig) -> Result<()
         alias_cfg.spoof_cpuinfo    = root_config.spoof_cpuinfo.clone();
         alias_cfg.spoof_os         = root_config.spoof_os.clone();
         alias_cfg.spoof_terminal   = root_config.spoof_terminal;
+        alias_cfg.spoof_uptime     = root_config.spoof_uptime;
         alias_cfg.ram_limit        = root_config.ram_limit;
         alias_cfg.portal_filter    = root_config.portal_filter;
         alias_cfg.bound_apps       = root_config.bound_apps.clone();
@@ -331,6 +337,9 @@ pub fn parse_ini(content: &str) -> Result<AppConfig> {
             }
             ("spoof_terminal", v) => {
                 config.spoof_terminal = matches!(v, "on" | "true" | "1");
+            }
+            ("spoof_uptime", v) => {
+                config.spoof_uptime = if v.is_empty() || v == "off" || v == "system" { None } else { parse_uptime(v) };
             }
             ("ram_limit", v) => {
                 config.ram_limit = parse_ram_limit(v);
@@ -420,6 +429,62 @@ pub fn format_ram_limit(kib: u64) -> String {
         }
     }
     format!("{kib} KB")
+}
+
+/// Parse a spoofed-uptime value into seconds. Accepts a compound duration made
+/// of `w`/`d`/`h`/`m`/`s` parts (e.g. "3d4h", "1w 2d", "90m", "45"), where a
+/// bare number is seconds. "0"/"off"/"none"/"" → None.
+pub fn parse_uptime(v: &str) -> Option<u64> {
+    let s = v.trim().to_lowercase();
+    if s.is_empty() || matches!(s.as_str(), "0" | "off" | "none" | "no" | "system") {
+        return None;
+    }
+    // Bare number = seconds.
+    if let Ok(n) = s.parse::<u64>() {
+        return (n > 0).then_some(n);
+    }
+    let mut total: u64 = 0;
+    let mut num = String::new();
+    for ch in s.chars() {
+        if ch.is_ascii_digit() {
+            num.push(ch);
+        } else if let Some(mult) = match ch {
+            'w' => Some(604800u64),
+            'd' => Some(86400),
+            'h' => Some(3600),
+            'm' => Some(60),
+            's' => Some(1),
+            _ if ch.is_whitespace() => continue,
+            _ => None,
+        } {
+            let n: u64 = num.parse().ok()?;
+            total = total.checked_add(n.checked_mul(mult)?)?;
+            num.clear();
+        } else {
+            return None; // unrecognised unit
+        }
+    }
+    // A trailing number with no unit is treated as seconds.
+    if let Ok(n) = num.parse::<u64>() {
+        total = total.checked_add(n)?;
+    }
+    (total > 0).then_some(total)
+}
+
+/// Render a seconds uptime as a compact duration (e.g. "3d4h", "90m", "45s")
+/// that round-trips through [`parse_uptime`].
+pub fn format_uptime(mut secs: u64) -> String {
+    if secs == 0 {
+        return "0s".to_string();
+    }
+    let mut out = String::new();
+    for (div, unit) in [(604800u64, 'w'), (86400, 'd'), (3600, 'h'), (60, 'm'), (1, 's')] {
+        if secs >= div {
+            out.push_str(&format!("{}{unit}", secs / div));
+            secs %= div;
+        }
+    }
+    out
 }
 
 /// Cheap non-cryptographic randomness — enough to seed a plausible hostname or
@@ -534,7 +599,8 @@ pub fn format_ini(config: &AppConfig) -> String {
         || config.spoof_machine_id.is_some()
         || config.spoof_cpuinfo.is_some()
         || config.spoof_os.is_some()
-        || config.spoof_terminal;
+        || config.spoof_terminal
+        || config.spoof_uptime.is_some();
     if has_spoof {
         s.push_str("\n[spoof]\n");
         s.push_str("; spoof_machine_id = random  — fresh UUID on every launch\n");
@@ -555,6 +621,10 @@ pub fn format_ini(config: &AppConfig) -> String {
         }
         if config.spoof_terminal {
             s.push_str("spoof_terminal = on\n");
+        }
+        if let Some(secs) = config.spoof_uptime {
+            s.push_str("; spoof_uptime accepts a duration (e.g. 3d4h, 90m) or bare seconds\n");
+            s.push_str(&format!("spoof_uptime = {}\n", format_uptime(secs)));
         }
     }
     if let Some(kib) = config.ram_limit {

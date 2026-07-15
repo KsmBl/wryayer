@@ -598,6 +598,12 @@ wryayer config firefox spoof-os system      # disable
 wryayer config fastfetch spoof-terminal on   # detect kitty/foot/alacritty/… and set TERM_PROGRAM
 wryayer config fastfetch spoof-terminal off  # disable (default)
 
+# Spoof system uptime — report a fake "up" time to the sandbox
+wryayer config fastfetch spoof-uptime 3d4h   # duration: w/d/h/m/s parts
+wryayer config fastfetch spoof-uptime 90m    # or e.g. 90 minutes
+wryayer config fastfetch spoof-uptime 604800 # or bare seconds (1 week)
+wryayer config fastfetch spoof-uptime system # disable
+
 # Disable any spoofing
 wryayer config firefox spoof-hostname system
 ```

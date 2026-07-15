@@ -31,6 +31,23 @@ fn main() {
         );
     }
 
+    // Uptime-spoof shim: interposes clock_gettime(CLOCK_BOOTTIME) and sysinfo()
+    // so fastfetch et al. report a fake uptime. Independent of the CPUID shim.
+    println!("cargo:rerun-if-changed=csrc/uptime_spoof.c");
+    let uptime_so = format!("{out_dir}/libuptimespoof.so");
+    let uptime_built = Command::new(&cc)
+        .args(["-shared", "-fPIC", "-O2", "-o", &uptime_so, "csrc/uptime_spoof.c"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !uptime_built {
+        let _ = std::fs::write(&uptime_so, b"");
+        println!(
+            "cargo:warning=could not build the uptime spoof shim (no C compiler?); \
+             uptime spoofing falls back to the /proc/uptime overlay only"
+        );
+    }
+
     // Portal client: a tiny *static* helper symlinked into sandboxes under each
     // bound app's name. It must be statically linked so it runs regardless of
     // which libraries the sandboxed app's filesystem tree ships.

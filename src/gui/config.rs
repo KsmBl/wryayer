@@ -385,6 +385,8 @@ fn build_form(form: &gtk::Box, cfg: AppConfig, is_global: bool, app_name: Option
     let spoof_username = entry_random(form, "Username ($USER)", cfg.spoof_username.as_deref().unwrap_or(""), random_username);
     let spoof_machine_id = entry(form, "Machine ID / \"random\"", cfg.spoof_machine_id.as_deref().unwrap_or(""));
     let spoof_os = entry(form, "OS name", cfg.spoof_os.as_deref().unwrap_or(""));
+    let spoof_uptime = entry(form, "Uptime (e.g. 3d4h, blank = real)",
+        &cfg.spoof_uptime.map(crate::config::format_uptime).unwrap_or_default());
     let spoof_terminal = check(form, "Forward terminal identity (TERM_PROGRAM)", cfg.spoof_terminal);
 
     // Bound apps (per-app only): tick other installed apps to expose as
@@ -547,6 +549,7 @@ fn build_form(form: &gtk::Box, cfg: AppConfig, is_global: bool, app_name: Option
             }
         };
         c.spoof_terminal = spoof_terminal.is_active();
+        c.spoof_uptime = crate::config::parse_uptime(&spoof_uptime.text());
         c.ram_limit = parse_ram_limit(&ram.text());
         c.shared_dirs = shared_state.borrow().clone();
 
