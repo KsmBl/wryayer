@@ -143,8 +143,6 @@ cargo build --release --features gui
 ```
 
 It needs `gtk4` (≥ 4.10) at build and run time. On Arch: `sudo pacman -S --needed gtk4`.
-A desktop entry for your application menu lives in
-[`packaging/de.synthelicz.Wryayer.desktop`](packaging/de.synthelicz.Wryayer.desktop).
 
 ---
 
