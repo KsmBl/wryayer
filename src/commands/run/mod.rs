@@ -534,6 +534,33 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
     // compiled-in prefix; the host's plugin tree is already bound above.
     cmd.args(["--setenv", "QT_QPA_PLATFORM_PLUGIN_PATH", "/usr/lib/qt6/plugins/platforms"]);
 
+    // GTK4's glycin image loader spawns its own nested `bwrap` to sandbox each
+    // decoder (seen when a GTK file chooser renders an image thumbnail). The
+    // app tree ships libglycin + the loaders but rarely `bwrap` itself, so that
+    // exec hits ENOENT and GTK escalates it into a fatal assertion (SIGABRT).
+    // This glycin has no env knob to disable its sandbox, so instead we make a
+    // real bwrap available at the path it resolves — nesting bwrap-in-bwrap is
+    // the same configuration Flatpak uses, so the nested sandbox works.
+    let host_bwrap = resolve_bwrap_path();
+    if host_bwrap.is_file() {
+        cmd.args(["--ro-bind"]);
+        cmd.arg(&host_bwrap);
+        cmd.arg("/usr/bin/bwrap");
+    }
+
+    // GTK's native file chooser (and other GTK widgets) require GSettings
+    // schemas like `org.gtk.Settings.FileChooser`. App trees usually ship a
+    // `gschemas.compiled` without them, so GLib aborts with a fatal
+    // "schema is not installed" the moment a file dialog opens. Overlay the
+    // host's compiled schemas and point GLib at them; GSETTINGS_SCHEMA_DIR
+    // supplements the default search path, so the app's own schemas still load.
+    const HOST_SCHEMAS: &str = "/usr/share/glib-2.0/schemas";
+    if Path::new(HOST_SCHEMAS).join("gschemas.compiled").is_file() {
+        cmd.args(["--ro-bind", HOST_SCHEMAS, "/.wryayer-glib-schemas"]);
+        cmd.args(["--setenv", "GSETTINGS_SCHEMA_DIR",
+                  "/.wryayer-glib-schemas:/usr/share/glib-2.0/schemas"]);
+    }
+
     // Font directories — required by Chromium/NW.js/Electron/Qt renderers.
     // Without these, fontconfig finds no fonts and the renderer crashes with
     // FATAL:font_cache.cc Check failed: false + SEGV_MAPERR.
