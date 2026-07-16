@@ -222,6 +222,11 @@ enum ConfigSetting {
         /// on = allow audio output (default), off = mask ALSA + PipeWire/PulseAudio
         enabled: String,
     },
+    /// Show USB/removable drives (mounts under /run/media, /media, /mnt) in the sandbox
+    Usb {
+        /// on = bind removable-media roots so USB drives are visible, off = hide them (default)
+        enabled: String,
+    },
     /// Manage host directories shared read-write into the sandbox
     Share {
         #[command(subcommand)]
@@ -313,24 +318,27 @@ fn main() {
         }
         Commands::Repair { app_name } => commands::repair::run(&app_name),
         Commands::Config { app_name, setting } => match setting {
-            None => commands::config::run(&app_name, None, None, None, None, None, None, None, None, None, None, None, None, None, None),
+            None => commands::config::run(&app_name, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None),
             Some(ConfigSetting::Tempmode { mode }) => {
-                commands::config::run(&app_name, Some(&mode), None, None, None, None, None, None, None, None, None, None, None, None, None)
+                commands::config::run(&app_name, Some(&mode), None, None, None, None, None, None, None, None, None, None, None, None, None, None)
             }
             Some(ConfigSetting::Tempdelete { policy }) => {
-                commands::config::run(&app_name, None, Some(&policy), None, None, None, None, None, None, None, None, None, None, None, None)
+                commands::config::run(&app_name, None, Some(&policy), None, None, None, None, None, None, None, None, None, None, None, None, None)
             }
             Some(ConfigSetting::Network { enabled }) => {
-                commands::config::run(&app_name, None, None, Some(&enabled), None, None, None, None, None, None, None, None, None, None, None)
+                commands::config::run(&app_name, None, None, Some(&enabled), None, None, None, None, None, None, None, None, None, None, None, None)
             }
             Some(ConfigSetting::Camera { enabled }) => {
-                commands::config::run(&app_name, None, None, None, Some(&enabled), None, None, None, None, None, None, None, None, None, None)
+                commands::config::run(&app_name, None, None, None, Some(&enabled), None, None, None, None, None, None, None, None, None, None, None)
             }
             Some(ConfigSetting::Microphone { enabled }) => {
-                commands::config::run(&app_name, None, None, None, None, Some(&enabled), None, None, None, None, None, None, None, None, None)
+                commands::config::run(&app_name, None, None, None, None, Some(&enabled), None, None, None, None, None, None, None, None, None, None)
             }
             Some(ConfigSetting::Audio { enabled }) => {
-                commands::config::run(&app_name, None, None, None, None, None, Some(&enabled), None, None, None, None, None, None, None, None)
+                commands::config::run(&app_name, None, None, None, None, None, Some(&enabled), None, None, None, None, None, None, None, None, None)
+            }
+            Some(ConfigSetting::Usb { enabled }) => {
+                commands::config::run(&app_name, None, None, None, None, None, None, Some(&enabled), None, None, None, None, None, None, None, None)
             }
             Some(ConfigSetting::Share { action }) => match action {
                 ShareAction::Add { path } => commands::config::share_add(&app_name, &path),
@@ -338,28 +346,28 @@ fn main() {
                 ShareAction::List => commands::config::share_list(&app_name),
             },
             Some(ConfigSetting::SpoofHostname { value }) => {
-                commands::config::run(&app_name, None, None, None, None, None, None, Some(&value), None, None, None, None, None, None, None)
+                commands::config::run(&app_name, None, None, None, None, None, None, None, Some(&value), None, None, None, None, None, None, None)
             }
             Some(ConfigSetting::SpoofUsername { value }) => {
-                commands::config::run(&app_name, None, None, None, None, None, None, None, Some(&value), None, None, None, None, None, None)
+                commands::config::run(&app_name, None, None, None, None, None, None, None, None, Some(&value), None, None, None, None, None, None)
             }
             Some(ConfigSetting::SpoofMachineId { value }) => {
-                commands::config::run(&app_name, None, None, None, None, None, None, None, None, Some(&value), None, None, None, None, None)
+                commands::config::run(&app_name, None, None, None, None, None, None, None, None, None, Some(&value), None, None, None, None, None)
             }
             Some(ConfigSetting::SpoofCpuinfo { path }) => {
-                commands::config::run(&app_name, None, None, None, None, None, None, None, None, None, Some(&path), None, None, None, None)
+                commands::config::run(&app_name, None, None, None, None, None, None, None, None, None, None, Some(&path), None, None, None, None)
             }
             Some(ConfigSetting::SpoofOs { value }) => {
-                commands::config::run(&app_name, None, None, None, None, None, None, None, None, None, None, Some(&value), None, None, None)
+                commands::config::run(&app_name, None, None, None, None, None, None, None, None, None, None, None, Some(&value), None, None, None)
             }
             Some(ConfigSetting::SpoofTerminal { value }) => {
-                commands::config::run(&app_name, None, None, None, None, None, None, None, None, None, None, None, Some(&value), None, None)
+                commands::config::run(&app_name, None, None, None, None, None, None, None, None, None, None, None, None, Some(&value), None, None)
             }
             Some(ConfigSetting::SpoofUptime { value }) => {
-                commands::config::run(&app_name, None, None, None, None, None, None, None, None, None, None, None, None, Some(&value), None)
+                commands::config::run(&app_name, None, None, None, None, None, None, None, None, None, None, None, None, None, Some(&value), None)
             }
             Some(ConfigSetting::RamLimit { mib }) => {
-                commands::config::run(&app_name, None, None, None, None, None, None, None, None, None, None, None, None, None, Some(&mib))
+                commands::config::run(&app_name, None, None, None, None, None, None, None, None, None, None, None, None, None, None, Some(&mib))
             }
         },
         Commands::Export { app_name, output } => {

@@ -1704,7 +1704,10 @@ fn draw_settings_tab(f: &mut Frame, app: &mut App, area: Rect) {
 
     // Options list
     let opts = setting_options(selected);
-    let cur = if selected < CFG_SAVE { setting_current(config, selected) } else { usize::MAX };
+    // Only the Save button has no options; every real setting row (including the
+    // appended CFG_SPOOF_UPTIME / CFG_USB, whose indices sit past CFG_SAVE) has a
+    // current value to highlight.
+    let cur = if opts.is_empty() { usize::MAX } else { setting_current(config, selected) };
     let opt_lines: Vec<Line> = opts.iter().enumerate().map(|(i, opt)| {
         let active = i == cur;
         let bullet = if active { "●" } else { "○" };

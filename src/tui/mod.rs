@@ -2150,7 +2150,11 @@ pub const CFG_SAVE: usize = 21;
 /// and global) so adding it needs no renumbering of the literal-indexed
 /// setting_* arms; its display position is set by SANDBOX_SECTIONS.
 pub const CFG_SPOOF_UPTIME: usize = 22;
-pub const CFG_LEN: usize = 23;
+/// USB / removable-media visibility. Like CFG_SPOOF_UPTIME its storage index
+/// sits past every other row so the literal-indexed setting_* arms need no
+/// renumbering; its display position is set by SANDBOX_SECTIONS.
+pub const CFG_USB: usize = 23;
+pub const CFG_LEN: usize = 24;
 
 /// Index of the Save button in the per-app Config screen. Shifts down by 2 when
 /// the screen carries wine_game rows.
@@ -2170,7 +2174,7 @@ pub const SANDBOX_SECTIONS: &[(&str, &[usize])] = &[
     ("Hardware settings", &[CFG_SPOOF_CPUINFO, CFG_RAM_LIMIT]),
     (
         "Privacy settings",
-        &[CFG_NETWORK, CFG_CAMERA, CFG_MICROPHONE, CFG_AUDIO, CFG_SHARES, CFG_AVAHI],
+        &[CFG_NETWORK, CFG_CAMERA, CFG_MICROPHONE, CFG_AUDIO, CFG_USB, CFG_SHARES, CFG_AVAHI],
     ),
     (
         "Environment settings",
@@ -2407,6 +2411,7 @@ pub fn setting_options(idx: usize) -> Vec<&'static str> {
         CFG_SPOOF_UPTIME => vec!["system", "1 hour", "1 day", "1 week", "custom"],
         CFG_RAM_LIMIT => vec!["none", "512 MB", "1 GB", "2 GB", "4 GB", "8 GB", "custom"],
         CFG_AVAHI => vec!["stub", "host", "off"],
+        CFG_USB => vec!["on", "off"],
         CFG_CREATE_SHORTCUT => vec!["yes", "no"],
         CFG_CONFIRM_INSTALL | CFG_ASK_SHORTCUT | CFG_CLEAN_CACHE => vec!["on", "off"],
         CFG_THEME => vec!["default", "amber", "matrix"],
@@ -2440,6 +2445,7 @@ pub fn setting_title(idx: usize) -> &'static str {
         19 => "Colour theme",
         20 => "Layout",
         CFG_SPOOF_UPTIME => "Spoof uptime",
+        CFG_USB => "USB / removable media",
         _ => "Option",
     }
 }
@@ -2469,6 +2475,7 @@ pub fn setting_description(idx: usize) -> &'static str {
         19 => "Colour palette for the TUI (independent of Layout). Applies immediately.\n\n• default — cool: cyan accent on a dark-blue selection\n• amber   — warm: amber accent on a dark-brown selection\n• matrix  — green-phosphor: the body text itself is green, not white",
         20 => "Structural layout for the TUI (independent of Colour theme). Applies immediately.\n\n• default — horizontal tab strip on top, single-line borders\n• sidebar — vertical tab bar down the left, double-line borders, prompt-style cursor\n• bottom  — horizontal tab strip along the bottom, rounded borders, chevron cursor",
         CFG_SPOOF_UPTIME => "Report a fake system uptime inside the sandbox.\n\nFools fastfetch's 'Uptime', the uptime/w commands, and any sysinfo(2)/CLOCK_BOOTTIME reader via a /proc/uptime overlay plus an LD_PRELOAD shim. Time still advances from the fake value.\n\n• system — show the real uptime\n• 1 hour / 1 day / 1 week — fixed presets\n• custom — type a duration (3d4h, 90m) or bare seconds",
+        CFG_USB => "Make USB / removable drives visible inside the sandbox.\n\nBinds the mount roots the desktop (or udisks/udevil/pmount) uses — /run/media, /media and /mnt — so drives show up in the app's file dialogs. Drives plugged in AFTER the app starts appear live, because the host mounts propagate into the sandbox.\n\n• on  — expose removable media\n• off — hide it (default; better isolation)",
         _ => "No description available.",
     }
 }
@@ -2539,6 +2546,9 @@ pub fn option_description(setting_idx: usize, choice_idx: usize) -> &'static str
         (CFG_SPOOF_UPTIME, 2) => "1 day — Report a fixed uptime of one day.",
         (CFG_SPOOF_UPTIME, 3) => "1 week — Report a fixed uptime of one week.",
         (CFG_SPOOF_UPTIME, 4) => "custom — Type a duration (3d4h, 90m) or bare seconds. Fools fastfetch, uptime/w, and sysinfo(2)/CLOCK_BOOTTIME readers.",
+        // USB / removable media
+        (CFG_USB, 0) => "on — Bind /run/media, /media and /mnt so USB drives (incl. ones plugged in after launch) show up in the app.",
+        (CFG_USB, 1) => "off — Hide removable media from the sandbox (default; better isolation).",
         // RAM limit
         (13, 0) => "none — No RAM limit. The app may use as much memory as the system allows.",
         (13, 1) => "512 MB — Hard cap at 512 MB (RAM + swap). Processes are OOM-killed if they exceed this.",
@@ -2634,6 +2644,7 @@ pub fn setting_current(config: &AppConfig, idx: usize) -> usize {
             _                  => 5,
         },
         CFG_SPOOF_TERMINAL => usize::from(config.spoof_terminal),
+        CFG_USB => if config.usb { 0 } else { 1 },
         // Seconds. Exact preset -> its index; any other value -> "custom".
         CFG_SPOOF_UPTIME => match config.spoof_uptime {
             None            => 0,
@@ -2719,6 +2730,8 @@ pub fn apply_setting(config: &mut AppConfig, idx: usize, choice: usize) {
         // (11, 5) = "input" — handled by on_option_picker which opens TextInput
         (12, 0) => config.spoof_terminal = false,
         (12, 1) => config.spoof_terminal = true,
+        (CFG_USB, 0) => config.usb = true,
+        (CFG_USB, 1) => config.usb = false,
         // Uptime values are seconds. "custom" (_, 4) opens a text input instead.
         (CFG_SPOOF_UPTIME, 0) => config.spoof_uptime = None,
         (CFG_SPOOF_UPTIME, 1) => config.spoof_uptime = Some(3600),   // 1 hour

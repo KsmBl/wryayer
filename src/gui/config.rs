@@ -365,6 +365,7 @@ fn build_form(form: &gtk::Box, cfg: AppConfig, is_global: bool, app_name: Option
     let camera = check(form, "Camera (/dev/video*)", cfg.camera);
     let microphone = check(form, "Microphone", cfg.microphone);
     let audio = check(form, "Audio output", cfg.audio);
+    let usb = check(form, "Show USB / removable drives (/run/media, /media, /mnt)", cfg.usb);
     let portal = check(form, "Portal filter (hide host desktop portal)", cfg.portal_filter);
     let avahi = dropdown(form, "Avahi / zeroconf",
         &["Private stub", "Use host daemon", "Off"],
@@ -516,6 +517,7 @@ fn build_form(form: &gtk::Box, cfg: AppConfig, is_global: bool, app_name: Option
         c.camera = camera.is_active();
         c.microphone = microphone.is_active();
         c.audio = audio.is_active();
+        c.usb = usb.is_active();
         c.portal_filter = portal.is_active();
         c.temp_mode = match temp_mode.selected() {
             1 => TempMode::Ramdisk, 2 => TempMode::Local, 3 => TempMode::Uuid, _ => TempMode::System,

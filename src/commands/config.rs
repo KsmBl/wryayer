@@ -12,6 +12,7 @@ pub fn run(
     camera: Option<&str>,
     microphone: Option<&str>,
     audio: Option<&str>,
+    usb: Option<&str>,
     spoof_hostname: Option<&str>,
     spoof_username: Option<&str>,
     spoof_machine_id: Option<&str>,
@@ -26,7 +27,7 @@ pub fn run(
 
     let mut config = read_config(app_name)?;
     let changed = [
-        temp_mode, temp_delete, network, camera, microphone, audio,
+        temp_mode, temp_delete, network, camera, microphone, audio, usb,
         spoof_hostname, spoof_username, spoof_machine_id, spoof_cpuinfo, spoof_os,
         spoof_terminal, spoof_uptime, ram_limit,
     ]
@@ -57,6 +58,7 @@ pub fn run(
         (camera,     &mut config.camera,     "camera"),
         (microphone, &mut config.microphone, "microphone"),
         (audio,      &mut config.audio,      "audio"),
+        (usb,        &mut config.usb,        "usb"),
     ] {
         if let Some(v) = val {
             *field = match v {
@@ -188,6 +190,7 @@ fn print_config(app_name: &str, config: &AppConfig) {
         eprintln!("    the mic. Set audio = off to block it completely.");
     }
     eprintln!("  audio       = {}", b(config.audio));
+    eprintln!("  usb         = {}", b(config.usb));
     if config.shared_dirs.is_empty() {
         eprintln!("  shared dirs = (none)");
     } else {

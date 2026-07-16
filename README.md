@@ -510,6 +510,7 @@ wryayer config firefox
 # Change settings
 wryayer config firefox network off        # block internet access
 wryayer config firefox audio off          # mute audio output + mic
+wryayer config bambustudio usb on         # show USB/removable drives in the app
 wryayer config firefox tempmode ramdisk   # private in-memory /tmp
 wryayer config firefox ramlimit 2048      # limit to 2 GiB RAM
 wryayer config firefox ramlimit none      # remove RAM limit

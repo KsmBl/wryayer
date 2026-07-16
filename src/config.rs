@@ -75,6 +75,10 @@ pub struct AppConfig {
     pub microphone: bool,
     /// Allow ALSA playback + PipeWire/PulseAudio audio output (default: true)
     pub audio: bool,
+    /// Bind the removable-media roots (/run/media, /media, /mnt) into the
+    /// sandbox so USB drives — including ones mounted after launch — are
+    /// visible to the app (default: false, for isolation).
+    pub usb: bool,
     /// Host directories bind-mounted read-write inside the sandbox (default: none)
     pub shared_dirs: Vec<String>,
     /// Override /etc/hostname and $HOSTNAME inside the sandbox
@@ -133,6 +137,7 @@ impl Default for AppConfig {
             camera: true,
             microphone: true,
             audio: true,
+            usb: false,
             shared_dirs: Vec::new(),
             spoof_hostname: None,
             spoof_username: None,
@@ -242,6 +247,7 @@ fn sync_container_aliases(root_name: &str, root_config: &AppConfig) -> Result<()
         alias_cfg.camera           = root_config.camera;
         alias_cfg.microphone       = root_config.microphone;
         alias_cfg.audio            = root_config.audio;
+        alias_cfg.usb              = root_config.usb;
         alias_cfg.shared_dirs      = root_config.shared_dirs.clone();
         alias_cfg.spoof_hostname   = root_config.spoof_hostname.clone();
         alias_cfg.spoof_username   = root_config.spoof_username.clone();
@@ -308,6 +314,10 @@ pub fn parse_ini(content: &str) -> Result<AppConfig> {
             ("audio", v) => {
                 config.audio = parse_bool(v)
                     .map_err(|_| anyhow::anyhow!("unknown audio value '{v}' — valid: on, off"))?;
+            }
+            ("usb", v) => {
+                config.usb = parse_bool(v)
+                    .map_err(|_| anyhow::anyhow!("unknown usb value '{v}' — valid: on, off"))?;
             }
             ("share_dir", v) if !v.is_empty() => {
                 config.shared_dirs.push(shellexpand::tilde(v).into_owned());
@@ -576,7 +586,10 @@ pub fn format_ini(config: &AppConfig) -> String {
          ; note: microphone off blocks ALSA capture; PipeWire/PulseAudio mic\n\
          ; is only fully blocked when audio is also off\n\
          microphone = {}\n\
-         audio = {}\n",
+         audio = {}\n\
+         ; on = bind /run/media, /media and /mnt so USB drives (incl. ones\n\
+         ; plugged in after launch) are visible; off = hide removable media\n\
+         usb = {}\n",
         b(config.network),
         match config.avahi {
             AvahiMode::Stub => "stub",
@@ -586,6 +599,7 @@ pub fn format_ini(config: &AppConfig) -> String {
         b(config.camera),
         b(config.microphone),
         b(config.audio),
+        b(config.usb),
     );
     if !config.shared_dirs.is_empty() {
         s.push_str("\n[share]\n");

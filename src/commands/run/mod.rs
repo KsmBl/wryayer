@@ -511,6 +511,21 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
         }
     }
 
+    // USB / removable media: bind the roots the desktop (or udisks/udevil/
+    // pmount/udiskie) mounts drives under. /run/media is already reachable via
+    // the /run bind above, but /media and /mnt are not — so drives that mount
+    // there are otherwise invisible. Binding the *root* dirs also means drives
+    // plugged in AFTER launch appear live: the host mounts are shared and
+    // bwrap's sandbox root is rslave, so new sub-mounts propagate in. Off by
+    // default for isolation; the `usb` switch opts an app in.
+    if config.usb {
+        for dir in ["/run/media", "/media", "/mnt"] {
+            if Path::new(dir).is_dir() {
+                cmd.args(["--bind", dir, dir]);
+            }
+        }
+    }
+
     // /etc — networking, locale, identity, TLS
     for p in &[
         "/etc/resolv.conf", "/etc/hosts",      "/etc/localtime",

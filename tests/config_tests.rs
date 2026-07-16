@@ -167,6 +167,7 @@ fn round_trip_default_config() {
     assert_eq!(parsed.camera,      original.camera);
     assert_eq!(parsed.microphone,  original.microphone);
     assert_eq!(parsed.audio,       original.audio);
+    assert_eq!(parsed.usb,         original.usb);
     assert_eq!(parsed.shared_dirs, original.shared_dirs);
 }
 
@@ -179,6 +180,7 @@ fn round_trip_all_non_default_values() {
         camera:              false,
         microphone:          false,
         audio:               false,
+        usb:                 true,
         shared_dirs:         vec!["/tmp/foo".to_string(), "/opt/bar".to_string()],
         spoof_hostname:      None,
         spoof_username:      None,
