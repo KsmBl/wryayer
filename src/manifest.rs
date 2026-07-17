@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Manifest {
@@ -84,7 +84,14 @@ pub fn read_manifest(app_name: &str) -> Result<Manifest> {
 }
 
 pub fn write_manifest(app_name: &str, manifest: &Manifest) -> Result<()> {
-    let path = manifest_path(app_name)?;
+    write_manifest_to(&app_dir(app_name)?, manifest)
+}
+
+/// Write the manifest into an arbitrary app-tree directory (used to stamp a
+/// staging tree before it is atomically swapped into place). Writes to a temp
+/// file and renames, so a reader never sees a half-written manifest.
+pub fn write_manifest_to(dir: &Path, manifest: &Manifest) -> Result<()> {
+    let path = dir.join(".manifest.toml");
     let tmp_path = path.with_extension("toml.tmp");
     let content =
         toml::to_string_pretty(manifest).context("failed to serialize manifest to TOML")?;
@@ -117,6 +124,13 @@ pub fn list_all_apps() -> Result<Vec<Manifest>> {
             Some(n) => n.to_string(),
             None => continue,
         };
+        // Dot-prefixed dirs are never apps: they're reserved scratch trees such
+        // as an update's staging/backup (see commands::update). A valid package
+        // name never starts with '.', so skipping them can't hide a real app,
+        // and it keeps an in-flight update invisible to listings and the TUI.
+        if app_name.starts_with('.') {
+            continue;
+        }
         // A directory without a manifest file isn't an installed app yet: it's a
         // partial install in progress (install.rs creates the app dir before it
         // writes the manifest) or a leftover. Skip it silently — warning here

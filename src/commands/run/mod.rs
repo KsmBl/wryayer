@@ -25,6 +25,13 @@ pub fn run(app_name: &str, bin: Option<&str>, args: &[String]) -> Result<()> {
         other => other,
     };
 
+    // Heal an update that was cancelled/killed mid-swap before we touch the
+    // tree: without this, a launch right after an interrupted update could read
+    // a parked-aside tree (manifest missing) or a half-applied one. Keyed on the
+    // launched name (a root app owns its own tree); alias targets are healed
+    // below once we know the real fs-root name.
+    crate::commands::update::recover_interrupted_update(app_name)?;
+
     let manifest = read_manifest(app_name)
         .with_context(|| format!("'{app_name}' is not installed"))?;
 
@@ -32,6 +39,10 @@ pub fn run(app_name: &str, bin: Option<&str>, args: &[String]) -> Result<()> {
     // in `alias_of`. The alias has its own config and launchers list; the
     // filesystem tree (bwrap root) belongs to the target.
     let fs_root_name = manifest.app.alias_of.clone().unwrap_or_else(|| app_name.to_string());
+    // For an alias, the tree belongs to the target app — heal that one too.
+    if fs_root_name != app_name {
+        crate::commands::update::recover_interrupted_update(&fs_root_name)?;
+    }
     let app_root = app_dir(&fs_root_name)?;
     if !app_root.exists() {
         bail!(

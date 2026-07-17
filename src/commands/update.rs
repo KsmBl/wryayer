@@ -1,5 +1,5 @@
 use crate::manifest::{
-    app_dir, list_all_apps, now_rfc3339, read_manifest, write_manifest, AppMeta, Manifest,
+    app_dir, list_all_apps, now_rfc3339, read_manifest, write_manifest_to, AppMeta, Manifest,
     PackageEntry, PackageSource,
 };
 use crate::commands::install::{ensure_base_layout, ensure_owner_readable, regenerate_runtime_caches, run_ldconfig};
@@ -9,7 +9,7 @@ use crate::package::{
 };
 use anyhow::{Context, Result};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub fn run(app_name: Option<&str>, check_only: bool) -> Result<()> {
     let manifests = match app_name {
@@ -140,37 +140,30 @@ fn reinstall(manifest: &crate::manifest::Manifest) -> Result<()> {
 
     let app_dir = app_dir(app_name)?;
 
-    // Remove old package-provided files but keep user data: the sandbox home
-    // (browser profiles, font caches, GUI app settings), the per-app wryayer
-    // config, the install manifest, and all snapshots (so a post-update
-    // rollback still returns to a pre-update version).  Without this, every
-    // update wipes the user's Firefox profile and every saved snapshot.
-    const PRESERVE: &[&str] =
-        &[".manifest.toml", "config.ini", "home", crate::commands::snapshot::SNAP_DIR];
-    if app_dir.exists() {
-        for entry in fs::read_dir(&app_dir)
-            .with_context(|| format!("failed to read app dir {}", app_dir.display()))?
-        {
-            let entry = entry.context("failed to read entry")?;
-            let path = entry.path();
-            let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if PRESERVE.contains(&file_name) {
-                continue;
-            }
-            if path.is_dir() {
-                fs::remove_dir_all(&path)
-                    .with_context(|| format!("failed to remove {}", path.display()))?;
-            } else {
-                fs::remove_file(&path)
-                    .with_context(|| format!("failed to remove {}", path.display()))?;
-            }
-        }
+    // Any earlier update on this app that was killed mid-swap is finished or
+    // rolled back here, before we build a new one, so we always start from a
+    // consistent tree.
+    recover_interrupted_update(app_name)?;
+
+    // Crash-safe update: nothing destructive touches the live tree until the
+    // new one is fully built.  Extract every package into a fresh staging tree
+    // and stamp its manifest there; then swap it in with two atomic renames.
+    // If the process is cancelled (Ctrl-C), killed, or the machine loses power
+    // at ANY moment, recover_interrupted_update() on the next run either
+    // completes the swap forward or restores the untouched old version — the
+    // app can never be left half-wiped.
+    let (staging, backup) = swap_paths(app_name)?;
+    if staging.exists() {
+        fs::remove_dir_all(&staging)
+            .with_context(|| format!("failed to clear stale staging dir {}", staging.display()))?;
     }
+    fs::create_dir_all(&staging)
+        .with_context(|| format!("failed to create staging dir {}", staging.display()))?;
 
     for pkg in &resolved {
         let pkg_path = pkg.pkg_path.as_ref().unwrap();
         eprintln!("Extracting {}...", pkg.name);
-        extract_package(pkg_path, &app_dir)
+        extract_package(pkg_path, &staging)
             .with_context(|| format!("failed to extract {}", pkg.name))?;
     }
 
@@ -196,7 +189,26 @@ fn reinstall(manifest: &crate::manifest::Manifest) -> Result<()> {
         },
         packages,
     };
-    write_manifest(app_name, &new_manifest)?;
+    // Stamp the manifest into the staging tree so the dir swapped into place is
+    // already complete.
+    write_manifest_to(&staging, &new_manifest)?;
+
+    // --- Point of no return: swap the staging tree in for the live one. ---
+    // Each rename is atomic, and every interruption between them is understood
+    // and healed by recover_interrupted_update():
+    //   * after step 1, before step 2 -> old tree restored from backup
+    //   * after step 2                 -> update finished forward from backup
+    if app_dir.exists() {
+        fs::rename(&app_dir, &backup) // 1. move the old tree aside
+            .with_context(|| format!("failed to move old tree aside for {app_name}"))?;
+    }
+    fs::rename(&staging, &app_dir) // 2. move the new tree into place
+        .with_context(|| format!("failed to swap in updated tree for {app_name}"))?;
+    // The new tree ships only package files; carry the user's data (sandbox
+    // home with browser profiles, per-app config, snapshots for rollback) over
+    // from the old tree, then discard it.
+    carry_over_user_data(&backup, &app_dir)?;
+    let _ = fs::remove_dir_all(&backup);
 
     ensure_base_layout(&app_dir)
         .with_context(|| "failed to restore base filesystem symlinks")?;
@@ -219,6 +231,76 @@ fn reinstall(manifest: &crate::manifest::Manifest) -> Result<()> {
     regenerate_runtime_caches(&app_dir);
 
     eprintln!("Updated '{app_name}'.");
+    Ok(())
+}
+
+/// User data that lives inside an app tree but is NOT package-provided: the
+/// sandbox home (browser profiles, font caches, GUI settings), the per-app
+/// wryayer config, and snapshots (so a post-update rollback still reaches a
+/// pre-update version). These are carried across an update rather than
+/// re-extracted. The manifest is intentionally absent — the update writes a
+/// fresh one into the staging tree.
+const CARRY_OVER: &[&str] = &["home", "config.ini", crate::commands::snapshot::SNAP_DIR];
+
+/// Reserved sibling paths used to apply an update atomically: `.<app>.wr-new`
+/// is the staging tree, `.<app>.wr-old` is the old tree parked during the swap.
+/// Both sit next to the app dir (same filesystem, so renames are atomic) and
+/// are dot-prefixed so `list_all_apps` never mistakes them for apps.
+fn swap_paths(app_name: &str) -> Result<(PathBuf, PathBuf)> {
+    let base = app_dir(app_name)?;
+    let parent = base
+        .parent()
+        .with_context(|| format!("app dir {} has no parent", base.display()))?
+        .to_path_buf();
+    Ok((
+        parent.join(format!(".{app_name}.wr-new")),
+        parent.join(format!(".{app_name}.wr-old")),
+    ))
+}
+
+/// Move each user-data item from `from` into `to`, but only when `to` doesn't
+/// already have it. Same-filesystem renames, so this is fast and each item
+/// moves atomically — making the operation safe to re-run after an interruption
+/// (an already-moved item is simply skipped).
+fn carry_over_user_data(from: &Path, to: &Path) -> Result<()> {
+    for item in CARRY_OVER {
+        let src = from.join(item);
+        let dst = to.join(item);
+        if src.exists() && !dst.exists() {
+            fs::rename(&src, &dst)
+                .with_context(|| format!("failed to carry over '{item}' during update"))?;
+        }
+    }
+    Ok(())
+}
+
+/// Finish or roll back an update that was interrupted between the swap renames,
+/// so a cancelled / killed / power-cut update can never leave a broken tree.
+/// Idempotent and safe to call before any update or launch:
+///   * backup present, app dir gone  -> restore the untouched old version
+///   * backup present, app dir there  -> new tree is in; carry data + drop old
+///   * only staging present           -> junk from a pre-swap abort; discard it
+pub fn recover_interrupted_update(app_name: &str) -> Result<()> {
+    let app_dir = app_dir(app_name)?;
+    let (staging, backup) = swap_paths(app_name)?;
+
+    if backup.exists() {
+        if app_dir.exists() {
+            // The new tree was already swapped in; complete the data hand-off.
+            carry_over_user_data(&backup, &app_dir)?;
+            let _ = fs::remove_dir_all(&backup);
+        } else {
+            // The old tree was parked but the new one never landed; put it back.
+            fs::rename(&backup, &app_dir).with_context(|| {
+                format!("failed to restore '{app_name}' after an interrupted update")
+            })?;
+        }
+    }
+    // A leftover staging tree (with no backup) means we were interrupted before
+    // touching the live tree — it's a half-built throwaway.
+    if staging.exists() {
+        let _ = fs::remove_dir_all(&staging);
+    }
     Ok(())
 }
 
