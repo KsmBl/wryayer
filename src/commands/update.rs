@@ -258,19 +258,68 @@ fn swap_paths(app_name: &str) -> Result<(PathBuf, PathBuf)> {
     ))
 }
 
-/// Move each user-data item from `from` into `to`, but only when `to` doesn't
-/// already have it. Same-filesystem renames, so this is fast and each item
-/// moves atomically — making the operation safe to re-run after an interruption
-/// (an already-moved item is simply skipped).
+/// Move each user-data item from `from` into `to`. When `to` doesn't have the
+/// item, it's a fast same-filesystem rename that moves atomically. When `to`
+/// *does* already have it — e.g. the `filesystem` package ships an empty `home/`
+/// skeleton that lands in the freshly-extracted tree — the old data is **merged
+/// in, winning over** the new tree's entry, so a package-provided empty
+/// directory can never shadow (and then get the real profile deleted with the
+/// discarded backup). Package trees never own `home`/`config.ini`/`.snapshots`,
+/// so any pre-existing `to` entry is only ever an empty skeleton. Safe to re-run
+/// after an interruption: already-moved entries are simply gone from `from`.
 fn carry_over_user_data(from: &Path, to: &Path) -> Result<()> {
     for item in CARRY_OVER {
         let src = from.join(item);
         let dst = to.join(item);
-        if src.exists() && !dst.exists() {
+        if !src.exists() {
+            continue;
+        }
+        if !dst.exists() {
             fs::rename(&src, &dst)
                 .with_context(|| format!("failed to carry over '{item}' during update"))?;
+            continue;
         }
+        merge_preferring_src(&src, &dst)
+            .with_context(|| format!("failed to carry over '{item}' during update"))?;
     }
+    Ok(())
+}
+
+/// Recursively move every entry from `src` into `dst`, with `src` (the old user
+/// data) winning on any collision: matching directories are merged, and a file,
+/// symlink, or dir in `src` replaces whatever empty skeleton `dst` held. Leaves
+/// `src` empty so the backup tree can be removed cleanly afterwards.
+fn merge_preferring_src(src: &Path, dst: &Path) -> Result<()> {
+    for entry in fs::read_dir(src).with_context(|| format!("failed to read {}", src.display()))? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let s = src.join(&name);
+        let d = dst.join(&name);
+        let s_is_dir = fs::symlink_metadata(&s)
+            .with_context(|| format!("failed to stat {}", s.display()))?
+            .file_type()
+            .is_dir();
+        let d_meta = fs::symlink_metadata(&d).ok();
+        // Two real directories: recurse so existing (empty) subdirs are kept and
+        // the old entries fill them in.
+        if s_is_dir && d_meta.as_ref().is_some_and(|m| m.file_type().is_dir()) {
+            merge_preferring_src(&s, &d)?;
+            continue;
+        }
+        // Otherwise the old entry wins outright — clear any skeleton in the way.
+        if let Some(m) = d_meta {
+            if m.file_type().is_dir() {
+                fs::remove_dir_all(&d)
+                    .with_context(|| format!("failed to clear {}", d.display()))?;
+            } else {
+                fs::remove_file(&d)
+                    .with_context(|| format!("failed to clear {}", d.display()))?;
+            }
+        }
+        fs::rename(&s, &d).with_context(|| format!("failed to move {}", s.display()))?;
+    }
+    // `src` is now empty; drop it so the backup removal has nothing left to do.
+    fs::remove_dir(src).ok();
     Ok(())
 }
 
@@ -360,4 +409,70 @@ fn get_aur_version(pkg_name: &str) -> Result<Option<String>> {
 
 fn is_newer(candidate: &str, current: &str) -> Result<bool> {
     crate::distro::version_is_newer(candidate, current)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression: the `filesystem` package ships an empty `home/`, so the
+    /// freshly-extracted tree already has `home/` when carry-over runs. The old
+    /// user profile must be merged in, not silently dropped with the backup.
+    #[test]
+    fn carry_over_merges_old_home_over_package_skeleton() {
+        let tmp = tempfile::tempdir().unwrap();
+        let backup = tmp.path().join("old");
+        let newtree = tmp.path().join("new");
+
+        // Old tree: real browser profile + per-app config + a snapshot.
+        fs::create_dir_all(backup.join("home/whisper/.config/vivaldi")).unwrap();
+        fs::write(backup.join("home/whisper/.config/vivaldi/Prefs"), b"my settings").unwrap();
+        fs::write(backup.join("config.ini"), b"[temp]\n").unwrap();
+        fs::create_dir_all(backup.join(".snapshots/snap1")).unwrap();
+
+        // New tree: only the empty `home/` skeleton the filesystem package ships.
+        fs::create_dir_all(newtree.join("home")).unwrap();
+
+        carry_over_user_data(&backup, &newtree).unwrap();
+
+        let prefs = newtree.join("home/whisper/.config/vivaldi/Prefs");
+        assert!(prefs.is_file(), "profile lost during carry-over");
+        assert_eq!(fs::read(&prefs).unwrap(), b"my settings");
+        assert!(newtree.join("config.ini").is_file());
+        assert!(newtree.join(".snapshots/snap1").is_dir());
+        // Everything was moved out of the backup, so dropping it loses nothing.
+        assert!(!backup.join("home/whisper").exists());
+    }
+
+    /// The fast path (new tree lacks the item entirely) still moves it wholesale.
+    #[test]
+    fn carry_over_moves_when_new_tree_has_no_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let backup = tmp.path().join("old");
+        let newtree = tmp.path().join("new");
+        fs::create_dir_all(backup.join("home/whisper")).unwrap();
+        fs::write(backup.join("home/whisper/f"), b"x").unwrap();
+        fs::create_dir_all(&newtree).unwrap();
+
+        carry_over_user_data(&backup, &newtree).unwrap();
+
+        assert_eq!(fs::read(newtree.join("home/whisper/f")).unwrap(), b"x");
+    }
+
+    /// Old files win over any colliding entry the new skeleton happened to carry.
+    #[test]
+    fn merge_prefers_old_file_over_new() {
+        let tmp = tempfile::tempdir().unwrap();
+        let backup = tmp.path().join("old");
+        let newtree = tmp.path().join("new");
+        fs::create_dir_all(backup.join("home/whisper")).unwrap();
+        fs::write(backup.join("home/whisper/Prefs"), b"real").unwrap();
+        // New tree ships a stub file at the same path.
+        fs::create_dir_all(newtree.join("home/whisper")).unwrap();
+        fs::write(newtree.join("home/whisper/Prefs"), b"stub").unwrap();
+
+        carry_over_user_data(&backup, &newtree).unwrap();
+
+        assert_eq!(fs::read(newtree.join("home/whisper/Prefs")).unwrap(), b"real");
+    }
 }
