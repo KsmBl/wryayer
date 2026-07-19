@@ -199,8 +199,18 @@ pub fn version_is_newer(candidate: &str, current_ver: &str) -> Result<bool> {
 pub(crate) fn download_url(url: &str, dest: &Path) -> Result<()> {
     use std::io::Read;
 
+    // Without timeouts a mirror that accepts the connection then stalls wedges
+    // the whole install forever — the classic "stuck at Checking for missing
+    // shared library dependencies..." hang, where the soname loop is fetching a
+    // dependency and the socket never returns. `connect_timeout` fails fast on a
+    // dead mirror (so the mirrorlist fallback can try the next one); `timeout`
+    // here is a per-operation read/write socket timeout, not a total deadline,
+    // so a large package that keeps making progress still completes — only a
+    // stall longer than the window aborts.
     let client = reqwest::blocking::Client::builder()
         .user_agent("curl/7.88.1")
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(60))
         .build()
         .context("failed to build HTTP client")?;
     let mut response = client
