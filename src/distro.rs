@@ -130,6 +130,17 @@ fn soname_cache_put(name: String, value: Option<String>) {
 }
 
 /// Download a package archive to cache_dir and return its path.
+///
+/// Every backend authenticates the archive **before** it can be extracted, so a
+/// tampered or MITM'd mirror can't drop arbitrary files into a sandbox root:
+/// - **Arch** verifies the detached PGP `.sig` against the pacman keyring (`gpg`).
+/// - **Fedora** verifies the `.rpm`'s signature against the rpm keyring (`rpmkeys`).
+/// - **Debian** relies on apt's authenticated acquire (hashes tied to the signed
+///   Release file) and rejects any package apt reports as unauthenticated.
+///
+/// AUR packages are the exception: they're built locally by `makepkg`, so there
+/// is no repo signature to check (same trust model as running `yay`). Set
+/// `WRYAYER_SKIP_SIG_VERIFY=1` to bypass verification for a private/unsigned repo.
 pub fn download_pkg(pkg: &str, cache_dir: &Path) -> Result<PathBuf> {
     std::fs::create_dir_all(cache_dir)
         .with_context(|| format!("failed to create cache dir {}", cache_dir.display()))?;
@@ -192,6 +203,22 @@ pub fn version_is_newer(candidate: &str, current_ver: &str) -> Result<bool> {
         Distro::Debian => debian::version_newer(candidate, current_ver),
         Distro::Fedora => fedora::version_newer(candidate, current_ver),
     }
+}
+
+// ── Signature-verification verdicts (pure, unit-tested) ───────────────────────
+
+/// True when `rpmkeys --checksig` reports a package as signed by a trusted key.
+/// A good run exits 0 and prints `…: digests signatures OK`; plain `digests OK`
+/// (no "signatures") means unsigned, and anything else means a bad signature.
+fn rpm_checksig_ok(success: bool, stdout: &str) -> bool {
+    success && stdout.to_lowercase().contains("signatures ok")
+}
+
+/// True when `apt-get download` warns that a package could not be authenticated
+/// against a signed repository (an untrusted repo). apt still downloads such a
+/// package, so wryayer treats this as a verification failure.
+fn apt_reports_unauthenticated(stderr: &str) -> bool {
+    stderr.to_lowercase().contains("cannot be authenticated")
 }
 
 // ── Shared HTTP downloader ────────────────────────────────────────────────────
@@ -839,16 +866,34 @@ mod debian {
             return Ok(cached);
         }
         eprintln!("  Downloading {pkg}...");
-        // apt-get download writes the .deb to the current directory
+        // apt-get download writes the .deb to the current directory. Its acquire
+        // system verifies each package's hash against the repo's Packages index,
+        // which is itself covered by the signed Release file — so a package that
+        // downloads cleanly from a normal `apt update`'d setup is authenticated
+        // by the apt trust chain. The one hole is an *untrusted* repo, where apt
+        // downloads anyway but prints "cannot be authenticated"; treat that as a
+        // hard failure (like the Arch/Fedora backends) unless the skip var is set.
         let output = Command::new("apt-get")
             .args(["download", pkg])
             .current_dir(cache_dir)
+            .env("LANG", "C")
+            .env("LC_ALL", "C")
             .output()
             .context("failed to spawn apt-get download")?;
         if !output.status.success() {
             bail!(
                 "apt-get download failed for '{pkg}':\n{}",
                 String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if std::env::var_os("WRYAYER_SKIP_SIG_VERIFY").is_none()
+            && super::apt_reports_unauthenticated(&stderr)
+        {
+            bail!(
+                "refusing to install unverified package '{pkg}': apt could not \
+                 authenticate it against a signed repository:\n{}",
+                stderr.trim()
             );
         }
         find_deb(cache_dir, pkg)?
@@ -1146,7 +1191,7 @@ mod fedora {
 
     pub fn download(pkg: &str, cache_dir: &Path) -> Result<PathBuf> {
         if let Some(cached) = find_rpm(cache_dir, pkg)? {
-            return Ok(cached);
+            return verified(pkg, cached);
         }
         eprintln!("  Downloading {pkg}...");
         let output = Command::new("dnf")
@@ -1165,8 +1210,45 @@ mod fedora {
                 String::from_utf8_lossy(&output.stderr).trim()
             );
         }
-        find_rpm(cache_dir, pkg)?
-            .with_context(|| format!("no .rpm found in cache after downloading '{pkg}'"))
+        let path = find_rpm(cache_dir, pkg)?
+            .with_context(|| format!("no .rpm found in cache after downloading '{pkg}'"))?;
+        verified(pkg, path)
+    }
+
+    /// Verify a downloaded `.rpm`'s GPG signature against the host rpm keyring
+    /// with `rpmkeys --checksig`. `dnf download` fetches the package but does not
+    /// check its signature, so — like the Arch backend — wryayer verifies before
+    /// extraction so a tampered or MITM'd mirror can't drop arbitrary files into
+    /// a sandbox root. A good result reads `…: digests signatures OK`, meaning the
+    /// package is signed by a key already in the rpm keyring. Set
+    /// `WRYAYER_SKIP_SIG_VERIFY=1` to bypass (e.g. an unsigned third-party repo).
+    fn verified(pkg: &str, path: PathBuf) -> Result<PathBuf> {
+        if std::env::var_os("WRYAYER_SKIP_SIG_VERIFY").is_some() {
+            return Ok(path);
+        }
+        let run = |bin: &str| {
+            Command::new(bin)
+                .arg("--checksig")
+                .arg(&path)
+                .env("LANG", "C")
+                .env("LC_ALL", "C")
+                .output()
+        };
+        // rpmkeys is the modern entry point; fall back to `rpm --checksig`.
+        let out = match run("rpmkeys") {
+            Ok(o) => o,
+            Err(_) => run("rpm").context("failed to run rpmkeys/rpm --checksig (is rpm installed?)")?,
+        };
+        let report = String::from_utf8_lossy(&out.stdout);
+        if super::rpm_checksig_ok(out.status.success(), &report) {
+            return Ok(path);
+        }
+        let _ = std::fs::remove_file(&path);
+        bail!(
+            "refusing to install unverified package '{pkg}': rpm signature invalid, \
+             unsigned, or signed by a key not in the rpm keyring:\n{}",
+            report.trim()
+        );
     }
 
     pub fn extract(pkg_path: &Path, dest_dir: &Path) -> Result<()> {
@@ -1285,5 +1367,41 @@ mod fedora {
             }
         }
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod verify_tests {
+    use super::{apt_reports_unauthenticated, rpm_checksig_ok};
+
+    #[test]
+    fn rpm_signed_by_trusted_key_passes() {
+        assert!(rpm_checksig_ok(true, "firefox-130.rpm: digests signatures OK"));
+        assert!(rpm_checksig_ok(true, "foo.rpm: digests SIGNATURES OK\n"));
+    }
+
+    #[test]
+    fn rpm_unsigned_or_bad_fails() {
+        // Unsigned: digests OK but no "signatures".
+        assert!(!rpm_checksig_ok(true, "foo.rpm: digests OK"));
+        // Bad signature: non-zero exit.
+        assert!(!rpm_checksig_ok(false, "foo.rpm: digests SIGNATURES NOT OK"));
+        // Missing key still counts as not-OK even if the word appears negated.
+        assert!(!rpm_checksig_ok(false, "foo.rpm: digests signatures OK"));
+        assert!(!rpm_checksig_ok(true, ""));
+    }
+
+    #[test]
+    fn apt_unauthenticated_is_detected() {
+        assert!(apt_reports_unauthenticated(
+            "WARNING: The following packages cannot be authenticated!\n  foo\n"
+        ));
+        assert!(apt_reports_unauthenticated("E: Some packages Cannot Be Authenticated"));
+    }
+
+    #[test]
+    fn apt_clean_output_is_authenticated() {
+        assert!(!apt_reports_unauthenticated("Get:1 http://deb.debian.org foo 1.0\nFetched 1 B\n"));
+        assert!(!apt_reports_unauthenticated(""));
     }
 }
