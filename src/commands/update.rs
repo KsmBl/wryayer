@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub fn run(app_name: Option<&str>, check_only: bool) -> Result<()> {
+pub fn run(app_name: Option<&str>, check_only: bool, full: bool) -> Result<()> {
     let manifests = match app_name {
         Some(name) => vec![read_manifest(name)
             .with_context(|| format!("'{name}' is not installed"))?],
@@ -58,7 +58,7 @@ pub fn run(app_name: Option<&str>, check_only: bool) -> Result<()> {
                     eprintln!("{name}: update available  {current_version}  ->  {ver}");
                 } else {
                     eprintln!("{name}: updating {current_version} -> {ver}");
-                    reinstall(manifest)?;
+                    reinstall(manifest, full)?;
                 }
             }
         }
@@ -71,7 +71,7 @@ pub fn run(app_name: Option<&str>, check_only: bool) -> Result<()> {
     Ok(())
 }
 
-fn reinstall(manifest: &crate::manifest::Manifest) -> Result<()> {
+fn reinstall(manifest: &crate::manifest::Manifest, full: bool) -> Result<()> {
     let app_name = &manifest.app.name;
     let bin_name = &manifest.app.main_binary;
     // The dependency tree is resolved from the real upstream package. When the
@@ -119,11 +119,53 @@ fn reinstall(manifest: &crate::manifest::Manifest) -> Result<()> {
         }
     }
 
+    let app_dir = app_dir(app_name)?;
+
+    // ── Delta planning ───────────────────────────────────────────────────────
+    // Compare the freshly-resolved set against what's already installed (the
+    // target's manifest plus every merged-in child's) so we re-download and
+    // re-extract only the packages whose version actually changed, reusing the
+    // rest straight from the live tree. A delta is only safe when no package
+    // *disappeared*: an in-place overlay can't know which files a removed
+    // package owned, so any removal — or `--full` — forces a clean full rebuild.
+    let mut old_versions: std::collections::HashMap<String, String> = manifest
+        .packages
+        .iter()
+        .map(|p| (p.name.clone(), p.version.clone()))
+        .collect();
+    for child in &children {
+        for p in &child.packages {
+            old_versions
+                .entry(p.name.clone())
+                .or_insert_with(|| p.version.clone());
+        }
+    }
+    let resolved_nv: Vec<(String, String)> =
+        resolved.iter().map(|p| (p.name.clone(), p.version.clone())).collect();
+    let (delta, changed) = plan_delta(
+        &old_versions,
+        resolved_nv.iter().map(|(n, v)| (n.as_str(), v.as_str())),
+        full,
+        app_dir.exists(),
+    );
+    if delta {
+        eprintln!(
+            "Delta update: re-fetching {} of {} package(s); reusing the rest.",
+            changed.len(),
+            resolved.len()
+        );
+    }
+
     let home = std::env::var("HOME").context("HOME not set")?;
     let cache_dir = PathBuf::from(&home).join(".cache").join("wryayer").join("pkg");
     let build_dir = PathBuf::from(&home).join(".cache").join("wryayer").join("build");
 
     for pkg in &mut resolved {
+        // Delta: unchanged packages are reused from the live tree, so neither
+        // downloaded nor extracted.
+        if delta && !changed.contains(&pkg.name) {
+            continue;
+        }
         match pkg.source {
             PackageSource::Official => {
                 let path = download_official(&pkg.name, &cache_dir)
@@ -137,8 +179,6 @@ fn reinstall(manifest: &crate::manifest::Manifest) -> Result<()> {
             }
         }
     }
-
-    let app_dir = app_dir(app_name)?;
 
     // Any earlier update on this app that was killed mid-swap is finished or
     // rolled back here, before we build a new one, so we always start from a
@@ -160,7 +200,21 @@ fn reinstall(manifest: &crate::manifest::Manifest) -> Result<()> {
     fs::create_dir_all(&staging)
         .with_context(|| format!("failed to create staging dir {}", staging.display()))?;
 
+    // Delta: seed the staging tree with a hard-linked clone of the current
+    // package files (user data + manifest excluded — those are carried or
+    // rewritten), then overlay only the changed packages below. `extract_package`
+    // unlink-firsts, so a re-extracted file gets a fresh inode and the shared
+    // clone/snapshot inodes are never mutated.
+    if delta {
+        eprintln!("Reusing unchanged files...");
+        clone_package_tree(&app_dir, &staging)
+            .with_context(|| "failed to seed the delta staging tree")?;
+    }
+
     for pkg in &resolved {
+        if delta && !changed.contains(&pkg.name) {
+            continue;
+        }
         let pkg_path = pkg.pkg_path.as_ref().unwrap();
         eprintln!("Extracting {}...", pkg.name);
         extract_package(pkg_path, &staging)
@@ -256,6 +310,79 @@ fn swap_paths(app_name: &str) -> Result<(PathBuf, PathBuf)> {
         parent.join(format!(".{app_name}.wr-new")),
         parent.join(format!(".{app_name}.wr-old")),
     ))
+}
+
+/// Decide which packages a delta update must re-fetch. Returns `(delta,
+/// changed)`: `delta` is true when an incremental update is safe — not forced
+/// full, the live tree exists, something is already installed, and **no** package
+/// present before is missing now (a removal needs a clean rebuild since we can't
+/// tell which files it owned). `changed` is the set of package names whose
+/// version differs from what's installed, or that are brand new — exactly the
+/// ones to re-download and re-extract.
+fn plan_delta<'a>(
+    old_versions: &std::collections::HashMap<String, String>,
+    new_pkgs: impl Iterator<Item = (&'a str, &'a str)> + Clone,
+    full: bool,
+    tree_exists: bool,
+) -> (bool, std::collections::HashSet<String>) {
+    let new_names: std::collections::HashSet<&str> = new_pkgs.clone().map(|(n, _)| n).collect();
+    let removed_any = old_versions.keys().any(|n| !new_names.contains(n.as_str()));
+    let changed: std::collections::HashSet<String> = new_pkgs
+        .filter(|(n, v)| old_versions.get(*n).map(|ov| ov != v).unwrap_or(true))
+        .map(|(n, _)| n.to_string())
+        .collect();
+    let delta = !full && tree_exists && !old_versions.is_empty() && !removed_any;
+    (delta, changed)
+}
+
+/// Hard-link every package file from the live app tree `src` into the fresh
+/// staging tree `dst`, so a delta update can overlay just the changed packages
+/// on top. User data and the manifest are skipped: `home`, `config.ini` and
+/// `.snapshots` are carried across the swap from the backup, and the manifest is
+/// rewritten. Hard links are near-free and share inodes with the live tree (and
+/// its snapshots); `extract_package` unlink-firsts, so overlaying a changed file
+/// never mutates a shared inode.
+fn clone_package_tree(src: &Path, dst: &Path) -> Result<()> {
+    use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
+    const SKIP_TOP: &[&str] =
+        &["home", "config.ini", crate::commands::snapshot::SNAP_DIR, ".manifest.toml"];
+
+    fs::create_dir_all(dst)?;
+    // (source dir, dest dir, is_top_level)
+    let mut stack: Vec<(PathBuf, PathBuf, bool)> = vec![(src.to_path_buf(), dst.to_path_buf(), true)];
+    while let Some((s, d, top)) = stack.pop() {
+        for entry in fs::read_dir(&s).with_context(|| format!("failed to read {}", s.display()))? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            let n: &str = &name_str;
+            if top && SKIP_TOP.contains(&n) {
+                continue;
+            }
+            let sp = entry.path();
+            let dp = d.join(&name);
+            let ft = entry.file_type()?;
+            if ft.is_symlink() {
+                let target = fs::read_link(&sp)?;
+                let _ = fs::remove_file(&dp);
+                symlink(&target, &dp)
+                    .with_context(|| format!("failed to symlink {}", dp.display()))?;
+            } else if ft.is_dir() {
+                fs::create_dir_all(&dp)?;
+                if let Ok(m) = fs::metadata(&sp) {
+                    let _ = fs::set_permissions(&dp, fs::Permissions::from_mode(m.mode()));
+                }
+                stack.push((sp, dp, false));
+            } else if ft.is_file() {
+                if dp.exists() {
+                    let _ = fs::remove_file(&dp);
+                }
+                fs::hard_link(&sp, &dp)
+                    .with_context(|| format!("failed to hard-link {}", dp.display()))?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Move each user-data item from `from` into `to`. When `to` doesn't have the
@@ -414,6 +541,77 @@ fn is_newer(candidate: &str, current: &str) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
+    fn old_map(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs.iter().map(|(n, v)| (n.to_string(), v.to_string())).collect()
+    }
+
+    #[test]
+    fn delta_refetches_only_changed_and_new_packages() {
+        let old = old_map(&[("app", "1.0"), ("liba", "2.0"), ("libb", "3.0")]);
+        let new = [("app", "1.1"), ("liba", "2.0"), ("libb", "3.0"), ("libc", "1.0")];
+        let (delta, changed) =
+            plan_delta(&old, new.iter().map(|(n, v)| (*n, *v)), false, true);
+        assert!(delta);
+        // app bumped, libc is new; liba/libb unchanged.
+        assert_eq!(changed.len(), 2);
+        assert!(changed.contains("app"));
+        assert!(changed.contains("libc"));
+        assert!(!changed.contains("liba"));
+    }
+
+    #[test]
+    fn delta_disabled_when_a_package_was_removed() {
+        // libb disappeared from the new set — an overlay can't clean its files.
+        let old = old_map(&[("app", "1.0"), ("libb", "3.0")]);
+        let new = [("app", "1.1")];
+        let (delta, _changed) =
+            plan_delta(&old, new.iter().map(|(n, v)| (*n, *v)), false, true);
+        assert!(!delta);
+    }
+
+    #[test]
+    fn delta_disabled_by_full_flag_and_missing_tree() {
+        let old = old_map(&[("app", "1.0")]);
+        let new = [("app", "1.1")];
+        // --full forces a clean rebuild.
+        assert!(!plan_delta(&old, new.iter().map(|(n, v)| (*n, *v)), true, true).0);
+        // no live tree yet → nothing to reuse.
+        assert!(!plan_delta(&old, new.iter().map(|(n, v)| (*n, *v)), false, false).0);
+        // nothing installed → nothing to reuse.
+        assert!(!plan_delta(&HashMap::new(), new.iter().map(|(n, v)| (*n, *v)), false, true).0);
+    }
+
+    #[test]
+    fn clone_package_tree_hardlinks_files_and_skips_user_data() {
+        use std::os::unix::fs::MetadataExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("live");
+        let dst = tmp.path().join("staging");
+        fs::create_dir_all(src.join("usr/bin")).unwrap();
+        fs::write(src.join("usr/bin/app"), b"binary").unwrap();
+        std::os::unix::fs::symlink("usr/bin", src.join("bin")).unwrap();
+        // User data + manifest that must NOT be cloned (they're carried/rewritten).
+        fs::create_dir_all(src.join("home/whisper")).unwrap();
+        fs::write(src.join("home/whisper/profile"), b"x").unwrap();
+        fs::write(src.join("config.ini"), b"cfg").unwrap();
+        fs::create_dir_all(src.join(".snapshots/snap1")).unwrap();
+        fs::write(src.join(".manifest.toml"), b"old").unwrap();
+
+        clone_package_tree(&src, &dst).unwrap();
+
+        // Package files cloned as hard links (same inode = near-free).
+        let a = fs::metadata(src.join("usr/bin/app")).unwrap();
+        let b = fs::metadata(dst.join("usr/bin/app")).unwrap();
+        assert_eq!(a.ino(), b.ino(), "cloned file should be a hard link");
+        assert!(dst.join("bin").symlink_metadata().unwrap().file_type().is_symlink());
+        // User data + manifest skipped.
+        assert!(!dst.join("home").exists());
+        assert!(!dst.join("config.ini").exists());
+        assert!(!dst.join(".snapshots").exists());
+        assert!(!dst.join(".manifest.toml").exists());
+    }
 
     /// Regression: the `filesystem` package ships an empty `home/`, so the
     /// freshly-extracted tree already has `home/` when carry-over runs. The old

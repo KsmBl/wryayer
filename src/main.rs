@@ -72,6 +72,10 @@ enum Commands {
         /// Show available updates without installing them
         #[arg(long)]
         check: bool,
+        /// Re-download and re-extract every package instead of only the changed
+        /// ones (a clean rebuild; clears any stale files a delta update leaves)
+        #[arg(long)]
+        full: bool,
     },
     /// Scan an app for missing shared libraries and install them
     Repair {
@@ -313,8 +317,8 @@ fn main() {
         }
         Commands::List => commands::list::run(),
         Commands::Run { app_name, bin, args } => commands::run::run(&app_name, bin.as_deref(), &args),
-        Commands::Update { app_name, check } => {
-            commands::update::run(app_name.as_deref(), check)
+        Commands::Update { app_name, check, full } => {
+            commands::update::run(app_name.as_deref(), check, full)
         }
         Commands::Repair { app_name } => commands::repair::run(&app_name),
         Commands::Config { app_name, setting } => match setting {
