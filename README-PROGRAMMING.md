@@ -259,7 +259,7 @@ README-CODE.md for the diagram version.
 | `config.rs` | `AppConfig` (every per-app / global setting), INI parse (`parse_ini`) and format (`format_ini`), `defaults.ini`, and the alias-merge copy. **Start here for a new setting.** |
 | `manifest.rs` | `.manifest.toml` read/write, `app_dir`/`wryayer_root` path helpers, `list_all_apps`, `tree_order`, the alias/merge model. |
 | `cpu.rs` | Built-in CPU profiles + the `CustomCpu` type; renders `/proc/cpuinfo`, and provides `cpuid_spoof_for` / `topology_for` for the launcher and shim. |
-| `distro.rs` | Detects the host distro and selects the package backend (pacman/apt/dnf). |
+| `distro.rs` | Detects the host distro and selects the package backend (pacman/apt/dnf); downloads packages and **verifies their signatures before extraction** (`gpg`/`rpmkeys`/apt auth). |
 | `launcher.rs` | Creates/removes the `~/bin/<app>` shell wrapper. |
 | `avahi_stub.rs` | Config/data for the in-sandbox Avahi stub bus. |
 
@@ -270,7 +270,7 @@ README-CODE.md for the diagram version.
 | `run.rs` | **The sandbox launcher.** `bwrap_cmd` assembles the bwrap command line (all binds, spoofs, env, portal, CPU); `launch_bwrap` spawns it, runs updater threads, waits, tears down. The biggest and most important runtime file. |
 | `install.rs` | resolve → download → extract → write manifest → dedup. |
 | `install_game.rs` | Wine-container import (game folder → `.exe` → prefix). |
-| `update.rs` | Re-resolve + re-extract; version checks (`--check`). |
+| `update.rs` | Re-resolve + **delta re-extract** (only changed packages; `--full` for a clean rebuild); version checks (`--check`). |
 | `remove.rs` | Delete tree + launcher; alias-aware (`--cascade`). |
 | `snapshot.rs` | Hard-linked snapshots, list, rollback, delete, prune. |
 | `export.rs` / `import.rs` | Zip an app tree / recreate one from a zip. |

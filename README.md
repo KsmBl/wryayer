@@ -375,14 +375,22 @@ alias itself is always safe and never touches the target tree.
 wryayer update            # check and update all apps
 wryayer update firefox    # update one app
 wryayer update --check    # report available updates without installing
+wryayer update firefox --full   # clean rebuild instead of a delta update
 ```
 
-Updates **preserve your data and snapshots**: the sandbox `home/` (browser
+Updates are **incremental (delta)**: wryayer re-downloads and re-extracts only
+the packages whose version actually changed, and reuses every unchanged package
+straight from the live tree via hard links — so bumping one library in a
+400-package app touches just that library instead of re-fetching the whole
+dependency tree. If a package *disappears* from the dependency set (or you pass
+`--full`), wryayer falls back to a clean full rebuild so no stale files linger.
+
+Updates also **preserve your data and snapshots**: the sandbox `home/` (browser
 profiles, settings), the per-app `config.ini`, and every saved snapshot survive
-the re-extraction, and any programs merged in with `--into` are re-resolved so
-their binaries are never lost. In the TUI, wryayer checks for updates on startup
-and marks out-of-date apps with a dot; `u` updates the selected app and
-`Shift+U` updates every out-of-date app at once.
+the swap, and any programs merged in with `--into` are re-resolved so their
+binaries are never lost. In the TUI, wryayer checks for updates on startup and
+marks out-of-date apps with a dot; `u` updates the selected app and `Shift+U`
+updates every out-of-date app at once.
 
 ### Export and import
 
@@ -698,7 +706,9 @@ The config is stored as a human-readable INI file at `~/.wryayer/<app>/config.in
 
 **Hard links require same filesystem.** Deduplication only works when all `~/.wryayer/<app>/` directories are on the same filesystem. If you mount `~/.wryayer` on a separate partition from another app, `dedup` will silently skip cross-device hard-links.
 
-**AUR builds run makepkg as your user.** This is the same trust model as using yay directly. Build scripts execute arbitrary code. Only install from AUR packages you trust.
+**Downloaded packages are signature-verified before extraction.** Because wryayer fetches packages itself rather than letting the package manager install them, it authenticates each archive before unpacking it into a sandbox root: Arch `.pkg.tar.zst` files are checked against the pacman keyring (`gpg`), Fedora `.rpm` files against the rpm keyring (`rpmkeys`), and Debian `.deb` files rely on apt's authenticated acquire (a package apt reports as unauthenticated is rejected). Verification requires the relevant keyring to be present; set `WRYAYER_SKIP_SIG_VERIFY=1` to bypass it for a private or unsigned repository.
+
+**AUR builds run makepkg as your user.** This is the same trust model as using yay directly. Build scripts execute arbitrary code, and the locally-built package has no repository signature to verify. Only install from AUR packages you trust.
 
 **Wayland socket not isolated.** The Wayland display socket (`$XDG_RUNTIME_DIR/wayland-0`) is accessible inside the sandbox via `/run`. Apps have full Wayland access.
 
@@ -724,8 +734,8 @@ The config is stored as a human-readable INI file at `~/.wryayer/<app>/config.in
 - [x] **TUI install target picker** — choosing Install on a search result now prompts whether to start a new app or merge into an existing one
 - [ ] **Wayland isolation** — bind a private Wayland socket so apps can't impersonate each other
 - [x] **D-Bus portal filtering** — file pickers run in-sandbox and only show shared dirs, via an `xdg-dbus-proxy` filter that hides the host portal (`portal_filter`)
-- [ ] **Package signing verification** — validate `.pkg.tar.zst` signatures before extraction
-- [ ] **Delta updates** — only re-download changed packages instead of the full dep tree
+- [x] **Package signing verification** — every downloaded package is authenticated before extraction (Arch `.pkg.tar.zst` via the pacman keyring, Fedora `.rpm` via the rpm keyring, Debian `.deb` via apt's signed repo metadata)
+- [x] **Delta updates** — an update re-downloads and re-extracts only the packages whose version changed, reusing the rest from the live tree via hard links (`wryayer update --full` forces a clean rebuild)
 - [ ] **Export/import via SSH or SFTP** — `wryayer export --remote user@host:/path`
 - [x] **TUI package search from AUR** — Install tab searches both official repos and the AUR
 - [x] **Identity spoofing** — spoof hostname, username, machine-id, OS release, and the CPU per app (fake `/proc/cpuinfo` **and** `CPUID`, with built-in profiles and a TUI configurator)

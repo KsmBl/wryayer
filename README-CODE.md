@@ -362,24 +362,58 @@ or the machine loses power mid-update:
    dep trees into the set — otherwise the fresh tree would be missing the child
    binaries. Any resolve failure bails *before* anything destructive, so a
    transient error can never damage the live tree.
-3. Downloads/builds every package.
-4. Extracts everything into a fresh sibling staging tree `.<app>.wr-new` and
-   stamps the new manifest there — the live tree is untouched during this slow,
-   fallible work.
-5. Swaps it in with two atomic renames: the old tree is parked as
+3. **Plans a delta** (`plan_delta`): the resolved set is compared against the
+   installed versions (the target manifest plus every child's). The `changed`
+   set is the packages whose version differs or that are new. A delta is used
+   unless `--full` is passed, the live tree is missing, nothing is installed, or
+   a package *disappeared* — a removal needs a clean rebuild because an in-place
+   overlay can't know which files the vanished package owned.
+4. Downloads/builds only the `changed` packages (delta) or every package (full).
+   Unchanged packages are never re-downloaded — the download cache would hit
+   anyway when warm, but the delta skips the request entirely.
+5. Builds a fresh sibling staging tree `.<app>.wr-new` and stamps the new
+   manifest there — the live tree is untouched during this slow, fallible work.
+   In a **delta** the staging tree starts as a hard-linked clone of the live
+   package files (`clone_package_tree`, skipping `home`/`config.ini`/`.snapshots`/
+   the manifest), then the changed packages are overlaid on top; a **full**
+   rebuild extracts everything into an empty staging tree. Because
+   `extract_package` unlink-firsts, overlaying a changed file writes a fresh
+   inode and never mutates the shared clone/snapshot inode.
+6. Swaps it in with two atomic renames: the old tree is parked as
    `.<app>.wr-old`, then the staging tree is moved into place.
-6. Carries the user data (`home`, `config.ini`, `.snapshots`) from the parked
+7. Carries the user data (`home`, `config.ini`, `.snapshots`) from the parked
    old tree into the new one, then drops the old tree. `carry_over_user_data`
    **merges** rather than skips on collision, so a package-provided empty
    `home/` skeleton (the `filesystem` package ships one) can never shadow — and
    then get deleted with — the real profile.
-7. Restores base symlinks, fixes permissions, re-runs the soname scan and
+8. Restores base symlinks, fixes permissions, re-runs the soname scan and
    `ldconfig`, regenerates runtime caches, and runs cross-app dedup.
 
 `recover_interrupted_update()` runs at the start of every update and every
 launch: it finishes a swap that was interrupted forward, or restores the parked
 old tree if the new one never landed — so an interrupted update always heals to
 a consistent, fully-extracted tree on the next run.
+
+### Trade-off: delta cruft
+
+A delta overlays new package versions onto the cloned tree but can't remove a
+file that only the *old* version of a still-present package shipped (we don't
+track per-package file lists). In practice this is rare — most files overwrite
+in place at a stable soname path — and any package *removal* already forces a
+full rebuild. `wryayer update --full` re-extracts into an empty tree and clears
+any such residue.
+
+### Package verification (`distro.rs`)
+
+Because wryayer downloads packages itself instead of letting the package manager
+install them, `download_pkg` authenticates every archive **before** it reaches
+`extract_pkg`: Arch verifies the detached `.sig` against the pacman keyring with
+`gpg`, Fedora runs `rpmkeys --checksig` against the rpm keyring, and Debian
+treats an apt "cannot be authenticated" warning as fatal (apt otherwise vouches
+for the `.deb` via the signed Release → Packages hash chain). AUR packages are
+locally built, so they have no repo signature to check. `WRYAYER_SKIP_SIG_VERIFY=1`
+bypasses verification. The pure verdict helpers (`rpm_checksig_ok`,
+`apt_reports_unauthenticated`) are unit-tested.
 
 `check_all_updates()` returns a `name → latest_version` map for every non-alias
 app with a newer version available; the TUI runs it on a background thread at
