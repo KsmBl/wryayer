@@ -11,7 +11,8 @@ use crate::config::{AppConfig, AvahiMode, LocalDelete, TempMode};
 
 use super::{
     App, Screen, Tab, CFG_SAVE, CFG_SHARES, CFG_GAME_EXE, CFG_GAME_PREFIX,
-    CFG_RAM_LIMIT, CFG_SPOOF_CPUINFO, app_cfg_save_idx, setting_description, setting_options, setting_current, setting_title,
+    CFG_RAM_LIMIT, CFG_SPOOF_CPUINFO, CFG_SPOOF_UPTIME, CFG_USB,
+    app_cfg_save_idx, setting_description, setting_options, setting_current, setting_title,
     HOSTNAME_SAMPLE, MACHINE_ID_SAMPLE, USERNAME_SAMPLE,
 };
 
@@ -1492,7 +1493,7 @@ fn draw_settings_tab(f: &mut Frame, app: &mut App, area: Rect) {
             Some(s) => s.chars().take(10).collect(),
         }
     };
-    let rows: &[(&str, String)] = &[
+    let mut rows: Vec<(&str, String)> = vec![
         ("Network",     b(config.network).to_string()),
         ("Camera",      b(config.camera).to_string()),
         ("Microphone",  b(config.microphone).to_string()),
@@ -1556,6 +1557,22 @@ fn draw_settings_tab(f: &mut Frame, app: &mut App, area: Rect) {
             crate::config::Layout::Bottom  => "bottom".into(),
         }),
     ];
+    // CFG_SPOOF_UPTIME and CFG_USB store their values past CFG_SAVE (indices 22
+    // and 23), so the positional `rows` above doesn't reach them. Pad the gap
+    // and place them at their real indices — the render loop addresses rows by
+    // CFG index, so without this they'd be silently dropped from the list.
+    let uptime_val = match config.spoof_uptime {
+        None           => "system".to_string(),
+        Some(3600)     => "1 hour".to_string(),
+        Some(86400)    => "1 day".to_string(),
+        Some(604800)   => "1 week".to_string(),
+        Some(secs)     => crate::config::format_uptime(secs),
+    };
+    while rows.len() <= CFG_USB {
+        rows.push(("", String::new()));
+    }
+    rows[CFG_SPOOF_UPTIME] = ("Spoof uptime", uptime_val);
+    rows[CFG_USB]          = ("USB devices",  b(config.usb).to_string());
 
     // The list is split into labelled sections (Hardware / Privacy / Environment
     // sandbox settings, then wryayer's own Application settings), driven by the
@@ -1856,6 +1873,22 @@ fn draw_config(
         rows.push(("Game Exe   ", trim_path(exe)));
         rows.push(("Game Prefix", trim_path(prefix)));
     }
+
+    // CFG_SPOOF_UPTIME (22) and CFG_USB (23) store past every per-app row, so
+    // pad the gap and place them at their real indices — the render loop below
+    // addresses rows by CFG index, so otherwise they never appear in the popup.
+    let uptime_val = match config.spoof_uptime {
+        None         => " system ".to_string(),
+        Some(3600)   => " 1 hour ".to_string(),
+        Some(86400)  => " 1 day  ".to_string(),
+        Some(604800) => " 1 week ".to_string(),
+        Some(secs)   => format!(" {} ", crate::config::format_uptime(secs)),
+    };
+    while rows.len() <= CFG_USB {
+        rows.push(("", String::new()));
+    }
+    rows[CFG_SPOOF_UPTIME] = ("Spoof upt. ", uptime_val);
+    rows[CFG_USB]          = ("USB devices", b(config.usb).to_string());
 
     let has_wg = wine_game.is_some();
     let save_idx = app_cfg_save_idx(has_wg);
