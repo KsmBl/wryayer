@@ -342,30 +342,44 @@ alias dir + launcher; removing a target that still has aliases is refused
 `~/.wryayer/<app>/.snapshots/<timestamp>/` using hard links — instant and
 near-free in disk space. Rollback restores the live tree from a chosen snapshot.
 
-Snapshots survive updates because extraction **unlinks a file before
-overwriting** it: a re-extracted file gets a fresh inode while the snapshot's
-hard link keeps pointing at the old content. `update.rs` also lists
-`.snapshots` (`SNAP_DIR`) in its `PRESERVE` set so the pre-extract wipe never
-deletes them. Snapshots are excluded from `list` size totals, `dedup`, and the
-export zip (via a `.snapshots` recursion guard).
+Snapshots survive updates because an update builds a fresh tree and swaps it in
+rather than overwriting in place: re-extracted files get fresh inodes while the
+snapshot's hard links keep pointing at the old content. `update.rs` carries the
+`.snapshots` dir (`SNAP_DIR`) across the swap alongside the sandbox home and
+config. Snapshots are excluded from `list` size totals, `dedup`, and the export
+zip (via a `.snapshots` recursion guard).
 
 ---
 
 ## Update / reinstall internals
 
-`update.rs::reinstall()`:
+`update.rs::reinstall()` applies updates through a **staging tree and atomic
+swap**, so the live app is never left half-wiped even if the process is killed
+or the machine loses power mid-update:
 
 1. Re-resolves the app's full dependency tree.
 2. **Re-resolves every merged-in child** (`alias_of == app`) and folds their
-   dep trees into the set — otherwise the wipe-and-extract below would delete
-   the child binaries. Any resolve failure bails *before* the wipe, so a
-   transient error can never leave the tree missing a child.
+   dep trees into the set — otherwise the fresh tree would be missing the child
+   binaries. Any resolve failure bails *before* anything destructive, so a
+   transient error can never damage the live tree.
 3. Downloads/builds every package.
-4. Wipes the tree except `PRESERVE = [.manifest.toml, config.ini, home,
-   .snapshots]`, preserving user data and snapshots.
-5. Re-extracts, rewrites the manifest, restores base symlinks, fixes
-   permissions, re-runs the soname scan and `ldconfig`, regenerates runtime
-   caches, and runs cross-app dedup.
+4. Extracts everything into a fresh sibling staging tree `.<app>.wr-new` and
+   stamps the new manifest there — the live tree is untouched during this slow,
+   fallible work.
+5. Swaps it in with two atomic renames: the old tree is parked as
+   `.<app>.wr-old`, then the staging tree is moved into place.
+6. Carries the user data (`home`, `config.ini`, `.snapshots`) from the parked
+   old tree into the new one, then drops the old tree. `carry_over_user_data`
+   **merges** rather than skips on collision, so a package-provided empty
+   `home/` skeleton (the `filesystem` package ships one) can never shadow — and
+   then get deleted with — the real profile.
+7. Restores base symlinks, fixes permissions, re-runs the soname scan and
+   `ldconfig`, regenerates runtime caches, and runs cross-app dedup.
+
+`recover_interrupted_update()` runs at the start of every update and every
+launch: it finishes a swap that was interrupted forward, or restores the parked
+old tree if the new one never landed — so an interrupted update always heals to
+a consistent, fully-extracted tree on the next run.
 
 `check_all_updates()` returns a `name → latest_version` map for every non-alias
 app with a newer version available; the TUI runs it on a background thread at

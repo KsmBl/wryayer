@@ -395,6 +395,12 @@ wryayer export firefox --output /mnt/backup/firefox-2026.zip
 wryayer import firefox-2026.zip
 ```
 
+Exports are **portable across machines and user accounts**. The sandbox home
+lives at `home/<username>` (derived from `$HOME` at launch), so a zip exported
+as `alice` would otherwise look empty when imported into `bob`'s account.
+Import rewrites the single home directory to the importing user's name, so
+profiles and settings carry over regardless of who exported it.
+
 The export progress bar in the TUI is real — wryayer pre-counts entries, then emits `PROGRESS n/total` markers during the zip write so the gauge and ETA reflect actual work done.
 
 ### Snapshot and rollback
@@ -532,6 +538,7 @@ wryayer config firefox share list
 | `camera` | `on` `off` | `on` | Allow `/dev/video*` camera access |
 | `microphone` | `on` `off` | `on` | Mask ALSA capture devices (see caveat below) |
 | `audio` | `on` `off` | `on` | Mask ALSA + PipeWire/PulseAudio sockets |
+| `usb` | `on` `off` | `off` | Bind the removable-media roots (`/run/media`, `/media`, `/mnt`) into the sandbox so USB drives — including ones mounted after launch — are visible to the app |
 | `share add <path>` | Any existing directory | — | Bind-mount `<path>` read-write inside the sandbox |
 | `ramlimit <MiB\|none>` | Integer (MiB) or `none` | `none` | Hard cap on RAM **and** swap combined, enforced via `systemd-run --scope -p MemoryMax=NM -p MemorySwapMax=0` (requires systemd). Both limits are necessary — without `MemorySwapMax=0` the kernel silently offloads pages to swap (including zram), letting the app exceed the cap. |
 | `portal_filter` | `on` `off` | `on` | Hide the host desktop portal so in-sandbox file pickers list only your shared directories instead of the whole home tree. Turn `off` if an app needs portal features (screen-share, portal-based file open). |
@@ -654,6 +661,7 @@ Press `?` on the **installed** tab for a full key-bindings reference.
 | `spoof-cpuinfo <preset:key\|path\|custom\|system\|off>` | Preset, path, or configurator | Binds a fake `/proc/cpuinfo` **and** spoofs `CPUID` for `libcpuid`/CPU-X |
 | `spoof-os <ubuntu\|arch\|windows\|arduinoide\|name\|system\|off>` | Preset or any OS name | Writes `/etc/os-release` and `/usr/lib/os-release` |
 | `spoof-terminal <on\|off>` | `on` or `off` | Detects real terminal via process tree and sets `TERM_PROGRAM` inside sandbox |
+| `spoof-uptime <duration\|seconds\|system\|off>` | `3d4h`, `90m`, `604800`, … | Reports a fake system uptime inside the sandbox |
 
 **Sample values:**
 
