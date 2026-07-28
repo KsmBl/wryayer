@@ -20,7 +20,7 @@ use ratatui::widgets::ListState;
 use ratatui::Terminal;
 
 use crate::commands::dedup::all_du;
-use crate::config::{read_config, read_global_config, write_config, write_global_config, AppConfig, AvahiMode, Layout, LocalDelete, TempMode, Theme};
+use crate::config::{read_config, read_global_config, write_config, write_global_config, AppConfig, AvahiMode, Layout, LocalDelete, PasswordSource, TempMode, Theme};
 use crate::manifest::{list_all_apps, tree_order, Manifest};
 
 // ── Op messages ───────────────────────────────────────────────────────────────
@@ -199,6 +199,15 @@ pub enum Screen {
         /// Install args ready to pass to spawn_wryayer (without --keep-without-launcher).
         args: Vec<String>,
         selected: usize, // 0 = yes (create shortcut), 1 = no (skip)
+    },
+    /// Ask whether to install into a VeraCrypt container. Shown right after the
+    /// shortcut prompt, so both install-time choices are made up front.
+    AskEncrypt {
+        pkg: String,
+        title: String,
+        /// Install args accumulated so far, including the shortcut answer.
+        args: Vec<String>,
+        selected: usize, // see ENCRYPT_CHOICES
     },
     /// Snapshot manager: pick a snapshot to roll back to or delete.
     SnapshotManager {
@@ -455,11 +464,21 @@ pub struct App {
     /// If Some, the event loop will suspend the TUI, exec `wryayer run <app>`
     /// with inherited stdio so the user actually interacts with the app,
     /// then resume. Set by pressing `r`/Enter on an installed app.
+    /// Apps stored in a VeraCrypt container, mapped to whether that container
+    /// is currently locked. Refreshed on the same throttle as running
+    /// instances — see `refresh_running_instances`.
+    pub locked_apps: HashMap<String, bool>,
     pub run_request: Option<String>,
     /// If Some, the event loop will suspend the TUI, open an editor on the
     /// given path, save config to "custom" after, then resume.
     /// Tuple: (app_name, path_to_edit)
     pub editor_request: Option<(String, PathBuf)>,
+    /// If Some, the event loop will suspend the TUI and run `wryayer install …`
+    /// with inherited stdio, then resume. Used for installs into a VeraCrypt
+    /// container, which must be able to prompt for a container password and for
+    /// the sudo password VeraCrypt needs to mount.
+    /// Tuple: (title, install args)
+    pub inline_install_request: Option<(String, Vec<String>)>,
     // ── Easter egg ────────────────────────────────────────────────────────────
     pub konami_mode: bool,
     pub konami_state: usize,
@@ -520,7 +539,9 @@ impl App {
             log_scroll: 0,
             needs_clear: false,
             input_cursor: 0,
+            locked_apps: HashMap::new(),
             run_request: None,
+            inline_install_request: None,
             editor_request: None,
             konami_mode: false,
             konami_state: 0,
@@ -570,6 +591,10 @@ impl App {
     fn refresh_running_instances(&mut self) {
         if self.last_instance_scan.elapsed() >= Duration::from_secs(1) {
             self.running_instances = scan_running_instances();
+            // Piggy-backed on the same throttle: listing mounted volumes forks
+            // `veracrypt --list`, which must never run per-frame from the
+            // renderer. Cached here and read by draw_installed.
+            self.locked_apps = scan_locked_apps(&self.installed);
             self.last_instance_scan = Instant::now();
         }
     }
@@ -810,6 +835,9 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(
             if let Some((app_name, cpuinfo_path)) = app.editor_request.take() {
                 open_editor_inline(terminal, &app_name, cpuinfo_path, &mut app)?;
             }
+            if let Some((title, args)) = app.inline_install_request.take() {
+                run_install_inline(terminal, &title, &args, &mut app)?;
+            }
             if app.needs_clear {
                 app.needs_clear = false;
                 terminal.clear()?;
@@ -851,6 +879,82 @@ fn run_app_inline(
         }
         _ => app.status.clear(),
     }
+    Ok(())
+}
+
+/// Map every encrypted app to whether its container is currently locked.
+///
+/// Takes one `veracrypt --list` snapshot and matches mount points against it,
+/// rather than asking per app, so the cost is a single fork regardless of how
+/// many apps are installed.
+fn scan_locked_apps(installed: &[Manifest]) -> HashMap<String, bool> {
+    let mut out = HashMap::new();
+    let encrypted: Vec<&str> = installed
+        .iter()
+        .map(|m| m.app.name.as_str())
+        .filter(|n| crate::veracrypt::is_encrypted(n))
+        .collect();
+    if encrypted.is_empty() {
+        return out;
+    }
+    let mounted = crate::veracrypt::list_mounted().unwrap_or_default();
+    for name in encrypted {
+        let dir = match crate::manifest::app_dir(name) {
+            Ok(d) => d.to_string_lossy().into_owned(),
+            Err(_) => continue,
+        };
+        let is_mounted = mounted
+            .iter()
+            .any(|v| v.mount_point.as_deref() == Some(dir.as_str()));
+        out.insert(name.to_string(), !is_mounted);
+    }
+    out
+}
+
+/// Suspend the TUI and run an install on the real terminal, then resume.
+///
+/// Installs into a VeraCrypt container can't use the normal piped-subprocess
+/// path: the container password is read with echo disabled, and VeraCrypt
+/// re-execs itself under sudo to mount, which also needs a terminal. Both would
+/// deadlock against a pipe, so the whole install runs with inherited stdio and
+/// the TUI simply steps out of the way.
+fn run_install_inline(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    title: &str,
+    args: &[String],
+    app: &mut App,
+) -> Result<()> {
+    disable_raw_mode()?;
+    terminal.backend_mut().execute(LeaveAlternateScreen)?;
+    terminal.show_cursor()?;
+
+    println!("── {title} ──\n");
+    let exe = std::env::current_exe().unwrap_or_else(|_| "wryayer".into());
+    let status = Command::new(&exe).args(args).status();
+
+    // Give the user a chance to read the result (and note a generated password)
+    // before the TUI paints over it.
+    match &status {
+        Ok(s) if s.success() => println!("\nDone."),
+        Ok(s) => println!("\nFailed (exit {}).", s.code().unwrap_or(-1)),
+        Err(e) => println!("\nFailed to start: {e}"),
+    }
+    println!("Press Enter to return to wryayer.");
+    let mut line = String::new();
+    let _ = std::io::stdin().read_line(&mut line);
+
+    enable_raw_mode()?;
+    terminal.backend_mut().execute(EnterAlternateScreen)?;
+    terminal.hide_cursor()?;
+    terminal.clear()?;
+    app.needs_clear = false;
+
+    app.status = match status {
+        Ok(s) if s.success() => format!("{title} — done"),
+        Ok(s) => format!("{title} — failed (exit {})", s.code().unwrap_or(-1)),
+        Err(e) => format!("{title} — failed to start: {e}"),
+    };
+    app.reload_installed();
     Ok(())
 }
 
@@ -1009,6 +1113,7 @@ fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
         Screen::NoLauncherChoice { .. } => on_no_launcher_choice(app, code),
         Screen::OutdatedPackages { .. } => on_outdated_packages(app, code),
         Screen::AskShortcut { .. } => on_ask_shortcut(app, code),
+        Screen::AskEncrypt { .. } => on_ask_encrypt(app, code),
         Screen::GameExePick { .. } => on_game_exe_pick(app, code),
         Screen::GameNameInput { .. } => on_game_name_input(app, code),
         Screen::GameConfirm { .. } => on_game_confirm(app, code),
@@ -1958,8 +2063,40 @@ fn ask_shortcut_or_launch(app: &mut App, pkg: String, title: String, args: Vec<S
         if !app.global_config.create_shortcut {
             args.push("--keep-without-launcher".into());
         }
-        launch_op(app, title, args, None, true);
+        ask_encrypt(app, pkg, title, args);
     }
+}
+
+/// The install-time choices the encryption prompt offers, as
+/// `(label, description, extra install args)`.
+pub const ENCRYPT_CHOICES: &[(&str, &str, &[&str])] = &[
+    ("No", "install into a plain directory", &[]),
+    (
+        "Encrypt",
+        "type the container password at every launch",
+        &["--encrypt"],
+    ),
+    (
+        "Encrypt + master password",
+        "keep its password in the master store",
+        &["--encrypt", "--encrypt-master"],
+    ),
+    (
+        "Encrypt + generated password",
+        "generate a password into the master store",
+        &["--encrypt", "--encrypt-master", "--encrypt-generate"],
+    ),
+];
+
+/// Ask whether to install into a VeraCrypt container, or go straight to the
+/// install when VeraCrypt isn't available to do it with.
+fn ask_encrypt(app: &mut App, pkg: String, title: String, args: Vec<String>) {
+    if !crate::veracrypt::available() {
+        launch_op(app, title, args, None, true);
+        return;
+    }
+    app.screen = Screen::AskEncrypt { pkg, title, args, selected: 0 };
+    app.needs_clear = true;
 }
 
 fn execute_action(app: &mut App, action: PendingAction) {
@@ -2154,15 +2291,19 @@ pub const CFG_SPOOF_UPTIME: usize = 22;
 /// sits past every other row so the literal-indexed setting_* arms need no
 /// renumbering; its display position is set by SANDBOX_SECTIONS.
 pub const CFG_USB: usize = 23;
-pub const CFG_LEN: usize = 24;
+/// Where an encrypted app's container password comes from. Only shown for apps
+/// that are actually stored in a VeraCrypt container; like the two rows above,
+/// its storage index sits past every other row so nothing needs renumbering.
+pub const CFG_PASSWORD_SOURCE: usize = 24;
+pub const CFG_LEN: usize = 25;
 
-/// Index of the Save button in the per-app Config screen. Shifts down by 2 when
-/// the screen carries wine_game rows.
-pub fn app_cfg_save_idx(has_wine_game: bool) -> usize {
+/// Index of the Save button in the per-app Config screen. Shifts down as
+/// optional row groups (wine game, encryption) appear.
+pub fn app_cfg_save_idx(has_wine_game: bool, is_encrypted: bool) -> usize {
     // The Save button is drawn right after the last selectable row, so its
     // position is simply the number of navigable rows. Deriving it from
     // config_nav_order keeps it correct as rows are added or removed.
-    config_nav_order(false, has_wine_game).len()
+    config_nav_order(false, has_wine_game, is_encrypted).len()
 }
 
 /// The sandbox config rows grouped into labelled sections, in display order.
@@ -2190,9 +2331,19 @@ pub const SANDBOX_SECTIONS: &[(&str, &[usize])] = &[
 /// indices)`. `is_global` chooses the trailing block: wryayer's own behaviour on
 /// the Settings tab, or a per-app Config's bound-apps (+ optional wine-game)
 /// rows.
-pub fn config_sections(is_global: bool, has_wine_game: bool) -> Vec<(&'static str, Vec<usize>)> {
+pub fn config_sections(
+    is_global: bool,
+    has_wine_game: bool,
+    is_encrypted: bool,
+) -> Vec<(&'static str, Vec<usize>)> {
     let mut out: Vec<(&'static str, Vec<usize>)> =
         SANDBOX_SECTIONS.iter().map(|(t, idxs)| (*t, idxs.to_vec())).collect();
+    // Only meaningful for an app stored in a VeraCrypt container, so the
+    // section is absent entirely for every other app rather than shown as an
+    // inert row.
+    if !is_global && is_encrypted {
+        out.push(("Encryption", vec![CFG_PASSWORD_SOURCE]));
+    }
     if is_global {
         out.push((
             "Application settings",
@@ -2214,8 +2365,8 @@ pub fn config_sections(is_global: bool, has_wine_game: bool) -> Vec<(&'static st
 
 /// The selectable row indices in display order (Save excluded), used to step
 /// ↑/↓ through the screen in the same order it is drawn.
-pub fn config_nav_order(is_global: bool, has_wine_game: bool) -> Vec<usize> {
-    config_sections(is_global, has_wine_game)
+pub fn config_nav_order(is_global: bool, has_wine_game: bool, is_encrypted: bool) -> Vec<usize> {
+    config_sections(is_global, has_wine_game, is_encrypted)
         .into_iter()
         .flat_map(|(_, idxs)| idxs)
         .collect()
@@ -2223,18 +2374,20 @@ pub fn config_nav_order(is_global: bool, has_wine_game: bool) -> Vec<usize> {
 
 /// Step from `selected` to the previous (`-1`) or next (`+1`) row in display
 /// order, wrapping around, with the Save button (`save_idx`) as the final stop.
-pub fn config_nav_step(is_global: bool, has_wine_game: bool, save_idx: usize, selected: usize, dir: i32) -> usize {
-    let mut order = config_nav_order(is_global, has_wine_game);
+pub fn config_nav_step(
+    is_global: bool,
+    has_wine_game: bool,
+    is_encrypted: bool,
+    save_idx: usize,
+    selected: usize,
+    dir: i32,
+) -> usize {
+    let mut order = config_nav_order(is_global, has_wine_game, is_encrypted);
     order.push(save_idx);
     let pos = order.iter().position(|&i| i == selected).unwrap_or(0);
     let len = order.len();
     let next = if dir < 0 { (pos + len - 1) % len } else { (pos + 1) % len };
     order[next]
-}
-
-/// Total navigable rows in the per-app Config screen.
-pub fn app_cfg_total_rows(has_wine_game: bool) -> usize {
-    if has_wine_game { 19 } else { 17 }
 }
 
 /// A fixed 32-char hex machine-id that apps can use as a plausible-looking ID.
@@ -2248,7 +2401,11 @@ fn on_config(app: &mut App, code: KeyCode) {
     // Capture wine_game presence before mut-borrowing app.screen so the row
     // count is known without dropping the borrow.
     let has_wg = app.editing_wine_game.is_some();
-    let save_idx = app_cfg_save_idx(has_wg);
+    let is_enc = match &app.screen {
+        Screen::Config { app_name, .. } => crate::veracrypt::is_encrypted(app_name),
+        _ => false,
+    };
+    let save_idx = app_cfg_save_idx(has_wg, is_enc);
 
     let Screen::Config { app_name, config, selected } = &mut app.screen else { return };
 
@@ -2260,10 +2417,10 @@ fn on_config(app: &mut App, code: KeyCode) {
             app.needs_clear = true;
         }
         KeyCode::Up | KeyCode::Char('k') => {
-            *selected = config_nav_step(false, has_wg, save_idx, *selected, -1);
+            *selected = config_nav_step(false, has_wg, is_enc, save_idx, *selected, -1);
         }
         KeyCode::Down | KeyCode::Char('j') => {
-            *selected = config_nav_step(false, has_wg, save_idx, *selected, 1);
+            *selected = config_nav_step(false, has_wg, is_enc, save_idx, *selected, 1);
         }
         KeyCode::Right | KeyCode::Char(' ') => {
             if *selected == save_idx {
@@ -2412,6 +2569,7 @@ pub fn setting_options(idx: usize) -> Vec<&'static str> {
         CFG_RAM_LIMIT => vec!["none", "512 MB", "1 GB", "2 GB", "4 GB", "8 GB", "custom"],
         CFG_AVAHI => vec!["stub", "host", "off"],
         CFG_USB => vec!["on", "off"],
+        CFG_PASSWORD_SOURCE => vec!["prompt", "master"],
         CFG_CREATE_SHORTCUT => vec!["yes", "no"],
         CFG_CONFIRM_INSTALL | CFG_ASK_SHORTCUT | CFG_CLEAN_CACHE => vec!["on", "off"],
         CFG_THEME => vec!["default", "amber", "matrix"],
@@ -2446,6 +2604,7 @@ pub fn setting_title(idx: usize) -> &'static str {
         20 => "Layout",
         CFG_SPOOF_UPTIME => "Spoof uptime",
         CFG_USB => "USB / removable media",
+        CFG_PASSWORD_SOURCE => "Container password",
         _ => "Option",
     }
 }
@@ -2476,6 +2635,7 @@ pub fn setting_description(idx: usize) -> &'static str {
         20 => "Structural layout for the TUI (independent of Colour theme). Applies immediately.\n\n• default — horizontal tab strip on top, single-line borders\n• sidebar — vertical tab bar down the left, double-line borders, prompt-style cursor\n• bottom  — horizontal tab strip along the bottom, rounded borders, chevron cursor",
         CFG_SPOOF_UPTIME => "Report a fake system uptime inside the sandbox.\n\nFools fastfetch's 'Uptime', the uptime/w commands, and any sysinfo(2)/CLOCK_BOOTTIME reader via a /proc/uptime overlay plus an LD_PRELOAD shim. Time still advances from the fake value.\n\n• system — show the real uptime\n• 1 hour / 1 day / 1 week — fixed presets\n• custom — type a duration (3d4h, 90m) or bare seconds",
         CFG_USB => "Make USB / removable drives visible inside the sandbox.\n\nBinds the mount roots the desktop (or udisks/udevil/pmount) uses — /run/media, /media and /mnt — so drives show up in the app's file dialogs. Drives plugged in AFTER the app starts appear live, because the host mounts propagate into the sandbox.\n\n• on  — expose removable media\n• off — hide it (default; better isolation)",
+        CFG_PASSWORD_SOURCE => "Where this app's VeraCrypt container password comes from.\n\n• prompt — you type it before every launch, and the container is unmounted again when the app exits. Nothing is stored on disk.\n• master — it is read from the master password store, which you unlock once per boot. The container then stays mounted until you lock it.",
         _ => "No description available.",
     }
 }
@@ -2581,6 +2741,9 @@ pub fn option_description(setting_idx: usize, choice_idx: usize) -> &'static str
         (20, 0) => "default — Horizontal tab strip across the top with single-line panel borders.",
         (20, 1) => "sidebar — Vertical tab bar down the left edge, double-line borders and a '> ' cursor, for a terminal feel.",
         (20, 2) => "bottom — Horizontal tab strip along the bottom edge, rounded panel borders and a '» ' cursor.",
+        // Container password source
+        (CFG_PASSWORD_SOURCE, 0) => "prompt — Ask for the container password before every launch, and unmount it again when the app exits. Nothing is stored on disk.",
+        (CFG_PASSWORD_SOURCE, 1) => "master — Take the password from the master password store, unlocked once per boot. The container stays mounted until you lock it.",
         _ => "No description available.",
     }
 }
@@ -2645,6 +2808,10 @@ pub fn setting_current(config: &AppConfig, idx: usize) -> usize {
         },
         CFG_SPOOF_TERMINAL => usize::from(config.spoof_terminal),
         CFG_USB => if config.usb { 0 } else { 1 },
+        CFG_PASSWORD_SOURCE => match config.password_source {
+            PasswordSource::Prompt => 0,
+            PasswordSource::Master => 1,
+        },
         // Seconds. Exact preset -> its index; any other value -> "custom".
         CFG_SPOOF_UPTIME => match config.spoof_uptime {
             None            => 0,
@@ -2732,6 +2899,8 @@ pub fn apply_setting(config: &mut AppConfig, idx: usize, choice: usize) {
         (12, 1) => config.spoof_terminal = true,
         (CFG_USB, 0) => config.usb = true,
         (CFG_USB, 1) => config.usb = false,
+        (CFG_PASSWORD_SOURCE, 0) => config.password_source = PasswordSource::Prompt,
+        (CFG_PASSWORD_SOURCE, 1) => config.password_source = PasswordSource::Master,
         // Uptime values are seconds. "custom" (_, 4) opens a text input instead.
         (CFG_SPOOF_UPTIME, 0) => config.spoof_uptime = None,
         (CFG_SPOOF_UPTIME, 1) => config.spoof_uptime = Some(3600),   // 1 hour
@@ -3114,10 +3283,10 @@ fn on_space_tab(app: &mut App, code: KeyCode) {
 fn on_settings_tab(app: &mut App, code: KeyCode) {
     match code {
         KeyCode::Up | KeyCode::Char('k') => {
-            app.global_selected = config_nav_step(true, false, CFG_SAVE, app.global_selected, -1);
+            app.global_selected = config_nav_step(true, false, false, CFG_SAVE, app.global_selected, -1);
         }
         KeyCode::Down | KeyCode::Char('j') => {
-            app.global_selected = config_nav_step(true, false, CFG_SAVE, app.global_selected, 1);
+            app.global_selected = config_nav_step(true, false, false, CFG_SAVE, app.global_selected, 1);
         }
         KeyCode::Right | KeyCode::Char(' ') => {
             if app.global_selected == CFG_SAVE {
@@ -3523,11 +3692,43 @@ fn on_ask_shortcut(app: &mut App, code: KeyCode) {
         }
         KeyCode::Enter | KeyCode::Char(' ') => {
             let screen = std::mem::replace(&mut app.screen, Screen::Main);
-            if let Screen::AskShortcut { title, mut args, selected, .. } = screen {
+            if let Screen::AskShortcut { pkg, title, mut args, selected } = screen {
                 if selected == 1 {
                     args.push("--keep-without-launcher".into());
                 }
-                launch_op(app, title, args, None, true);
+                ask_encrypt(app, pkg, title, args);
+            }
+        }
+        _ => {}
+    }
+}
+
+// ── Container confirmation ────────────────────────────────────────────────────
+
+fn on_ask_encrypt(app: &mut App, code: KeyCode) {
+    let Screen::AskEncrypt { selected, .. } = &mut app.screen else { return };
+    if list_nav(selected, ENCRYPT_CHOICES.len(), code) {
+        return;
+    }
+    match code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            app.install_queue.clear();
+            app.screen = Screen::Main;
+            app.needs_clear = true;
+        }
+        KeyCode::Enter | KeyCode::Char(' ') => {
+            let screen = std::mem::replace(&mut app.screen, Screen::Main);
+            if let Screen::AskEncrypt { title, mut args, selected, .. } = screen {
+                let extra = ENCRYPT_CHOICES[selected].2;
+                args.extend(extra.iter().map(|s| s.to_string()));
+                if extra.is_empty() {
+                    launch_op(app, title, args, None, true);
+                } else {
+                    // Encrypted installs need a real terminal — see
+                    // run_install_inline.
+                    app.needs_clear = true;
+                    app.inline_install_request = Some((title, args));
+                }
             }
         }
         _ => {}

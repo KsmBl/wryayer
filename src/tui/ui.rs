@@ -394,6 +394,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             let selected = *selected;
             draw_ask_shortcut(f, area, &pkg, selected);
         }
+        Screen::AskEncrypt { pkg, selected, .. } => {
+            let pkg = pkg.clone();
+            let selected = *selected;
+            draw_ask_encrypt(f, area, &pkg, selected);
+        }
         Screen::SnapshotManager { app_name, snaps, selected } => {
             let app_name = app_name.clone();
             let snaps = snaps.clone();
@@ -669,6 +674,16 @@ fn draw_installed(f: &mut Frame, app: &mut App, area: Rect) {
         };
         if let Some(badge) = run_badge {
             spans.push(badge);
+        }
+        // Encrypted apps carry a padlock: filled while locked (files sealed
+        // away), outlined while unlocked (container currently mounted).
+        if let Some(&locked) = app.locked_apps.get(&m.app.name) {
+            let (glyph, colour) = if locked {
+                ("🔒", if list_active { c_accent() } else { c_dim() })
+            } else {
+                ("🔓", c_dim())
+            };
+            spans.push(Span::styled(format!(" {glyph}"), Style::default().fg(colour)));
         }
         ListItem::new(Line::from(spans))
     }).collect();
@@ -1582,7 +1597,7 @@ fn draw_settings_tab(f: &mut Frame, app: &mut App, area: Rect) {
     // visible; the separator + Save button stay pinned at the bottom.
     enum Item { Header(&'static str), Row(usize) }
     let mut items: Vec<Item> = Vec::with_capacity(rows.len() + 4);
-    for (title, idxs) in super::config_sections(true, false) {
+    for (title, idxs) in super::config_sections(true, false, false) {
         items.push(Item::Header(title));
         for idx in idxs {
             if idx < rows.len() {
@@ -1891,7 +1906,8 @@ fn draw_config(
     rows[CFG_USB]          = ("USB devices", b(config.usb).to_string());
 
     let has_wg = wine_game.is_some();
-    let save_idx = app_cfg_save_idx(has_wg);
+    let is_enc = crate::veracrypt::is_encrypted(app_name);
+    let save_idx = app_cfg_save_idx(has_wg, is_enc);
 
     // Save is pinned to the bottom so it's always reachable on small terminals.
     let save_y = inner.y + inner.height.saturating_sub(2);
@@ -1901,7 +1917,7 @@ fn draw_config(
     // tab and ↑/↓ navigation. Headers are non-selectable lines between rows.
     enum Item { Header(&'static str), Row(usize) }
     let mut items: Vec<Item> = Vec::with_capacity(rows.len() + 4);
-    for (title, idxs) in super::config_sections(false, has_wg) {
+    for (title, idxs) in super::config_sections(false, has_wg, is_enc) {
         items.push(Item::Header(title));
         for idx in idxs {
             if idx < rows.len() {
@@ -2750,6 +2766,74 @@ fn draw_ask_shortcut(f: &mut Frame, area: Rect, pkg: &str, selected: usize) {
     );
 }
 
+fn draw_ask_encrypt(f: &mut Frame, area: Rect, pkg: &str, selected: usize) {
+    use super::ENCRYPT_CHOICES;
+    let inner = popup_frame(f, area, 62, 48, "Encrypted container?", c_accent());
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        // header · choices · note · footer
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Min(0),
+            Constraint::Length(2),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("  Store ", Style::default().fg(c_dim())),
+            Span::styled(pkg, Style::default().fg(c_fg()).add_modifier(Modifier::BOLD)),
+            Span::styled(" in its own VeraCrypt container?", Style::default().fg(c_dim())),
+        ])),
+        chunks[0],
+    );
+
+    let items: Vec<ListItem> = ENCRYPT_CHOICES
+        .iter()
+        .enumerate()
+        .map(|(i, (label, desc, extra))| {
+            let is_sel = i == selected;
+            let color = if extra.is_empty() { c_dim() } else { c_green() };
+            ListItem::new(Line::from(vec![
+                Span::styled(if is_sel { " ▶ " } else { "   " }, Style::default().fg(c_accent())),
+                Span::styled(
+                    *label,
+                    Style::default()
+                        .fg(if is_sel { color } else { c_dim() })
+                        .add_modifier(if is_sel { Modifier::BOLD } else { Modifier::empty() }),
+                ),
+                Span::styled(format!("  — {desc}"), Style::default().fg(c_dim())),
+            ]))
+        })
+        .collect();
+
+    let mut list_state = ListState::default();
+    list_state.select(Some(selected));
+    let list = List::new(items).highlight_style(Style::default().bg(c_select()));
+    f.render_stateful_widget(list, chunks[1], &mut list_state);
+
+    // Encrypting drops out of the TUI, so say so before it happens.
+    let note = if selected == 0 {
+        "  The app is installed normally, in a plain directory.".to_string()
+    } else {
+        "  Runs on the terminal: VeraCrypt asks for sudo to mount.".to_string()
+    };
+    f.render_widget(
+        Paragraph::new(Span::styled(note, Style::default().fg(c_dim()))),
+        chunks[2],
+    );
+
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            " [↑↓] Navigate  [Enter] Confirm  [Esc] Cancel",
+            Style::default().fg(c_dim()),
+        )),
+        chunks[3],
+    );
+}
+
 fn draw_no_launcher_choice(f: &mut Frame, area: Rect, pkg: &str, available_bins: &[String], selected: usize) {
     let inner = popup_frame(f, area, 60, 50, &format!("'{pkg}' — no launcher binary found"), c_yellow());
 
@@ -3199,9 +3283,22 @@ mod theme_tests {
     use super::*;
     use crate::config::Theme;
 
+    /// The active theme and layout are process-wide globals, so tests that set
+    /// them must not run concurrently — otherwise one test's `set_active_*`
+    /// lands between another's set and its assertions. Every test below takes
+    /// this lock for its whole body.
+    fn palette_lock() -> std::sync::MutexGuard<'static, ()> {
+        use std::sync::Mutex;
+        static LOCK: Mutex<()> = Mutex::new(());
+        // A panicking test poisons the mutex; the state is re-pinned by each
+        // test anyway, so recovering is correct here.
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn active_theme_selects_colours_only() {
         use crate::config::Layout;
+        let _guard = palette_lock();
         // The colour theme controls colours; layout is separate, so pin it.
         set_active_layout(Layout::Default);
 
@@ -3222,6 +3319,7 @@ mod theme_tests {
     #[test]
     fn active_layout_selects_construction_only() {
         use crate::config::Layout;
+        let _guard = palette_lock();
 
         set_active_layout(Layout::Sidebar);
         assert_eq!(c_border_type(), BorderType::Double);
@@ -3241,6 +3339,7 @@ mod theme_tests {
 
     #[test]
     fn theme_and_layout_are_independent() {
+        let _guard = palette_lock();
         // Matrix colours with the default (top-bar) layout: green text, but
         // single-line borders and no sidebar.
         set_active_theme(Theme::Matrix);
