@@ -3,6 +3,7 @@ pub mod snapshot;
 pub mod clean;
 pub mod config;
 pub mod dedup;
+pub mod encrypt;
 pub mod import;
 pub mod install;
 pub mod install_game;

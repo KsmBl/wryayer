@@ -19,6 +19,7 @@ fn timestamp_label() -> String {
 
 /// Create a hard-linked snapshot of `app_name`. Returns the label used.
 pub fn create(app_name: &str) -> Result<String> {
+    crate::commands::encrypt::require_unlocked(app_name, "snapshot")?;
     read_manifest(app_name)
         .with_context(|| format!("'{app_name}' is not installed"))?;
 
@@ -45,6 +46,7 @@ pub fn create(app_name: &str) -> Result<String> {
 /// Roll `app_name` back to `snapshot` (or the latest if None).
 /// The current state is replaced by hard-linking the snapshot's files back over the app dir.
 pub fn rollback(app_name: &str, snapshot: Option<&str>) -> Result<()> {
+    crate::commands::encrypt::require_unlocked(app_name, "roll back")?;
     read_manifest(app_name)
         .with_context(|| format!("'{app_name}' is not installed"))?;
 

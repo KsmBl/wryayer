@@ -135,6 +135,49 @@ pub fn share_add(app_name: &str, raw_path: &str) -> Result<()> {
     Ok(())
 }
 
+/// Set where an encrypted app's container password comes from.
+///
+/// A dedicated function rather than another parameter on `run`: the value needs
+/// validating, and it only means anything for an app that is actually stored in
+/// a VeraCrypt container — worth saying out loud instead of silently recording a
+/// setting that will never be consulted.
+pub fn password_source(app_name: &str, value: &str) -> Result<()> {
+    read_manifest(app_name).with_context(|| format!("'{app_name}' is not installed"))?;
+    let source = match value {
+        "prompt" => crate::config::PasswordSource::Prompt,
+        "master" => crate::config::PasswordSource::Master,
+        other => bail!("unknown password source '{other}' — valid: prompt, master"),
+    };
+    if source == crate::config::PasswordSource::Master && !crate::secrets::exists() {
+        bail!(
+            "no master password store yet — create one first:\n    wryayer master init"
+        );
+    }
+
+    let mut config = read_config(app_name)?;
+    config.password_source = source;
+    write_config(app_name, &config)?;
+    eprintln!("{app_name}: password_source = {value}");
+
+    if !crate::veracrypt::is_encrypted(app_name) {
+        eprintln!(
+            "note: '{app_name}' is not stored in an encrypted container, so this has no effect \
+             yet. Encrypt it with:\n    wryayer encrypt {app_name}"
+        );
+    } else if source == crate::config::PasswordSource::Master
+        && crate::secrets::open_cached()
+            .ok()
+            .flatten()
+            .is_none_or(|s| s.get(app_name).is_none())
+    {
+        eprintln!(
+            "note: the master store has no password for '{app_name}' yet — add it with:\n    \
+             wryayer master set {app_name}"
+        );
+    }
+    Ok(())
+}
+
 pub fn share_remove(app_name: &str, raw_path: &str) -> Result<()> {
     read_manifest(app_name).with_context(|| format!("'{app_name}' is not installed"))?;
     let path = shellexpand::tilde(raw_path).into_owned();

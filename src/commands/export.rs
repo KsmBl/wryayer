@@ -11,6 +11,7 @@ use zip::CompressionMethod;
 use zip::ZipWriter;
 
 pub fn run(app_name: &str, output: Option<&PathBuf>) -> Result<()> {
+    crate::commands::encrypt::require_unlocked(app_name, "export")?;
     read_manifest(app_name)
         .with_context(|| format!("'{app_name}' is not installed"))?;
 

@@ -1,10 +1,10 @@
 use crate::launcher::remove_launcher;
-use crate::manifest::{app_dir, list_all_apps, read_manifest};
+use crate::manifest::{app_dir, list_all_apps, read_manifest_or_marker};
 use anyhow::{bail, Result};
 use std::fs;
 
 pub fn run_cascade(app_name: &str) -> Result<()> {
-    let manifest = match read_manifest(app_name) {
+    let manifest = match read_manifest_or_marker(app_name) {
         Ok(m) => m,
         Err(_) => {
             eprintln!("'{app_name}' is not installed.");
@@ -32,7 +32,7 @@ pub fn run_cascade(app_name: &str) -> Result<()> {
 }
 
 pub fn run(app_name: &str) -> Result<()> {
-    let manifest = match read_manifest(app_name) {
+    let manifest = match read_manifest_or_marker(app_name) {
         Ok(m) => m,
         Err(_) => {
             eprintln!("'{app_name}' is not installed.");
@@ -61,6 +61,25 @@ pub fn run(app_name: &str) -> Result<()> {
     for launcher in &manifest.app.launchers {
         remove_launcher(launcher)?;
         eprintln!("Removed launcher: ~/bin/{launcher}");
+    }
+
+    // An encrypted app's files are inside its container, not under the app dir.
+    // Unmount first (removing a mount point would otherwise fail, and deleting
+    // through a live mount would wipe the container's contents rather than the
+    // container), then delete the container file itself.
+    if crate::veracrypt::is_encrypted(app_name) {
+        crate::veracrypt::dismount(app_name)?;
+        let container = crate::veracrypt::container_path(app_name)?;
+        fs::remove_file(&container)
+            .map_err(|e| anyhow::anyhow!("failed to remove {}: {e}", container.display()))?;
+        eprintln!("Removed container: {}", container.display());
+
+        // Drop the stored password, if the master store held one.
+        if let Ok(Some(mut store)) = crate::secrets::open_cached() {
+            if store.remove(app_name) {
+                store.save()?;
+            }
+        }
     }
 
     let dir = app_dir(app_name)?;

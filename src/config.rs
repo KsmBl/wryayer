@@ -51,6 +51,18 @@ pub enum AvahiMode {
     Off,
 }
 
+/// Where an encrypted app's VeraCrypt container password comes from.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PasswordSource {
+    /// Ask the user to type it before every launch. Nothing is stored anywhere,
+    /// and the container is unmounted again when the app exits, so the password
+    /// is genuinely required each time.
+    Prompt,
+    /// Read it from the master password store (see [`crate::secrets`]), which is
+    /// unlocked once per boot with the master password.
+    Master,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum LocalDelete {
     /// Keep temp dir across restarts
@@ -125,6 +137,9 @@ pub struct AppConfig {
     /// <url>`, the command is forwarded out to the host and re-launched as
     /// `wryayer run firefox -- <url>` in Firefox's own container (default: none).
     pub bound_apps: Vec<String>,
+    /// Where to get the container password for an app installed into a
+    /// VeraCrypt container. Ignored for apps that aren't encrypted.
+    pub password_source: PasswordSource,
 }
 
 impl Default for AppConfig {
@@ -155,6 +170,9 @@ impl Default for AppConfig {
             layout: Layout::Default,
             portal_filter: true,
             bound_apps: Vec::new(),
+            // Prompting is the safer default: it keeps the container password
+            // out of any on-disk store until the user explicitly opts in.
+            password_source: PasswordSource::Prompt,
         }
     }
 }
@@ -259,6 +277,9 @@ fn sync_container_aliases(root_name: &str, root_config: &AppConfig) -> Result<()
         alias_cfg.ram_limit        = root_config.ram_limit;
         alias_cfg.portal_filter    = root_config.portal_filter;
         alias_cfg.bound_apps       = root_config.bound_apps.clone();
+        // Aliases live inside the root's container, so they must agree with it
+        // about how that container gets unlocked.
+        alias_cfg.password_source  = root_config.password_source;
         let alias_path = config_path(alias)?;
         fs::write(&alias_path, format_ini(&alias_cfg))
             .with_context(|| format!("failed to write {}", alias_path.display()))?;
@@ -382,6 +403,12 @@ pub fn parse_ini(content: &str) -> Result<AppConfig> {
             }
             ("portal_filter", v) => {
                 config.portal_filter = !matches!(v, "off" | "false" | "0" | "no");
+            }
+            ("password_source", v) => {
+                config.password_source = match v {
+                    "master" => PasswordSource::Master,
+                    _ => PasswordSource::Prompt,
+                };
             }
             ("bind_app", v) if !v.is_empty() => {
                 let name = v.to_owned();
@@ -646,6 +673,15 @@ pub fn format_ini(config: &AppConfig) -> String {
         s.push_str("; Maximum RAM (RAM + swap). Enforced via systemd-run MemoryMax+MemorySwapMax.\n");
         s.push_str("; Accepts a unit: KB / MB / GB (e.g. 512MB, 2GB). A bare number means MiB.\n");
         s.push_str(&format!("ram_limit = {}\n", format_ram_limit(kib)));
+    }
+    // Only meaningful for apps installed into a VeraCrypt container; written
+    // only when it differs from the default so plain apps keep a tidy config.
+    if config.password_source != PasswordSource::Prompt {
+        s.push_str("\n[encryption]\n");
+        s.push_str("; Where this app's VeraCrypt container password comes from:\n");
+        s.push_str(";   prompt = ask before every launch, store nothing\n");
+        s.push_str(";   master = read it from the master password store\n");
+        s.push_str("password_source = master\n");
     }
     if !config.bound_apps.is_empty() {
         s.push_str("\n[bind]\n");

@@ -83,6 +83,23 @@ pub fn read_manifest(app_name: &str) -> Result<Manifest> {
     toml::from_str(&content).with_context(|| format!("failed to parse manifest for {app_name}"))
 }
 
+/// Read an app's manifest, falling back to the locked-state marker when the app
+/// is encrypted and currently locked (its real manifest is inside the
+/// unmounted container).
+///
+/// The fallback manifest has an empty package list, so it is only suitable for
+/// operations that need the app's identity and launchers — listing and removal —
+/// never for anything that inspects or rewrites the installed packages.
+pub fn read_manifest_or_marker(app_name: &str) -> Result<Manifest> {
+    match read_manifest(app_name) {
+        Ok(m) => Ok(m),
+        Err(e) => match crate::veracrypt::read_marker(app_name) {
+            Some(marker) => Ok(marker.to_manifest()),
+            None => Err(e),
+        },
+    }
+}
+
 pub fn write_manifest(app_name: &str, manifest: &Manifest) -> Result<()> {
     write_manifest_to(&app_dir(app_name)?, manifest)
 }
@@ -131,14 +148,22 @@ pub fn list_all_apps() -> Result<Vec<Manifest>> {
         if app_name.starts_with('.') {
             continue;
         }
-        // A directory without a manifest file isn't an installed app yet: it's a
-        // partial install in progress (install.rs creates the app dir before it
-        // writes the manifest) or a leftover. Skip it silently — warning here
-        // spams the install log for the very app being installed. Only a
-        // manifest that exists but won't parse is a real problem worth flagging.
-        match manifest_path(&app_name) {
-            Ok(p) if !p.exists() => continue,
-            _ => {}
+        // An encrypted app that is currently locked has its container
+        // unmounted, so the directory shows only the .encrypted.toml marker and
+        // no manifest. Rebuild a listing stub from the marker so the app stays
+        // visible (and removable) instead of silently disappearing while locked.
+        let has_manifest = manifest_path(&app_name).map(|p| p.exists()).unwrap_or(false);
+        if !has_manifest {
+            if let Some(marker) = crate::veracrypt::read_marker(&app_name) {
+                manifests.push(marker.to_manifest());
+                continue;
+            }
+            // Otherwise: a partial install in progress (install.rs creates the
+            // app dir before it writes the manifest) or a leftover. Skip it
+            // silently — warning here spams the install log for the very app
+            // being installed. Only a manifest that exists but won't parse is a
+            // real problem worth flagging.
+            continue;
         }
         match read_manifest(&app_name) {
             Ok(m) => manifests.push(m),

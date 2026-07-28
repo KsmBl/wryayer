@@ -11,6 +11,17 @@ use anyhow::{bail, Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Whether (and how) to move the app into a VeraCrypt container once it is
+/// installed.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EncryptOpts {
+    pub enabled: bool,
+    /// Store the container password in the master password store.
+    pub master: bool,
+    /// Generate the container password instead of prompting for one.
+    pub generate: bool,
+}
+
 pub fn run(
     pkg_name: &str,
     app_name: Option<&str>,
@@ -18,6 +29,7 @@ pub fn run(
     into: Option<&str>,
     keep_no_launcher: bool,
     sync_db: bool,
+    encrypt: EncryptOpts,
 ) -> Result<()> {
     let result = run_inner(pkg_name, app_name, bin_names, into, keep_no_launcher, sync_db);
     // Wipe the shared download/build cache after any successful install (even a
@@ -28,7 +40,31 @@ pub fn run(
     if result.is_ok() && crate::config::read_global_config().clean_cache {
         crate::commands::clean::clean_cache();
     }
-    result
+    result?;
+
+    // Encryption runs after a fully successful install, against the finished
+    // tree: the container can then be sized from what the app actually occupies
+    // rather than from a guess made before anything was downloaded.
+    if encrypt.enabled {
+        // Merge installs add files to an existing app's tree, so the container
+        // belongs to that app, not to the alias created here.
+        let target = match into {
+            Some(into_name) => read_manifest(into_name)
+                .ok()
+                .and_then(|m| m.app.alias_of)
+                .unwrap_or_else(|| into_name.to_string()),
+            None => app_name.unwrap_or(pkg_name).to_string(),
+        };
+        if crate::veracrypt::is_encrypted(&target) {
+            // A merge into an already-encrypted app: the files landed inside the
+            // mounted container already, so there is nothing left to do.
+            eprintln!("'{target}' is already stored in an encrypted container");
+        } else {
+            crate::commands::encrypt::run(&target, encrypt.master, encrypt.generate)
+                .with_context(|| format!("installed '{pkg_name}', but encrypting it failed"))?;
+        }
+    }
+    Ok(())
 }
 
 fn run_inner(

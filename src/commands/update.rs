@@ -13,8 +13,12 @@ use std::path::{Path, PathBuf};
 
 pub fn run(app_name: Option<&str>, check_only: bool, full: bool) -> Result<()> {
     let manifests = match app_name {
-        Some(name) => vec![read_manifest(name)
-            .with_context(|| format!("'{name}' is not installed"))?],
+        Some(name) => {
+            // Naming an app explicitly is a request to update that app, so a
+            // locked container is an error rather than something to skip.
+            crate::commands::encrypt::require_unlocked(name, "update")?;
+            vec![read_manifest(name).with_context(|| format!("'{name}' is not installed"))?]
+        }
         None => list_all_apps()?,
     };
 
@@ -33,6 +37,13 @@ pub fn run(app_name: Option<&str>, check_only: bool, full: bool) -> Result<()> {
         }
 
         let name = &manifest.app.name;
+        // A locked app's tree is inaccessible and its manifest is a stub with no
+        // packages, so an update pass would compare against nothing. Skip it —
+        // updating everything else shouldn't fail because one app is locked.
+        if crate::veracrypt::is_locked(name) {
+            eprintln!("  {name}: locked — skipping (unlock it with 'wryayer unlock {name}')");
+            continue;
+        }
         // When installed with --app-name, `name` is the user's custom label and
         // the real upstream package is in `pkg_name`. Version checks must query
         // the real package, not the custom name.
