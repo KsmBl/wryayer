@@ -28,6 +28,11 @@ wryayer solves all three by extracting packages into self-contained directory tr
 
 **It is not a security sandbox.** The goal is isolation and disk-space efficiency, not hardened confinement. A determined app can still escape via `/proc`, shared IPC, or device access; `audio=off` and `network=off` raise the bar but are not guarantees.
 
+What it *does* protect is data at rest: an app can be installed into its own
+[VeraCrypt container](#encrypted-containers), which keeps its entire tree —
+filenames included — unreadable while it is locked. That is orthogonal to
+runtime confinement, and doesn't make a running app any harder to escape from.
+
 ---
 
 ## The interactive TUI
@@ -291,6 +296,9 @@ wryayer install python --app-name py312 --bin-name python3.12
 # Multiple launchers from one package (e.g. a toolkit shipping several CLIs)
 wryayer install imagemagick --bin-names convert,identify,mogrify
 
+# Install straight into its own encrypted container (see Encrypted containers)
+wryayer install signal-desktop --encrypt
+
 # Install additively into an existing app's directory — useful for plugins
 # and multi-tool bundles. The new package's files land in the target's
 # tree (sharing deps already extracted there), but the new package gets
@@ -461,6 +469,25 @@ hard link keeps pointing at the old content; the dedup pass at the end of every
 install re-establishes shared-library hard links.)
 
 Snapshots are excluded from `wryayer list` size totals, `wryayer dedup`, and the export zip.
+
+### Encrypt an app
+
+Full details in [Encrypted containers](#encrypted-containers); the commands are:
+
+```fish
+wryayer encrypt firefox                  # move it into a new container
+wryayer encrypt firefox --master --generate
+
+wryayer unlock firefox                   # mount it
+wryayer lock firefox                     # unmount it
+wryayer encryption                       # what's encrypted, what's unlocked
+wryayer decrypt firefox                  # back to a plain directory
+
+wryayer master init                      # create the master password store
+wryayer master show                      # print stored container passwords
+wryayer master lock                      # forget it until re-entered
+wryayer genpw                            # a password, without storing it
+```
 
 ### Deduplicate shared files
 
@@ -908,7 +935,11 @@ The config is stored as a human-readable INI file at `~/.wryayer/<app>/config.in
 - [x] **Rollback support** — `wryayer snapshot` + `wryayer rollback` (hard-linked, instant)
 - [x] **Install into existing app** — `wryayer install <pkg> --into <existing>` for plugins and bundles; alias gets its own first-class entry under `~/.wryayer/<pkg>/` with `alias_of` pointer
 - [x] **TUI install target picker** — choosing Install on a search result now prompts whether to start a new app or merge into an existing one
-- [x] **Per-app encryption** — install an app into its own VeraCrypt container, with the password either typed at each launch or kept in an Argon2id/AES-GCM master password store unlocked once per boot
+- [x] **Per-app encryption** — install an app into its own VeraCrypt container, mounted over its normal directory; while locked the whole tree is opaque, filenames included
+- [x] **Master password store** — one Argon2id + AES-256-GCM file holding a container password per app, unlocked once per boot (the derived key lives in `$XDG_RUNTIME_DIR`, so a reboot asks again)
+- [x] **Lock on exit** — an encrypted app's container is unmounted the moment the app closes, so its files stop being readable (`lock-on-exit off` opts out)
+- [x] **Multi-source password generator** — `wryayer genpw` mixes `/dev/urandom`, `/dev/random`, hardware temperature sensors, mouse position, RAM/scheduler/interrupt counters and the nanosecond clock through SHA-512; ~207 bits, unbiased character selection
+- [x] **Automatic container growth** — installing into an encrypted app grows its container when it would run out of room, including for packages the soname-repair pass pulls in afterwards
 - [ ] **Wayland isolation** — bind a private Wayland socket so apps can't impersonate each other
 - [x] **D-Bus portal filtering** — file pickers run in-sandbox and only show shared dirs, via an `xdg-dbus-proxy` filter that hides the host portal (`portal_filter`)
 - [x] **Package signing verification** — every downloaded package is authenticated before extraction (Arch `.pkg.tar.zst` via the pacman keyring, Fedora `.rpm` via the rpm keyring, Debian `.deb` via apt's signed repo metadata)
