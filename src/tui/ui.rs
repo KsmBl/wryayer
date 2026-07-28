@@ -399,6 +399,13 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             let selected = *selected;
             draw_ask_encrypt(f, area, &pkg, selected);
         }
+        Screen::MasterPassword { stages, idx, value, error, .. } => {
+            let stage = stages[*idx];
+            let step = (*idx + 1, stages.len());
+            let len = value.chars().count();
+            let error = error.clone();
+            draw_master_password(f, area, stage, step, len, error.as_deref());
+        }
         Screen::EncryptSecrets { stages, idx, value, error, .. } => {
             let stage = stages[*idx];
             let step = (*idx + 1, stages.len());
@@ -1590,11 +1597,22 @@ fn draw_settings_tab(f: &mut Frame, app: &mut App, area: Rect) {
         Some(604800)   => "1 week".to_string(),
         Some(secs)     => crate::config::format_uptime(secs),
     };
-    while rows.len() <= CFG_USB {
+    while rows.len() <= super::CFG_MASTER_PASSWORD {
         rows.push(("", String::new()));
     }
     rows[CFG_SPOOF_UPTIME] = ("Spoof uptime", uptime_val);
     rows[CFG_USB]          = ("USB devices",  b(config.usb).to_string());
+    // An action row: its "value" reports the store's state instead of a setting.
+    rows[super::CFG_MASTER_PASSWORD] = (
+        "Master pass",
+        if !crate::secrets::exists() {
+            "not set".to_string()
+        } else if crate::secrets::is_unlocked() {
+            "set · unlocked".to_string()
+        } else {
+            "set · locked".to_string()
+        },
+    );
 
     // The list is split into labelled sections (Hardware / Privacy / Environment
     // sandbox settings, then wryayer's own Application settings), driven by the
@@ -2842,10 +2860,6 @@ fn draw_ask_encrypt(f: &mut Frame, area: Rect, pkg: &str, selected: usize) {
 }
 
 /// Masked password entry for an encrypted install.
-///
-/// Renders the typed length as bullets rather than the characters — the TUI
-/// runs on a screen someone else may be looking at, and these are the passwords
-/// protecting the container.
 fn draw_encrypt_secrets(
     f: &mut Frame,
     area: Rect,
@@ -2855,14 +2869,57 @@ fn draw_encrypt_secrets(
     error: Option<&str>,
 ) {
     let (n, total) = step;
-    let inner = popup_frame(
+    draw_masked_prompt(
         f,
         area,
-        60,
-        40,
         &format!("Encrypted install — step {n} of {total}"),
-        c_accent(),
+        stage.prompt(),
+        stage.hint(),
+        typed_len,
+        error,
+        " [Enter] Continue  [Esc] Cancel install",
     );
+}
+
+/// Masked entry for setting or changing the master password.
+fn draw_master_password(
+    f: &mut Frame,
+    area: Rect,
+    stage: super::MasterStage,
+    step: (usize, usize),
+    typed_len: usize,
+    error: Option<&str>,
+) {
+    let (n, total) = step;
+    draw_masked_prompt(
+        f,
+        area,
+        &format!("Master password — step {n} of {total}"),
+        stage.prompt(),
+        stage.hint(),
+        typed_len,
+        error,
+        " [Enter] Continue  [Esc] Cancel",
+    );
+}
+
+/// One masked password field.
+///
+/// Renders the typed length as bullets rather than the characters — the TUI
+/// runs on a screen someone else may be looking at, and these are the passwords
+/// protecting the containers.
+#[allow(clippy::too_many_arguments)] // all of it is display text for one popup
+fn draw_masked_prompt(
+    f: &mut Frame,
+    area: Rect,
+    title: &str,
+    prompt: &str,
+    hint: &str,
+    typed_len: usize,
+    error: Option<&str>,
+    footer: &str,
+) {
+    let inner = popup_frame(f, area, 60, 40, title, c_accent());
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -2877,7 +2934,7 @@ fn draw_encrypt_secrets(
 
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            format!("  {}", stage.prompt()),
+            format!("  {prompt}"),
             Style::default().fg(c_fg()).add_modifier(Modifier::BOLD),
         ))),
         chunks[0],
@@ -2899,17 +2956,14 @@ fn draw_encrypt_secrets(
             Style::default().fg(c_red()).add_modifier(Modifier::BOLD),
         )),
         None => Line::from(Span::styled(
-            format!("  {}", stage.hint()),
+            format!("  {hint}"),
             Style::default().fg(c_dim()),
         )),
     };
     f.render_widget(Paragraph::new(note).wrap(Wrap { trim: false }), chunks[2]);
 
     f.render_widget(
-        Paragraph::new(Span::styled(
-            " [Enter] Continue  [Esc] Cancel install",
-            Style::default().fg(c_dim()),
-        )),
+        Paragraph::new(Span::styled(footer, Style::default().fg(c_dim()))),
         chunks[3],
     );
 }

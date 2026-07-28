@@ -58,7 +58,8 @@ tagged `[repo]` or `[aur]`). Press `Space` to mark several packages, then
 **Settings tab** — global defaults inherited by every newly installed app:
 network and device toggles, temp mode, identity spoofing, RAM limit, the
 install-behaviour switches (**Confirm install** / **Ask shortcut** / **Clean
-cache**), and the **TUI theme** (`default`, `amber`, or `matrix` colours) and **layout**
+cache**), the **master password** for [encrypted containers](#encrypted-containers),
+and the **TUI theme** (`default`, `amber`, or `matrix` colours) and **layout**
 (`default` top tab strip; `sidebar` — a vertical tab bar with double-line
 borders and a prompt cursor; or `bottom` — a bottom tab strip with rounded
 borders). Theme and layout are independent, so any colour combines with any
@@ -620,6 +621,12 @@ Set per app under **Encryption** in the config screen, or with
 
 One file holding one container password per app, encrypted with a single master
 password you type **once per boot**:
+
+The master password itself can be created and changed from the TUI: **Settings
+tab → Encryption → Master password**. The row shows whether a store exists and
+whether it is unlocked this boot; pressing Enter walks through the masked
+prompts (current password first, if one is already set). Everything else is on
+the command line:
 
 ```fish
 wryayer master init              # create it

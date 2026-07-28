@@ -209,6 +209,17 @@ pub enum Screen {
         args: Vec<String>,
         selected: usize, // see ENCRYPT_CHOICES
     },
+    /// Create or change the master password, from the Settings tab.
+    MasterPassword {
+        stages: Vec<MasterStage>,
+        idx: usize,
+        value: String,
+        /// The existing password, once verified — needed to re-key the store.
+        current: String,
+        /// First entry of the new password, awaiting confirmation.
+        new_first: String,
+        error: Option<String>,
+    },
     /// Collect the passwords an encrypted install needs, one masked field at a
     /// time. Each is validated as it is entered, so the install never starts
     /// with a secret that will turn out to be wrong.
@@ -1077,6 +1088,7 @@ fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
         Screen::AskShortcut { .. } => on_ask_shortcut(app, code),
         Screen::AskEncrypt { .. } => on_ask_encrypt(app, code),
         Screen::EncryptSecrets { .. } => on_encrypt_secrets(app, code),
+        Screen::MasterPassword { .. } => on_master_password(app, code),
         Screen::GameExePick { .. } => on_game_exe_pick(app, code),
         Screen::GameNameInput { .. } => on_game_name_input(app, code),
         Screen::GameConfirm { .. } => on_game_confirm(app, code),
@@ -2062,6 +2074,141 @@ fn ask_encrypt(app: &mut App, pkg: String, title: String, args: Vec<String>) {
     app.needs_clear = true;
 }
 
+/// One field of the set/change-master-password flow.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum MasterStage {
+    /// Only asked when a store already exists — proves the user may re-key it.
+    Current,
+    New,
+    Confirm,
+}
+
+impl MasterStage {
+    pub fn prompt(self) -> &'static str {
+        match self {
+            MasterStage::Current => "Current master password",
+            MasterStage::New => "New master password",
+            MasterStage::Confirm => "Repeat the new master password",
+        }
+    }
+
+    pub fn hint(self) -> &'static str {
+        match self {
+            MasterStage::Current => "Proves you may re-key the store.",
+            MasterStage::New => "You'll type this once per boot to unlock stored passwords.",
+            MasterStage::Confirm => "Must match what you just typed.",
+        }
+    }
+}
+
+/// Open the master-password flow: create the store, or change its password.
+fn open_master_password(app: &mut App) {
+    let stages = if crate::secrets::exists() {
+        vec![MasterStage::Current, MasterStage::New, MasterStage::Confirm]
+    } else {
+        vec![MasterStage::New, MasterStage::Confirm]
+    };
+    app.screen = Screen::MasterPassword {
+        stages,
+        idx: 0,
+        value: String::new(),
+        current: String::new(),
+        new_first: String::new(),
+        error: None,
+    };
+    app.input_cursor = 0;
+    app.needs_clear = true;
+}
+
+fn on_master_password(app: &mut App, code: KeyCode) {
+    match code {
+        KeyCode::Esc => {
+            app.screen = Screen::Main;
+            app.needs_clear = true;
+            return;
+        }
+        KeyCode::Char(c) => {
+            if let Screen::MasterPassword { value, .. } = &mut app.screen {
+                value.push(c);
+                app.input_cursor = value.chars().count();
+            }
+            return;
+        }
+        KeyCode::Backspace => {
+            if let Screen::MasterPassword { value, .. } = &mut app.screen {
+                value.pop();
+                app.input_cursor = value.chars().count();
+            }
+            return;
+        }
+        KeyCode::Enter => {}
+        _ => return,
+    }
+
+    let Screen::MasterPassword { stages, idx, value, current, new_first, error } = &mut app.screen
+    else {
+        return;
+    };
+    let stage = stages[*idx];
+    let entered = std::mem::take(value);
+    *error = None;
+
+    match stage {
+        MasterStage::Current => {
+            // Verify before going further, so a wrong password is caught here
+            // rather than after the user has typed a new one twice.
+            if let Err(e) = crate::secrets::open(&entered) {
+                *error = Some(format!("{e:#}"));
+                return;
+            }
+            *current = entered;
+        }
+        MasterStage::New => {
+            if entered.is_empty() {
+                *error = Some("Password must not be empty.".into());
+                return;
+            }
+            *new_first = entered;
+        }
+        MasterStage::Confirm => {
+            if entered != *new_first {
+                *error = Some("Passwords did not match — try the new password again.".into());
+                *idx -= 1;
+                new_first.clear();
+                app.input_cursor = 0;
+                return;
+            }
+            let had_store = crate::secrets::exists();
+            let result = if had_store {
+                crate::secrets::change_master(current, &entered)
+            } else {
+                crate::secrets::init(&entered)
+            };
+            match result {
+                Ok(()) => {
+                    app.screen = Screen::Main;
+                    app.needs_clear = true;
+                    app.status = if had_store {
+                        "Master password changed.".into()
+                    } else {
+                        "Master password store created — you'll be asked for it once per boot.".into()
+                    };
+                }
+                Err(e) => {
+                    *error = Some(format!("{e:#}"));
+                    *idx -= 1;
+                    new_first.clear();
+                    app.input_cursor = 0;
+                }
+            }
+            return;
+        }
+    }
+
+    *idx += 1;
+    app.input_cursor = 0;
+}
+
 /// One password an encrypted install needs before it can start.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum SecretStage {
@@ -2456,7 +2603,10 @@ pub const CFG_USB: usize = 23;
 /// that are actually stored in a VeraCrypt container; like the two rows above,
 /// its storage index sits past every other row so nothing needs renumbering.
 pub const CFG_PASSWORD_SOURCE: usize = 24;
-pub const CFG_LEN: usize = 25;
+/// Set or change the master password (global Settings only). An action row —
+/// it opens a masked prompt rather than cycling through values.
+pub const CFG_MASTER_PASSWORD: usize = 25;
+pub const CFG_LEN: usize = 26;
 
 /// Index of the Save button in the per-app Config screen. Shifts down as
 /// optional row groups (wine game, encryption) appear.
@@ -2513,6 +2663,13 @@ pub fn config_sections(
                 CFG_CLEAN_CACHE, CFG_THEME, CFG_LAYOUT,
             ],
         ));
+        // The master password store is global by nature — one store covers every
+        // encrypted app — so it belongs here rather than in a per-app config.
+        // Only offered when VeraCrypt is present, since without it no app can be
+        // encrypted and the store would have nothing to protect.
+        if crate::veracrypt::available() {
+            out.push(("Encryption", vec![CFG_MASTER_PASSWORD]));
+        }
     } else {
         let mut rows = vec![CFG_BOUND];
         if has_wine_game {
@@ -2766,6 +2923,7 @@ pub fn setting_title(idx: usize) -> &'static str {
         CFG_SPOOF_UPTIME => "Spoof uptime",
         CFG_USB => "USB / removable media",
         CFG_PASSWORD_SOURCE => "Container password",
+        CFG_MASTER_PASSWORD => "Master password",
         _ => "Option",
     }
 }
@@ -2796,6 +2954,7 @@ pub fn setting_description(idx: usize) -> &'static str {
         20 => "Structural layout for the TUI (independent of Colour theme). Applies immediately.\n\n• default — horizontal tab strip on top, single-line borders\n• sidebar — vertical tab bar down the left, double-line borders, prompt-style cursor\n• bottom  — horizontal tab strip along the bottom, rounded borders, chevron cursor",
         CFG_SPOOF_UPTIME => "Report a fake system uptime inside the sandbox.\n\nFools fastfetch's 'Uptime', the uptime/w commands, and any sysinfo(2)/CLOCK_BOOTTIME reader via a /proc/uptime overlay plus an LD_PRELOAD shim. Time still advances from the fake value.\n\n• system — show the real uptime\n• 1 hour / 1 day / 1 week — fixed presets\n• custom — type a duration (3d4h, 90m) or bare seconds",
         CFG_USB => "Make USB / removable drives visible inside the sandbox.\n\nBinds the mount roots the desktop (or udisks/udevil/pmount) uses — /run/media, /media and /mnt — so drives show up in the app's file dialogs. Drives plugged in AFTER the app starts appear live, because the host mounts propagate into the sandbox.\n\n• on  — expose removable media\n• off — hide it (default; better isolation)",
+        CFG_MASTER_PASSWORD => "The one password that protects every stored container password.\n\nApps set to 'master' keep their container password in an encrypted store (~/.wryayer/.passwords.vault, Argon2id + AES-256-GCM). You type this master password once per boot; after that those apps unlock without prompting.\n\nPress Enter to create it, or to change it if it already exists. Changing it re-encrypts the store — the passwords inside are unaffected, so your containers keep working.",
         CFG_PASSWORD_SOURCE => "Where this app's VeraCrypt container password comes from.\n\n• prompt — you type it before every launch, and the container is unmounted again when the app exits. Nothing is stored on disk.\n• master — it is read from the master password store, which you unlock once per boot. The container then stays mounted until you lock it.",
         _ => "No description available.",
     }
@@ -3463,10 +3622,16 @@ fn on_settings_tab(app: &mut App, code: KeyCode) {
                 open_shared_dirs_global(app);
                 return;
             }
+            if app.global_selected == CFG_MASTER_PASSWORD {
+                open_master_password(app);
+                return;
+            }
             cycle_setting(&mut app.global_config, app.global_selected, 1);
         }
         KeyCode::Left
-            if app.global_selected != CFG_SAVE && app.global_selected != CFG_SHARES => {
+            if app.global_selected != CFG_SAVE
+                && app.global_selected != CFG_SHARES
+                && app.global_selected != CFG_MASTER_PASSWORD => {
                 cycle_setting(&mut app.global_config, app.global_selected, -1);
             }
         KeyCode::Enter => {
@@ -3481,6 +3646,10 @@ fn on_settings_tab(app: &mut App, code: KeyCode) {
             }
             if app.global_selected == CFG_SHARES {
                 open_shared_dirs_global(app);
+                return;
+            }
+            if app.global_selected == CFG_MASTER_PASSWORD {
+                open_master_password(app);
                 return;
             }
             let idx = app.global_selected;
