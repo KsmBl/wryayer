@@ -200,6 +200,7 @@ fn round_trip_all_non_default_values() {
         avahi:               AvahiMode::Host,
         bound_apps:          vec!["firefox".to_string(), "thunderbird".to_string()],
         password_source:     PasswordSource::Master,
+        lock_on_exit:        false,
     };
     let parsed = parse_ini(&format_ini(&original)).unwrap();
     assert_eq!(parsed.temp_mode,   TempMode::Ramdisk);
@@ -215,6 +216,7 @@ fn round_trip_all_non_default_values() {
     assert!(parsed.clean_cache);
     assert_eq!(parsed.theme, Theme::Amber);
     assert_eq!(parsed.password_source, PasswordSource::Master);
+    assert!(!parsed.lock_on_exit);
     assert_eq!(parsed.layout, Layout::Sidebar);
     assert!(!parsed.portal_filter);
     assert_eq!(parsed.bound_apps, vec!["firefox", "thunderbird"]);

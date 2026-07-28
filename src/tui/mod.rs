@@ -209,6 +209,16 @@ pub enum Screen {
         args: Vec<String>,
         selected: usize, // see ENCRYPT_CHOICES
     },
+    /// Reveal the container passwords held in the master store.
+    ///
+    /// `entries` is None until the store has been opened — while locked the
+    /// screen is a masked master-password prompt instead.
+    RevealPasswords {
+        entries: Option<Vec<(String, String)>>,
+        value: String,
+        selected: usize,
+        error: Option<String>,
+    },
     /// Create or change the master password, from the Settings tab.
     MasterPassword {
         stages: Vec<MasterStage>,
@@ -226,6 +236,11 @@ pub enum Screen {
     EncryptSecrets {
         title: String,
         args: Vec<String>,
+        /// When false the collected secrets are not handed to the child at all
+        /// — the point was the side effect of caching sudo credentials, so a
+        /// container operation inside the child never has to prompt on a
+        /// terminal the TUI is busy repainting.
+        pass_to_child: bool,
         /// Remaining fields to ask for, in order.
         stages: Vec<SecretStage>,
         idx: usize,
@@ -1094,6 +1109,7 @@ fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
         Screen::AskEncrypt { .. } => on_ask_encrypt(app, code),
         Screen::EncryptSecrets { .. } => on_encrypt_secrets(app, code),
         Screen::MasterPassword { .. } => on_master_password(app, code),
+        Screen::RevealPasswords { .. } => on_reveal_passwords(app, code),
         Screen::GameExePick { .. } => on_game_exe_pick(app, code),
         Screen::GameNameInput { .. } => on_game_name_input(app, code),
         Screen::GameConfirm { .. } => on_game_confirm(app, code),
@@ -2124,6 +2140,7 @@ fn begin_merge_into_encrypted(app: &mut App, title: String, args: Vec<String>, r
     app.screen = Screen::EncryptSecrets {
         title,
         args,
+        pass_to_child: true,
         stages,
         idx: 0,
         value: String::new(),
@@ -2181,6 +2198,86 @@ fn open_master_password(app: &mut App) {
     };
     app.input_cursor = 0;
     app.needs_clear = true;
+}
+
+/// Open the stored-password viewer, skipping the prompt when the store is
+/// already unlocked for this boot.
+fn open_reveal_passwords(app: &mut App) {
+    let entries = crate::secrets::open_cached()
+        .ok()
+        .flatten()
+        .map(|store| {
+            store
+                .apps()
+                .into_iter()
+                .map(|a| {
+                    let pw = store.get(&a).unwrap_or_default().to_string();
+                    (a, pw)
+                })
+                .collect::<Vec<_>>()
+        });
+    app.screen = Screen::RevealPasswords { entries, value: String::new(), selected: 0, error: None };
+    app.input_cursor = 0;
+    app.needs_clear = true;
+}
+
+fn on_reveal_passwords(app: &mut App, code: KeyCode) {
+    let Screen::RevealPasswords { entries, value, selected, error } = &mut app.screen else {
+        return;
+    };
+
+    // Already unlocked: this is just a list to scroll and close.
+    if let Some(list) = entries {
+        match code {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => {
+                app.screen = Screen::Main;
+                app.needs_clear = true;
+            }
+            KeyCode::Up | KeyCode::Char('k') => *selected = selected.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') if *selected + 1 < list.len() => {
+                *selected += 1;
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    // Still locked: collect the master password.
+    match code {
+        KeyCode::Esc => {
+            app.screen = Screen::Main;
+            app.needs_clear = true;
+        }
+        KeyCode::Char(c) => {
+            value.push(c);
+            app.input_cursor = value.chars().count();
+        }
+        KeyCode::Backspace => {
+            value.pop();
+            app.input_cursor = value.chars().count();
+        }
+        KeyCode::Enter => {
+            let entered = std::mem::take(value);
+            match crate::secrets::open(&entered) {
+                Ok(store) => {
+                    *entries = Some(
+                        store
+                            .apps()
+                            .into_iter()
+                            .map(|a| {
+                                let pw = store.get(&a).unwrap_or_default().to_string();
+                                (a, pw)
+                            })
+                            .collect(),
+                    );
+                    *error = None;
+                }
+                Err(e) => *error = Some(format!("{e:#}")),
+            }
+            app.input_cursor = 0;
+        }
+        _ => {}
+    }
 }
 
 fn on_master_password(app: &mut App, code: KeyCode) {
@@ -2351,7 +2448,36 @@ fn begin_encrypted_install(app: &mut App, title: String, args: Vec<String>, use_
     app.screen = Screen::EncryptSecrets {
         title,
         args,
+        pass_to_child: true,
         stages,
+        idx: 0,
+        value: String::new(),
+        first_entry: String::new(),
+        sudo: String::new(),
+        master: String::new(),
+        container: String::new(),
+        error: None,
+    };
+    app.input_cursor = 0;
+    app.needs_clear = true;
+}
+
+/// Run `args` as a normal operation, first caching sudo credentials if the
+/// operation will need root and doesn't have them.
+///
+/// Without this a container unmount inside the child makes `sudo` prompt on the
+/// shared terminal, where the TUI's animated progress bar immediately paints
+/// over it — leaving an invisible prompt the operation silently hangs on.
+fn launch_op_with_sudo(app: &mut App, title: String, args: Vec<String>) {
+    if crate::veracrypt::sudo_is_primed() {
+        launch_op(app, title, args, None, true);
+        return;
+    }
+    app.screen = Screen::EncryptSecrets {
+        title,
+        args,
+        pass_to_child: false,
+        stages: vec![SecretStage::Sudo],
         idx: 0,
         value: String::new(),
         first_entry: String::new(),
@@ -2482,8 +2608,14 @@ fn on_encrypt_secrets(app: &mut App, code: KeyCode) {
 
     // All collected — hand off to the normal operation runner.
     let screen = std::mem::replace(&mut app.screen, Screen::Main);
-    if let Screen::EncryptSecrets { title, args, sudo, master, container, .. } = screen {
-        launch_encrypted_install(app, title, args, &sudo, &master, &container);
+    if let Screen::EncryptSecrets { title, args, pass_to_child, sudo, master, container, .. } = screen
+    {
+        if pass_to_child {
+            launch_encrypted_install(app, title, args, &sudo, &master, &container);
+        } else {
+            // sudo is primed now; the operation needs nothing else.
+            launch_op(app, title, args, None, true);
+        }
     }
 }
 
@@ -2502,8 +2634,17 @@ fn execute_action(app: &mut App, action: PendingAction) {
                 danger: true,
             };
         }
-        PendingAction::ConfirmedRemove(name) =>
-            launch_op(app, format!("Remove — {name}"), vec!["remove".into(), name], None, true),
+        PendingAction::ConfirmedRemove(name) => {
+            // Removing an encrypted app unmounts and deletes its container,
+            // which needs root.
+            let title = format!("Remove — {name}");
+            let args = vec!["remove".into(), name.clone()];
+            if crate::veracrypt::is_encrypted(&name) {
+                launch_op_with_sudo(app, title, args);
+            } else {
+                launch_op(app, title, args, None, true);
+            }
+        }
         PendingAction::RemoveCascade(name, aliases) => {
             let alias_list = aliases.join(", ");
             app.screen = Screen::Confirm {
@@ -2518,8 +2659,15 @@ fn execute_action(app: &mut App, action: PendingAction) {
                 danger: true,
             };
         }
-        PendingAction::ConfirmedRemoveCascade(name) =>
-            launch_op(app, format!("Remove — {name}"), vec!["remove".into(), "--cascade".into(), name], None, true),
+        PendingAction::ConfirmedRemoveCascade(name) => {
+            let title = format!("Remove — {name}");
+            let args = vec!["remove".into(), "--cascade".into(), name.clone()];
+            if crate::veracrypt::is_encrypted(&name) {
+                launch_op_with_sudo(app, title, args);
+            } else {
+                launch_op(app, title, args, None, true);
+            }
+        }
         PendingAction::Update(name) =>
             launch_op(app, format!("Update — {name}"), vec!["update".into(), name], None, true),
         PendingAction::UpdateAll =>
@@ -2704,7 +2852,13 @@ pub const CFG_PASSWORD_SOURCE: usize = 24;
 /// Set or change the master password (global Settings only). An action row —
 /// it opens a masked prompt rather than cycling through values.
 pub const CFG_MASTER_PASSWORD: usize = 25;
-pub const CFG_LEN: usize = 26;
+/// Unmount an encrypted app's container when it exits (per-app).
+pub const CFG_LOCK_ON_EXIT: usize = 26;
+/// Reveal the container passwords held in the master store (global, action).
+pub const CFG_MASTER_SHOW: usize = 27;
+/// Forget the cached master key so it must be typed again (global, action).
+pub const CFG_MASTER_FORGET: usize = 28;
+pub const CFG_LEN: usize = 29;
 
 /// Index of the Save button in the per-app Config screen. Shifts down as
 /// optional row groups (wine game, encryption) appear.
@@ -2751,7 +2905,7 @@ pub fn config_sections(
     // section is absent entirely for every other app rather than shown as an
     // inert row.
     if !is_global && is_encrypted {
-        out.push(("Encryption", vec![CFG_PASSWORD_SOURCE]));
+        out.push(("Encryption", vec![CFG_PASSWORD_SOURCE, CFG_LOCK_ON_EXIT]));
     }
     if is_global {
         out.push((
@@ -2766,7 +2920,13 @@ pub fn config_sections(
         // Only offered when VeraCrypt is present, since without it no app can be
         // encrypted and the store would have nothing to protect.
         if crate::veracrypt::available() {
-            out.push(("Encryption", vec![CFG_MASTER_PASSWORD]));
+            let mut rows = vec![CFG_MASTER_PASSWORD];
+            // Only meaningful once a store exists to reveal or lock.
+            if crate::secrets::exists() {
+                rows.push(CFG_MASTER_SHOW);
+                rows.push(CFG_MASTER_FORGET);
+            }
+            out.push(("Encryption", rows));
         }
     } else {
         let mut rows = vec![CFG_BOUND];
@@ -2986,6 +3146,7 @@ pub fn setting_options(idx: usize) -> Vec<&'static str> {
         CFG_AVAHI => vec!["stub", "host", "off"],
         CFG_USB => vec!["on", "off"],
         CFG_PASSWORD_SOURCE => vec!["prompt", "master"],
+        CFG_LOCK_ON_EXIT => vec!["on", "off"],
         CFG_CREATE_SHORTCUT => vec!["yes", "no"],
         CFG_CONFIRM_INSTALL | CFG_ASK_SHORTCUT | CFG_CLEAN_CACHE => vec!["on", "off"],
         CFG_THEME => vec!["default", "amber", "matrix"],
@@ -3022,6 +3183,9 @@ pub fn setting_title(idx: usize) -> &'static str {
         CFG_USB => "USB / removable media",
         CFG_PASSWORD_SOURCE => "Container password",
         CFG_MASTER_PASSWORD => "Master password",
+        CFG_MASTER_SHOW => "Stored passwords",
+        CFG_MASTER_FORGET => "Forget master password",
+        CFG_LOCK_ON_EXIT => "Lock on exit",
         _ => "Option",
     }
 }
@@ -3053,6 +3217,9 @@ pub fn setting_description(idx: usize) -> &'static str {
         CFG_SPOOF_UPTIME => "Report a fake system uptime inside the sandbox.\n\nFools fastfetch's 'Uptime', the uptime/w commands, and any sysinfo(2)/CLOCK_BOOTTIME reader via a /proc/uptime overlay plus an LD_PRELOAD shim. Time still advances from the fake value.\n\n• system — show the real uptime\n• 1 hour / 1 day / 1 week — fixed presets\n• custom — type a duration (3d4h, 90m) or bare seconds",
         CFG_USB => "Make USB / removable drives visible inside the sandbox.\n\nBinds the mount roots the desktop (or udisks/udevil/pmount) uses — /run/media, /media and /mnt — so drives show up in the app's file dialogs. Drives plugged in AFTER the app starts appear live, because the host mounts propagate into the sandbox.\n\n• on  — expose removable media\n• off — hide it (default; better isolation)",
         CFG_MASTER_PASSWORD => "The one password that protects every stored container password.\n\nApps set to 'master' keep their container password in an encrypted store (~/.wryayer/.passwords.vault, Argon2id + AES-256-GCM). You type this master password once per boot; after that those apps unlock without prompting.\n\nPress Enter to create it, or to change it if it already exists. Changing it re-encrypts the store — the passwords inside are unaffected, so your containers keep working.",
+        CFG_LOCK_ON_EXIT => "Unmount this app's container when the app exits.\n\n• on  — the files become unreadable again the moment you close the app (default). Each launch mounts the container, which needs sudo.\n• off — leave it mounted until you lock it by hand. No sudo prompt per launch, but the files stay readable for the rest of the session.",
+        CFG_MASTER_SHOW => "Show the container passwords held in the master store.\n\nThe only way to read a password that was generated rather than typed — those are never printed when they're created. Needs the master password if the store isn't already unlocked this boot.",
+        CFG_MASTER_FORGET => "Forget the master key cached for this boot.\n\nThe store itself is untouched; only the cached key in $XDG_RUNTIME_DIR is dropped, so the next app needing a stored password asks for the master password again. Same as 'wryayer master lock'.",
         CFG_PASSWORD_SOURCE => "Where this app's VeraCrypt container password comes from.\n\n• prompt — you type it before every launch, and the container is unmounted again when the app exits. Nothing is stored on disk.\n• master — it is read from the master password store, which you unlock once per boot. The container then stays mounted until you lock it.",
         _ => "No description available.",
     }
@@ -3161,7 +3328,10 @@ pub fn option_description(setting_idx: usize, choice_idx: usize) -> &'static str
         (20, 2) => "bottom — Horizontal tab strip along the bottom edge, rounded panel borders and a '» ' cursor.",
         // Container password source
         (CFG_PASSWORD_SOURCE, 0) => "prompt — Ask for the container password before every launch, and unmount it again when the app exits. Nothing is stored on disk.",
-        (CFG_PASSWORD_SOURCE, 1) => "master — Take the password from the master password store, unlocked once per boot. The container stays mounted until you lock it.",
+        (CFG_PASSWORD_SOURCE, 1) => "master — Take the password from the master password store, unlocked once per boot.",
+        // Lock on exit
+        (CFG_LOCK_ON_EXIT, 0) => "on — Unmount the container as soon as the app exits, so its files stop being readable (default).",
+        (CFG_LOCK_ON_EXIT, 1) => "off — Leave the container mounted after the app exits. Avoids a sudo prompt per launch; the files stay readable until locked.",
         _ => "No description available.",
     }
 }
@@ -3230,6 +3400,7 @@ pub fn setting_current(config: &AppConfig, idx: usize) -> usize {
             PasswordSource::Prompt => 0,
             PasswordSource::Master => 1,
         },
+        CFG_LOCK_ON_EXIT => usize::from(!config.lock_on_exit),
         // Seconds. Exact preset -> its index; any other value -> "custom".
         CFG_SPOOF_UPTIME => match config.spoof_uptime {
             None            => 0,
@@ -3319,6 +3490,8 @@ pub fn apply_setting(config: &mut AppConfig, idx: usize, choice: usize) {
         (CFG_USB, 1) => config.usb = false,
         (CFG_PASSWORD_SOURCE, 0) => config.password_source = PasswordSource::Prompt,
         (CFG_PASSWORD_SOURCE, 1) => config.password_source = PasswordSource::Master,
+        (CFG_LOCK_ON_EXIT, 0) => config.lock_on_exit = true,
+        (CFG_LOCK_ON_EXIT, 1) => config.lock_on_exit = false,
         // Uptime values are seconds. "custom" (_, 4) opens a text input instead.
         (CFG_SPOOF_UPTIME, 0) => config.spoof_uptime = None,
         (CFG_SPOOF_UPTIME, 1) => config.spoof_uptime = Some(3600),   // 1 hour
@@ -3698,6 +3871,27 @@ fn on_space_tab(app: &mut App, code: KeyCode) {
 
 // ── Settings tab (global defaults) ───────────────────────────────────────────
 
+/// Master-store rows are actions, not values — they must never be cycled.
+fn is_master_action(idx: usize) -> bool {
+    matches!(idx, CFG_MASTER_PASSWORD | CFG_MASTER_SHOW | CFG_MASTER_FORGET)
+}
+
+/// Run the action for a master-store row. Returns whether it handled `idx`.
+fn handle_master_action(app: &mut App, idx: usize) -> bool {
+    match idx {
+        CFG_MASTER_PASSWORD => open_master_password(app),
+        CFG_MASTER_SHOW => open_reveal_passwords(app),
+        CFG_MASTER_FORGET => {
+            app.status = match crate::secrets::lock() {
+                Ok(()) => "Master password forgotten — it will be asked for again.".into(),
+                Err(e) => format!("error: {e:#}"),
+            };
+        }
+        _ => return false,
+    }
+    true
+}
+
 fn on_settings_tab(app: &mut App, code: KeyCode) {
     match code {
         KeyCode::Up | KeyCode::Char('k') => {
@@ -3720,8 +3914,7 @@ fn on_settings_tab(app: &mut App, code: KeyCode) {
                 open_shared_dirs_global(app);
                 return;
             }
-            if app.global_selected == CFG_MASTER_PASSWORD {
-                open_master_password(app);
+            if handle_master_action(app, app.global_selected) {
                 return;
             }
             cycle_setting(&mut app.global_config, app.global_selected, 1);
@@ -3729,7 +3922,7 @@ fn on_settings_tab(app: &mut App, code: KeyCode) {
         KeyCode::Left
             if app.global_selected != CFG_SAVE
                 && app.global_selected != CFG_SHARES
-                && app.global_selected != CFG_MASTER_PASSWORD => {
+                && !is_master_action(app.global_selected) => {
                 cycle_setting(&mut app.global_config, app.global_selected, -1);
             }
         KeyCode::Enter => {
@@ -3746,8 +3939,7 @@ fn on_settings_tab(app: &mut App, code: KeyCode) {
                 open_shared_dirs_global(app);
                 return;
             }
-            if app.global_selected == CFG_MASTER_PASSWORD {
-                open_master_password(app);
+            if handle_master_action(app, app.global_selected) {
                 return;
             }
             let idx = app.global_selected;

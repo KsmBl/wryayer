@@ -566,6 +566,7 @@ wryayer config firefox share list
 | `portal_filter` | `on` `off` | `on` | Hide the host desktop portal so in-sandbox file pickers list only your shared directories instead of the whole home tree. Turn `off` if an app needs portal features (screen-share, portal-based file open). |
 | `bind_app <name>` | Another installed app | — | Let this app open links/files in `<name>`'s sandbox (see below) |
 | `password_source` | `prompt` `master` | `prompt` | Only for apps in a VeraCrypt container: where the container password comes from (see [Encrypted containers](#encrypted-containers)) |
+| `lock-on-exit` | `on` `off` | `on` | Unmount an encrypted app's container when the app exits. `off` keeps it mounted until locked by hand — no sudo prompt per launch, but the files stay readable |
 
 ## Encrypted containers
 
@@ -629,25 +630,39 @@ Set per app under **Encryption** in the config screen, or with
 
 | `password_source` | Behaviour |
 |---|---|
-| `prompt` (default) | You type the container password before every launch, and it is **unmounted again when the app exits** — so it really is required each time. Nothing is stored on disk. |
-| `master` | The password is read from the master password store. The container stays mounted until you `wryayer lock` it. |
+| `prompt` (default) | You type the container password before every launch. Nothing is stored on disk. |
+| `master` | The password is read from the master password store, so launches don't prompt. |
+
+Either way the container is **unmounted when the app exits**, so its files stop
+being readable the moment you close it. That costs a sudo prompt per launch;
+`wryayer config <app> lock-on-exit off` trades it back for staying mounted until
+you `wryayer lock` it.
 
 ### The master password store
 
 One file holding one container password per app, encrypted with a single master
 password you type **once per boot**:
 
-The master password itself can be created and changed from the TUI: **Settings
-tab → Encryption → Master password**. The row shows whether a store exists and
-whether it is unlocked this boot; pressing Enter walks through the masked
-prompts (current password first, if one is already set). Everything else is on
-the command line:
+The TUI has all of this under **Settings tab → Encryption**:
+
+| Row | What it does |
+|---|---|
+| **Master password** | Create it, or change it (asks for the current one first) |
+| **Stored passwords** | Show the container passwords held in the store |
+| **Forget master password** | Drop the cached key so it's asked for again |
+
+`wryayer master show` is worth knowing about: a **generated** password is never
+printed when it is created, so this is the only way to read one — to put it in a
+password manager, or to open the container with the VeraCrypt GUI directly.
+Everything is also available on the command line:
 
 ```fish
 wryayer master init              # create it
 wryayer master set firefox       # type a password for an app
 wryayer master set firefox --generate
 wryayer master list              # which apps have a stored password
+wryayer master show              # print every stored password
+wryayer master show firefox      # print just this one
 wryayer master forget firefox
 wryayer master change            # change the master password
 wryayer master lock              # require the master password again now

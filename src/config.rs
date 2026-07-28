@@ -140,6 +140,10 @@ pub struct AppConfig {
     /// Where to get the container password for an app installed into a
     /// VeraCrypt container. Ignored for apps that aren't encrypted.
     pub password_source: PasswordSource,
+    /// Unmount an encrypted app's container when the app exits (default: true).
+    /// Turning this off keeps it mounted until locked explicitly, which avoids
+    /// a sudo prompt on every launch at the cost of leaving the files readable.
+    pub lock_on_exit: bool,
 }
 
 impl Default for AppConfig {
@@ -173,6 +177,10 @@ impl Default for AppConfig {
             // Prompting is the safer default: it keeps the container password
             // out of any on-disk store until the user explicitly opts in.
             password_source: PasswordSource::Prompt,
+            // Locking on exit is the point of a per-app container: leaving it
+            // mounted after the app closes means the files stay exposed for the
+            // rest of the session.
+            lock_on_exit: true,
         }
     }
 }
@@ -289,6 +297,7 @@ fn sync_container_aliases(root_name: &str, root_config: &AppConfig) -> Result<()
         // Aliases live inside the root's container, so they must agree with it
         // about how that container gets unlocked.
         alias_cfg.password_source  = root_config.password_source;
+        alias_cfg.lock_on_exit     = root_config.lock_on_exit;
         let alias_path = config_path(alias)?;
         fs::write(&alias_path, format_ini(&alias_cfg))
             .with_context(|| format!("failed to write {}", alias_path.display()))?;
@@ -412,6 +421,9 @@ pub fn parse_ini(content: &str) -> Result<AppConfig> {
             }
             ("portal_filter", v) => {
                 config.portal_filter = !matches!(v, "off" | "false" | "0" | "no");
+            }
+            ("lock_on_exit", v) => {
+                config.lock_on_exit = !matches!(v, "off" | "false" | "0" | "no");
             }
             ("password_source", v) => {
                 config.password_source = match v {
@@ -685,12 +697,19 @@ pub fn format_ini(config: &AppConfig) -> String {
     }
     // Only meaningful for apps installed into a VeraCrypt container; written
     // only when it differs from the default so plain apps keep a tidy config.
-    if config.password_source != PasswordSource::Prompt {
+    if config.password_source != PasswordSource::Prompt || !config.lock_on_exit {
         s.push_str("\n[encryption]\n");
-        s.push_str("; Where this app's VeraCrypt container password comes from:\n");
-        s.push_str(";   prompt = ask before every launch, store nothing\n");
-        s.push_str(";   master = read it from the master password store\n");
-        s.push_str("password_source = master\n");
+        if config.password_source != PasswordSource::Prompt {
+            s.push_str("; Where this app's VeraCrypt container password comes from:\n");
+            s.push_str(";   prompt = ask before every launch, store nothing\n");
+            s.push_str(";   master = read it from the master password store\n");
+            s.push_str("password_source = master\n");
+        }
+        if !config.lock_on_exit {
+            s.push_str("; Keep the container mounted after the app exits. Avoids a sudo\n");
+            s.push_str("; prompt per launch, but leaves the files readable until locked.\n");
+            s.push_str("lock_on_exit = off\n");
+        }
     }
     if !config.bound_apps.is_empty() {
         s.push_str("\n[bind]\n");

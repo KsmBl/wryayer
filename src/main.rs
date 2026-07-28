@@ -262,6 +262,11 @@ enum MasterAction {
         #[arg(long)]
         generate: bool,
     },
+    /// Print stored container passwords (including generated ones)
+    Show {
+        /// The app to show; omit to list every stored password
+        app_name: Option<String>,
+    },
     /// Remove an app's stored password
     Forget {
         /// The app name as shown by `wryayer list`
@@ -349,6 +354,11 @@ enum ConfigSetting {
     /// Report a fake system uptime (fools fastfetch, uptime/w, sysinfo readers)
     SpoofUptime {
         /// Duration like 3d4h / 90m, bare seconds, or "system" to disable
+        value: String,
+    },
+    /// Unmount an encrypted app's container when the app exits
+    LockOnExit {
+        /// on = unmount when the app closes (default), off = stay mounted
         value: String,
     },
     /// Where an encrypted app's container password comes from
@@ -440,6 +450,9 @@ fn main() {
             Some(ConfigSetting::Usb { enabled }) => {
                 commands::config::run(&app_name, None, None, None, None, None, None, Some(&enabled), None, None, None, None, None, None, None, None)
             }
+            Some(ConfigSetting::LockOnExit { value }) => {
+                commands::config::lock_on_exit(&app_name, &value)
+            }
             Some(ConfigSetting::PasswordSource { value }) => {
                 commands::config::password_source(&app_name, &value)
             }
@@ -509,6 +522,9 @@ fn main() {
             MasterAction::List => commands::encrypt::master_list(),
             MasterAction::Set { app_name, generate } => {
                 commands::encrypt::master_set(&app_name, generate)
+            }
+            MasterAction::Show { app_name } => {
+                commands::encrypt::master_show(app_name.as_deref())
             }
             MasterAction::Forget { app_name } => commands::encrypt::master_forget(&app_name),
         },

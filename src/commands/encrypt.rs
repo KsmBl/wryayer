@@ -524,12 +524,16 @@ pub fn require_unlocked(app_name: &str, what: &str) -> Result<()> {
 
 /// Whether `app_name`'s container should be unmounted when the app exits.
 ///
-/// True only for encrypted apps set to `password_source = prompt`, where
-/// leaving the container mounted would mean the password isn't actually
-/// required before the next start. Read before the app runs, because
-/// afterwards the config is only reachable while still mounted.
+/// On by default for every encrypted app: leaving a container mounted after the
+/// app closes defeats the point of having one, since the files stay readable
+/// for the rest of the session. `lock_on_exit = off` opts out, trading that
+/// exposure for not needing sudo on every launch.
+///
+/// Read before the app runs — afterwards the config is inside a container that
+/// may already be gone.
 pub fn should_relock_on_exit(app_name: &str) -> bool {
-    veracrypt::is_encrypted(app_name) && password_source(app_name) == PasswordSource::Prompt
+    veracrypt::is_encrypted(app_name)
+        && read_config(app_name).map(|c| c.lock_on_exit).unwrap_or(true)
 }
 
 /// Unmount `app_name`'s container after the app has exited.
@@ -658,6 +662,34 @@ pub fn master_set(app_name: &str, generate: bool) -> Result<()> {
     println!(
         "note: this records the password only — it does not re-key an existing container."
     );
+    Ok(())
+}
+
+/// Print the stored password for `app_name`, or every stored password.
+///
+/// A password that was generated is never shown when it is created, so this is
+/// the only way to recover one — to put it in a password manager, or to open
+/// the container with the VeraCrypt GUI directly.
+pub fn master_show(app_name: Option<&str>) -> Result<()> {
+    let store = crate::secrets::open_interactive()?;
+    match app_name {
+        Some(app) => match store.get(app) {
+            Some(pw) => println!("{pw}"),
+            None => bail!("no stored password for '{app}'"),
+        },
+        None => {
+            let apps = store.apps();
+            if apps.is_empty() {
+                println!("No container passwords stored.");
+                return Ok(());
+            }
+            let width = apps.iter().map(|a| a.len()).max().unwrap_or(8);
+            for app in apps {
+                let pw = store.get(&app).unwrap_or_default();
+                println!("{app:<width$}  {pw}");
+            }
+        }
+    }
     Ok(())
 }
 
