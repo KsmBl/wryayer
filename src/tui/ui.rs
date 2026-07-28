@@ -394,6 +394,43 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             let selected = *selected;
             draw_ask_shortcut(f, area, &pkg, selected);
         }
+        Screen::AskEncrypt { pkg, selected, .. } => {
+            let pkg = pkg.clone();
+            let selected = *selected;
+            draw_ask_encrypt(f, area, &pkg, selected);
+        }
+        Screen::RevealPasswords { entries, value, selected, error } => {
+            let entries = entries.clone();
+            let len = value.chars().count();
+            let selected = *selected;
+            let error = error.clone();
+            match entries {
+                Some(list) => draw_stored_passwords(f, area, &list, selected),
+                None => draw_masked_prompt(
+                    f, area,
+                    "Stored passwords",
+                    "Master password",
+                    "Unlocks the store so the passwords can be shown.",
+                    len, error.as_deref(),
+                    " [Enter] Unlock  [Esc] Cancel",
+                ),
+            }
+        }
+        Screen::MasterPassword { stages, idx, value, error, .. } => {
+            let stage = stages[*idx];
+            let step = (*idx + 1, stages.len());
+            let len = value.chars().count();
+            let error = error.clone();
+            draw_master_password(f, area, stage, step, len, error.as_deref());
+        }
+        Screen::EncryptSecrets { title, stages, idx, value, error, .. } => {
+            let title = title.clone();
+            let stage = stages[*idx];
+            let step = (*idx + 1, stages.len());
+            let len = value.chars().count();
+            let error = error.clone();
+            draw_encrypt_secrets(f, area, &title, stage, step, len, error.as_deref());
+        }
         Screen::SnapshotManager { app_name, snaps, selected } => {
             let app_name = app_name.clone();
             let snaps = snaps.clone();
@@ -669,6 +706,16 @@ fn draw_installed(f: &mut Frame, app: &mut App, area: Rect) {
         };
         if let Some(badge) = run_badge {
             spans.push(badge);
+        }
+        // Encrypted apps carry a padlock: filled while locked (files sealed
+        // away), outlined while unlocked (container currently mounted).
+        if let Some(&locked) = app.locked_apps.get(&m.app.name) {
+            let (glyph, colour) = if locked {
+                ("🔒", if list_active { c_accent() } else { c_dim() })
+            } else {
+                ("🔓", c_dim())
+            };
+            spans.push(Span::styled(format!(" {glyph}"), Style::default().fg(colour)));
         }
         ListItem::new(Line::from(spans))
     }).collect();
@@ -1135,7 +1182,10 @@ fn draw_operation(
 
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(3), Constraint::Min(0), Constraint::Length(1)])
+            // The footer gets 2 rows, not 1: its block draws a bottom border,
+            // so a single row leaves zero inner height and the hint — including
+            // the [t] Hide log reminder — is clipped away entirely.
+            .constraints([Constraint::Length(3), Constraint::Min(0), Constraint::Length(2)])
             .split(popup);
 
         let header_block = Block::default()
@@ -1195,7 +1245,14 @@ fn draw_operation(
         f.render_widget(log_block, chunks[1]);
 
         let visible = inner.height as usize;
-        let scroll = app.log_scroll.min(log.len().saturating_sub(visible));
+        // While following, always render the newest window. A stored offset
+        // can't keep up with an operation emitting hundreds of lines a second,
+        // which left the view sitting on long-stale output.
+        let scroll = if app.log_follow {
+            log.len().saturating_sub(visible)
+        } else {
+            app.log_scroll.min(log.len().saturating_sub(visible))
+        };
         let lines: Vec<Line> = log.iter().skip(scroll).take(visible).map(|l| {
             Line::from(Span::styled(format!(" {l}"), Style::default().fg(log_line_color(l))))
         }).collect();
@@ -1568,11 +1625,27 @@ fn draw_settings_tab(f: &mut Frame, app: &mut App, area: Rect) {
         Some(604800)   => "1 week".to_string(),
         Some(secs)     => crate::config::format_uptime(secs),
     };
-    while rows.len() <= CFG_USB {
+    while rows.len() <= super::CFG_MASTER_FORGET {
         rows.push(("", String::new()));
     }
     rows[CFG_SPOOF_UPTIME] = ("Spoof uptime", uptime_val);
     rows[CFG_USB]          = ("USB devices",  b(config.usb).to_string());
+    // An action row: its "value" reports the store's state instead of a setting.
+    rows[super::CFG_MASTER_PASSWORD] = (
+        "Master pass",
+        if !crate::secrets::exists() {
+            "not set".to_string()
+        } else if crate::secrets::is_unlocked() {
+            "set · unlocked".to_string()
+        } else {
+            "set · locked".to_string()
+        },
+    );
+    rows[super::CFG_MASTER_SHOW] = ("Stored pass", "show  →".to_string());
+    rows[super::CFG_MASTER_FORGET] = (
+        "Forget pass",
+        if crate::secrets::is_unlocked() { "unlocked  →".to_string() } else { "already locked".to_string() },
+    );
 
     // The list is split into labelled sections (Hardware / Privacy / Environment
     // sandbox settings, then wryayer's own Application settings), driven by the
@@ -1582,7 +1655,7 @@ fn draw_settings_tab(f: &mut Frame, app: &mut App, area: Rect) {
     // visible; the separator + Save button stay pinned at the bottom.
     enum Item { Header(&'static str), Row(usize) }
     let mut items: Vec<Item> = Vec::with_capacity(rows.len() + 4);
-    for (title, idxs) in super::config_sections(true, false) {
+    for (title, idxs) in super::config_sections(true, false, false) {
         items.push(Item::Header(title));
         for idx in idxs {
             if idx < rows.len() {
@@ -1884,14 +1957,28 @@ fn draw_config(
         Some(604800) => " 1 week ".to_string(),
         Some(secs)   => format!(" {} ", crate::config::format_uptime(secs)),
     };
-    while rows.len() <= CFG_USB {
+    // Pad to the highest per-app row index, not just CFG_USB: the render loop
+    // addresses rows by CFG index and silently drops any that sit past the end,
+    // which is how the Encryption rows came to have a section header and no
+    // rows under it.
+    while rows.len() <= super::CFG_LOCK_ON_EXIT {
         rows.push(("", String::new()));
     }
     rows[CFG_SPOOF_UPTIME] = ("Spoof upt. ", uptime_val);
     rows[CFG_USB]          = ("USB devices", b(config.usb).to_string());
+    rows[super::CFG_PASSWORD_SOURCE] = (
+        "Password   ",
+        match config.password_source {
+            crate::config::PasswordSource::Prompt => " prompt ".to_string(),
+            crate::config::PasswordSource::Master => " master ".to_string(),
+        },
+    );
+    rows[super::CFG_LOCK_ON_EXIT] =
+        ("Lock on exit", b(config.lock_on_exit).to_string());
 
     let has_wg = wine_game.is_some();
-    let save_idx = app_cfg_save_idx(has_wg);
+    let is_enc = crate::veracrypt::is_encrypted(app_name);
+    let save_idx = app_cfg_save_idx(has_wg, is_enc);
 
     // Save is pinned to the bottom so it's always reachable on small terminals.
     let save_y = inner.y + inner.height.saturating_sub(2);
@@ -1901,7 +1988,7 @@ fn draw_config(
     // tab and ↑/↓ navigation. Headers are non-selectable lines between rows.
     enum Item { Header(&'static str), Row(usize) }
     let mut items: Vec<Item> = Vec::with_capacity(rows.len() + 4);
-    for (title, idxs) in super::config_sections(false, has_wg) {
+    for (title, idxs) in super::config_sections(false, has_wg, is_enc) {
         items.push(Item::Header(title));
         for idx in idxs {
             if idx < rows.len() {
@@ -2750,6 +2837,250 @@ fn draw_ask_shortcut(f: &mut Frame, area: Rect, pkg: &str, selected: usize) {
     );
 }
 
+fn draw_ask_encrypt(f: &mut Frame, area: Rect, pkg: &str, selected: usize) {
+    use super::ENCRYPT_CHOICES;
+    let inner = popup_frame(f, area, 62, 48, "Encrypted container?", c_accent());
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        // header · choices · note · footer
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Min(0),
+            Constraint::Length(2),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("  Store ", Style::default().fg(c_dim())),
+            Span::styled(pkg, Style::default().fg(c_fg()).add_modifier(Modifier::BOLD)),
+            Span::styled(" in its own VeraCrypt container?", Style::default().fg(c_dim())),
+        ])),
+        chunks[0],
+    );
+
+    let items: Vec<ListItem> = ENCRYPT_CHOICES
+        .iter()
+        .enumerate()
+        .map(|(i, (label, desc, extra))| {
+            let is_sel = i == selected;
+            let color = if extra.is_empty() { c_dim() } else { c_green() };
+            ListItem::new(Line::from(vec![
+                Span::styled(if is_sel { " ▶ " } else { "   " }, Style::default().fg(c_accent())),
+                Span::styled(
+                    *label,
+                    Style::default()
+                        .fg(if is_sel { color } else { c_dim() })
+                        .add_modifier(if is_sel { Modifier::BOLD } else { Modifier::empty() }),
+                ),
+                Span::styled(format!("  — {desc}"), Style::default().fg(c_dim())),
+            ]))
+        })
+        .collect();
+
+    let mut list_state = ListState::default();
+    list_state.select(Some(selected));
+    let list = List::new(items).highlight_style(Style::default().bg(c_select()));
+    f.render_stateful_widget(list, chunks[1], &mut list_state);
+
+    // Encrypting drops out of the TUI, so say so before it happens.
+    let note = if selected == 0 {
+        "  The app is installed normally, in a plain directory.".to_string()
+    } else {
+        "  Runs on the terminal: VeraCrypt asks for sudo to mount.".to_string()
+    };
+    f.render_widget(
+        Paragraph::new(Span::styled(note, Style::default().fg(c_dim()))),
+        chunks[2],
+    );
+
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            " [↑↓] Navigate  [Enter] Confirm  [Esc] Cancel",
+            Style::default().fg(c_dim()),
+        )),
+        chunks[3],
+    );
+}
+
+/// Masked password entry for an encrypted install.
+fn draw_encrypt_secrets(
+    f: &mut Frame,
+    area: Rect,
+    op_title: &str,
+    stage: super::SecretStage,
+    step: (usize, usize),
+    typed_len: usize,
+    error: Option<&str>,
+) {
+    let (n, total) = step;
+    // Named after the operation, not hardcoded: the same prompt fronts removes
+    // and other container work, not only installs.
+    draw_masked_prompt(
+        f,
+        area,
+        &format!("{op_title} — step {n} of {total}"),
+        stage.prompt(),
+        stage.hint(),
+        typed_len,
+        error,
+        " [Enter] Continue  [Esc] Cancel install",
+    );
+}
+
+/// Masked entry for setting or changing the master password.
+fn draw_master_password(
+    f: &mut Frame,
+    area: Rect,
+    stage: super::MasterStage,
+    step: (usize, usize),
+    typed_len: usize,
+    error: Option<&str>,
+) {
+    let (n, total) = step;
+    draw_masked_prompt(
+        f,
+        area,
+        &format!("Master password — step {n} of {total}"),
+        stage.prompt(),
+        stage.hint(),
+        typed_len,
+        error,
+        " [Enter] Continue  [Esc] Cancel",
+    );
+}
+
+/// One masked password field.
+///
+/// Renders the typed length as bullets rather than the characters — the TUI
+/// runs on a screen someone else may be looking at, and these are the passwords
+/// protecting the containers.
+#[allow(clippy::too_many_arguments)] // all of it is display text for one popup
+fn draw_masked_prompt(
+    f: &mut Frame,
+    area: Rect,
+    title: &str,
+    prompt: &str,
+    hint: &str,
+    typed_len: usize,
+    error: Option<&str>,
+    footer: &str,
+) {
+    let inner = popup_frame(f, area, 60, 40, title, c_accent());
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        // prompt · input · hint/error · footer
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Length(2),
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            format!("  {prompt}"),
+            Style::default().fg(c_fg()).add_modifier(Modifier::BOLD),
+        ))),
+        chunks[0],
+    );
+
+    let bullets: String = "•".repeat(typed_len);
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("  > ", Style::default().fg(c_accent())),
+            Span::styled(bullets, Style::default().fg(c_fg())),
+            Span::styled("_", Style::default().fg(c_accent())),
+        ])),
+        chunks[1],
+    );
+
+    let note = match error {
+        Some(e) => Line::from(Span::styled(
+            format!("  {e}"),
+            Style::default().fg(c_red()).add_modifier(Modifier::BOLD),
+        )),
+        None => Line::from(Span::styled(
+            format!("  {hint}"),
+            Style::default().fg(c_dim()),
+        )),
+    };
+    f.render_widget(Paragraph::new(note).wrap(Wrap { trim: false }), chunks[2]);
+
+    f.render_widget(
+        Paragraph::new(Span::styled(footer, Style::default().fg(c_dim()))),
+        chunks[3],
+    );
+}
+
+/// List every container password held in the master store.
+///
+/// Shown in the clear on purpose: a generated password is never printed when it
+/// is created, so this is the only way to recover one — for a password manager,
+/// or to open the container with the VeraCrypt GUI directly.
+fn draw_stored_passwords(f: &mut Frame, area: Rect, entries: &[(String, String)], selected: usize) {
+    let inner = popup_frame(f, area, 74, 60, "Stored container passwords", c_accent());
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0), Constraint::Length(1)])
+        .split(inner);
+
+    if entries.is_empty() {
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                "  No container passwords are stored yet.",
+                Style::default().fg(c_dim()),
+            )),
+            chunks[1],
+        );
+    } else {
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                format!("  {} app(s) — visible on screen", entries.len()),
+                Style::default().fg(c_dim()),
+            )),
+            chunks[0],
+        );
+        let width = entries.iter().map(|(a, _)| a.chars().count()).max().unwrap_or(8).max(8);
+        let items: Vec<ListItem> = entries
+            .iter()
+            .enumerate()
+            .map(|(i, (app_name, pw))| {
+                let sel = i == selected;
+                ListItem::new(Line::from(vec![
+                    Span::styled(if sel { " ▶ " } else { "   " }, Style::default().fg(c_accent())),
+                    Span::styled(
+                        format!("{:width$}", app_name, width = width),
+                        Style::default().fg(if sel { c_fg() } else { c_dim() }),
+                    ),
+                    Span::raw("  "),
+                    Span::styled(pw.clone(), Style::default().fg(c_green())),
+                ]))
+            })
+            .collect();
+        let mut st = ListState::default();
+        st.select(Some(selected));
+        f.render_stateful_widget(
+            List::new(items).highlight_style(Style::default().bg(c_select())),
+            chunks[1],
+            &mut st,
+        );
+    }
+
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            " [↑↓] Scroll  [Enter/Esc] Close",
+            Style::default().fg(c_dim()),
+        )),
+        chunks[2],
+    );
+}
+
 fn draw_no_launcher_choice(f: &mut Frame, area: Rect, pkg: &str, available_bins: &[String], selected: usize) {
     let inner = popup_frame(f, area, 60, 50, &format!("'{pkg}' — no launcher binary found"), c_yellow());
 
@@ -3199,9 +3530,22 @@ mod theme_tests {
     use super::*;
     use crate::config::Theme;
 
+    /// The active theme and layout are process-wide globals, so tests that set
+    /// them must not run concurrently — otherwise one test's `set_active_*`
+    /// lands between another's set and its assertions. Every test below takes
+    /// this lock for its whole body.
+    fn palette_lock() -> std::sync::MutexGuard<'static, ()> {
+        use std::sync::Mutex;
+        static LOCK: Mutex<()> = Mutex::new(());
+        // A panicking test poisons the mutex; the state is re-pinned by each
+        // test anyway, so recovering is correct here.
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn active_theme_selects_colours_only() {
         use crate::config::Layout;
+        let _guard = palette_lock();
         // The colour theme controls colours; layout is separate, so pin it.
         set_active_layout(Layout::Default);
 
@@ -3222,6 +3566,7 @@ mod theme_tests {
     #[test]
     fn active_layout_selects_construction_only() {
         use crate::config::Layout;
+        let _guard = palette_lock();
 
         set_active_layout(Layout::Sidebar);
         assert_eq!(c_border_type(), BorderType::Double);
@@ -3241,6 +3586,7 @@ mod theme_tests {
 
     #[test]
     fn theme_and_layout_are_independent() {
+        let _guard = palette_lock();
         // Matrix colours with the default (top-bar) layout: green text, but
         // single-line borders and no sidebar.
         set_active_theme(Theme::Matrix);

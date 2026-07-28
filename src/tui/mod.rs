@@ -20,7 +20,7 @@ use ratatui::widgets::ListState;
 use ratatui::Terminal;
 
 use crate::commands::dedup::all_du;
-use crate::config::{read_config, read_global_config, write_config, write_global_config, AppConfig, AvahiMode, Layout, LocalDelete, TempMode, Theme};
+use crate::config::{read_config, read_global_config, write_config, write_global_config, AppConfig, AvahiMode, Layout, LocalDelete, PasswordSource, TempMode, Theme};
 use crate::manifest::{list_all_apps, tree_order, Manifest};
 
 // ── Op messages ───────────────────────────────────────────────────────────────
@@ -199,6 +199,60 @@ pub enum Screen {
         /// Install args ready to pass to spawn_wryayer (without --keep-without-launcher).
         args: Vec<String>,
         selected: usize, // 0 = yes (create shortcut), 1 = no (skip)
+    },
+    /// Ask whether to install into a VeraCrypt container. Shown right after the
+    /// shortcut prompt, so both install-time choices are made up front.
+    AskEncrypt {
+        pkg: String,
+        title: String,
+        /// Install args accumulated so far, including the shortcut answer.
+        args: Vec<String>,
+        selected: usize, // see ENCRYPT_CHOICES
+    },
+    /// Reveal the container passwords held in the master store.
+    ///
+    /// `entries` is None until the store has been opened — while locked the
+    /// screen is a masked master-password prompt instead.
+    RevealPasswords {
+        entries: Option<Vec<(String, String)>>,
+        value: String,
+        selected: usize,
+        error: Option<String>,
+    },
+    /// Create or change the master password, from the Settings tab.
+    MasterPassword {
+        stages: Vec<MasterStage>,
+        idx: usize,
+        value: String,
+        /// The existing password, once verified — needed to re-key the store.
+        current: String,
+        /// First entry of the new password, awaiting confirmation.
+        new_first: String,
+        error: Option<String>,
+    },
+    /// Collect the passwords an encrypted install needs, one masked field at a
+    /// time. Each is validated as it is entered, so the install never starts
+    /// with a secret that will turn out to be wrong.
+    EncryptSecrets {
+        title: String,
+        args: Vec<String>,
+        /// When false the collected secrets are not handed to the child at all
+        /// — the point was the side effect of caching sudo credentials, so a
+        /// container operation inside the child never has to prompt on a
+        /// terminal the TUI is busy repainting.
+        pass_to_child: bool,
+        /// Remaining fields to ask for, in order.
+        stages: Vec<SecretStage>,
+        idx: usize,
+        /// The field being typed.
+        value: String,
+        /// First entry of a type-it-twice pair, awaiting confirmation.
+        first_entry: String,
+        sudo: String,
+        master: String,
+        container: String,
+        /// Validation failure to show above the input.
+        error: Option<String>,
     },
     /// Snapshot manager: pick a snapshot to roll back to or delete.
     SnapshotManager {
@@ -447,6 +501,10 @@ pub struct App {
     pub screen: Screen,
     pub status: String,
     pub log_scroll: usize,
+    /// Whether the log view sticks to the newest lines. True until the user
+    /// scrolls up; a running operation can emit hundreds of lines a second, so
+    /// a fixed scroll offset would leave the view stranded on stale output.
+    pub log_follow: bool,
     pub needs_clear: bool,
     /// Caret position (in characters) for whichever text-input overlay is
     /// active. Only one input is on screen at a time, so a single shared cursor
@@ -455,6 +513,10 @@ pub struct App {
     /// If Some, the event loop will suspend the TUI, exec `wryayer run <app>`
     /// with inherited stdio so the user actually interacts with the app,
     /// then resume. Set by pressing `r`/Enter on an installed app.
+    /// Apps stored in a VeraCrypt container, mapped to whether that container
+    /// is currently locked. Refreshed on the same throttle as running
+    /// instances — see `refresh_running_instances`.
+    pub locked_apps: HashMap<String, bool>,
     pub run_request: Option<String>,
     /// If Some, the event loop will suspend the TUI, open an editor on the
     /// given path, save config to "custom" after, then resume.
@@ -518,8 +580,10 @@ impl App {
             screen: Screen::Main,
             status: String::new(),
             log_scroll: 0,
+            log_follow: true,
             needs_clear: false,
             input_cursor: 0,
+            locked_apps: HashMap::new(),
             run_request: None,
             editor_request: None,
             konami_mode: false,
@@ -570,6 +634,10 @@ impl App {
     fn refresh_running_instances(&mut self) {
         if self.last_instance_scan.elapsed() >= Duration::from_secs(1) {
             self.running_instances = scan_running_instances();
+            // Piggy-backed on the same throttle: listing mounted volumes forks
+            // `veracrypt --list`, which must never run per-frame from the
+            // renderer. Cached here and read by draw_installed.
+            self.locked_apps = scan_locked_apps(&self.installed);
             self.last_instance_scan = Instant::now();
         }
     }
@@ -854,6 +922,35 @@ fn run_app_inline(
     Ok(())
 }
 
+/// Map every encrypted app to whether its container is currently locked.
+///
+/// Takes one `veracrypt --list` snapshot and matches mount points against it,
+/// rather than asking per app, so the cost is a single fork regardless of how
+/// many apps are installed.
+fn scan_locked_apps(installed: &[Manifest]) -> HashMap<String, bool> {
+    let mut out = HashMap::new();
+    let encrypted: Vec<&str> = installed
+        .iter()
+        .map(|m| m.app.name.as_str())
+        .filter(|n| crate::veracrypt::is_encrypted(n))
+        .collect();
+    if encrypted.is_empty() {
+        return out;
+    }
+    let mounted = crate::veracrypt::list_mounted().unwrap_or_default();
+    for name in encrypted {
+        let dir = match crate::manifest::app_dir(name) {
+            Ok(d) => d.to_string_lossy().into_owned(),
+            Err(_) => continue,
+        };
+        let is_mounted = mounted
+            .iter()
+            .any(|v| v.mount_point.as_deref() == Some(dir.as_str()));
+        out.insert(name.to_string(), !is_mounted);
+    }
+    out
+}
+
 /// Suspend the TUI, let the user pick an editor and edit the cpuinfo file,
 /// save "custom" into the app config, then resume the TUI.
 fn open_editor_inline(
@@ -1009,6 +1106,10 @@ fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
         Screen::NoLauncherChoice { .. } => on_no_launcher_choice(app, code),
         Screen::OutdatedPackages { .. } => on_outdated_packages(app, code),
         Screen::AskShortcut { .. } => on_ask_shortcut(app, code),
+        Screen::AskEncrypt { .. } => on_ask_encrypt(app, code),
+        Screen::EncryptSecrets { .. } => on_encrypt_secrets(app, code),
+        Screen::MasterPassword { .. } => on_master_password(app, code),
+        Screen::RevealPasswords { .. } => on_reveal_passwords(app, code),
         Screen::GameExePick { .. } => on_game_exe_pick(app, code),
         Screen::GameNameInput { .. } => on_game_name_input(app, code),
         Screen::GameConfirm { .. } => on_game_confirm(app, code),
@@ -1958,7 +2059,563 @@ fn ask_shortcut_or_launch(app: &mut App, pkg: String, title: String, args: Vec<S
         if !app.global_config.create_shortcut {
             args.push("--keep-without-launcher".into());
         }
+        ask_encrypt(app, pkg, title, args);
+    }
+}
+
+/// The install-time choices the encryption prompt offers, as
+/// `(label, description, extra install args)`.
+pub const ENCRYPT_CHOICES: &[(&str, &str, &[&str])] = &[
+    ("No", "install into a plain directory", &[]),
+    (
+        "Encrypt",
+        "type the container password at every launch",
+        &["--encrypt"],
+    ),
+    (
+        "Encrypt + master password",
+        "keep its password in the master store",
+        &["--encrypt", "--encrypt-master"],
+    ),
+    (
+        "Encrypt + generated password",
+        "generate a password into the master store",
+        &["--encrypt", "--encrypt-master", "--encrypt-generate"],
+    ),
+];
+
+/// The `--into` target in an install argument list, resolved to the app that
+/// actually owns the filesystem tree (following one alias hop).
+fn merge_target_root(args: &[String]) -> Option<String> {
+    let target = args.windows(2).find(|w| w[0] == "--into").map(|w| w[1].clone())?;
+    Some(
+        crate::manifest::read_manifest(&target)
+            .ok()
+            .and_then(|m| m.app.alias_of)
+            .unwrap_or(target),
+    )
+}
+
+/// Ask whether to install into a VeraCrypt container, or go straight to the
+/// install when there is nothing to decide.
+fn ask_encrypt(app: &mut App, pkg: String, title: String, args: Vec<String>) {
+    if !crate::veracrypt::available() {
         launch_op(app, title, args, None, true);
+        return;
+    }
+    // Merging into an app that already lives in a container: the files are
+    // written straight into that container, so there is no choice to offer —
+    // asking "encrypt?" here would imply a second container that never exists.
+    if let Some(root) = merge_target_root(&args) {
+        if crate::veracrypt::is_encrypted(&root) {
+            begin_merge_into_encrypted(app, title, args, &root);
+            return;
+        }
+    }
+    app.screen = Screen::AskEncrypt { pkg, title, args, selected: 0 };
+    app.needs_clear = true;
+}
+
+/// Start an install into an already-encrypted app: no encryption question, just
+/// whatever is needed to open that app's container.
+fn begin_merge_into_encrypted(app: &mut App, title: String, args: Vec<String>, root: &str) {
+    let mut stages = Vec::new();
+    if !crate::veracrypt::sudo_is_primed() {
+        stages.push(SecretStage::Sudo);
+    }
+    // The master store may already know this container's password, in which
+    // case the install can open it without asking anything.
+    let known = crate::secrets::open_cached()
+        .ok()
+        .flatten()
+        .is_some_and(|s| s.get(root).is_some());
+    if !known {
+        stages.push(SecretStage::ContainerExisting);
+    }
+
+    if stages.is_empty() {
+        launch_encrypted_install(app, title, args, "", "", "");
+        return;
+    }
+    app.screen = Screen::EncryptSecrets {
+        title,
+        args,
+        pass_to_child: true,
+        stages,
+        idx: 0,
+        value: String::new(),
+        first_entry: String::new(),
+        sudo: String::new(),
+        master: String::new(),
+        container: String::new(),
+        error: None,
+    };
+    app.input_cursor = 0;
+    app.needs_clear = true;
+}
+
+/// One field of the set/change-master-password flow.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum MasterStage {
+    /// Only asked when a store already exists — proves the user may re-key it.
+    Current,
+    New,
+    Confirm,
+}
+
+impl MasterStage {
+    pub fn prompt(self) -> &'static str {
+        match self {
+            MasterStage::Current => "Current master password",
+            MasterStage::New => "New master password",
+            MasterStage::Confirm => "Repeat the new master password",
+        }
+    }
+
+    pub fn hint(self) -> &'static str {
+        match self {
+            MasterStage::Current => "Proves you may re-key the store.",
+            MasterStage::New => "You'll type this once per boot to unlock stored passwords.",
+            MasterStage::Confirm => "Must match what you just typed.",
+        }
+    }
+}
+
+/// Open the master-password flow: create the store, or change its password.
+fn open_master_password(app: &mut App) {
+    let stages = if crate::secrets::exists() {
+        vec![MasterStage::Current, MasterStage::New, MasterStage::Confirm]
+    } else {
+        vec![MasterStage::New, MasterStage::Confirm]
+    };
+    app.screen = Screen::MasterPassword {
+        stages,
+        idx: 0,
+        value: String::new(),
+        current: String::new(),
+        new_first: String::new(),
+        error: None,
+    };
+    app.input_cursor = 0;
+    app.needs_clear = true;
+}
+
+/// Open the stored-password viewer, skipping the prompt when the store is
+/// already unlocked for this boot.
+fn open_reveal_passwords(app: &mut App) {
+    let entries = crate::secrets::open_cached()
+        .ok()
+        .flatten()
+        .map(|store| {
+            store
+                .apps()
+                .into_iter()
+                .map(|a| {
+                    let pw = store.get(&a).unwrap_or_default().to_string();
+                    (a, pw)
+                })
+                .collect::<Vec<_>>()
+        });
+    app.screen = Screen::RevealPasswords { entries, value: String::new(), selected: 0, error: None };
+    app.input_cursor = 0;
+    app.needs_clear = true;
+}
+
+fn on_reveal_passwords(app: &mut App, code: KeyCode) {
+    let Screen::RevealPasswords { entries, value, selected, error } = &mut app.screen else {
+        return;
+    };
+
+    // Already unlocked: this is just a list to scroll and close.
+    if let Some(list) = entries {
+        match code {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => {
+                app.screen = Screen::Main;
+                app.needs_clear = true;
+            }
+            KeyCode::Up | KeyCode::Char('k') => *selected = selected.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') if *selected + 1 < list.len() => {
+                *selected += 1;
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    // Still locked: collect the master password.
+    match code {
+        KeyCode::Esc => {
+            app.screen = Screen::Main;
+            app.needs_clear = true;
+        }
+        KeyCode::Char(c) => {
+            value.push(c);
+            app.input_cursor = value.chars().count();
+        }
+        KeyCode::Backspace => {
+            value.pop();
+            app.input_cursor = value.chars().count();
+        }
+        KeyCode::Enter => {
+            let entered = std::mem::take(value);
+            match crate::secrets::open(&entered) {
+                Ok(store) => {
+                    *entries = Some(
+                        store
+                            .apps()
+                            .into_iter()
+                            .map(|a| {
+                                let pw = store.get(&a).unwrap_or_default().to_string();
+                                (a, pw)
+                            })
+                            .collect(),
+                    );
+                    *error = None;
+                }
+                Err(e) => *error = Some(format!("{e:#}")),
+            }
+            app.input_cursor = 0;
+        }
+        _ => {}
+    }
+}
+
+fn on_master_password(app: &mut App, code: KeyCode) {
+    match code {
+        KeyCode::Esc => {
+            app.screen = Screen::Main;
+            app.needs_clear = true;
+            return;
+        }
+        KeyCode::Char(c) => {
+            if let Screen::MasterPassword { value, .. } = &mut app.screen {
+                value.push(c);
+                app.input_cursor = value.chars().count();
+            }
+            return;
+        }
+        KeyCode::Backspace => {
+            if let Screen::MasterPassword { value, .. } = &mut app.screen {
+                value.pop();
+                app.input_cursor = value.chars().count();
+            }
+            return;
+        }
+        KeyCode::Enter => {}
+        _ => return,
+    }
+
+    let Screen::MasterPassword { stages, idx, value, current, new_first, error } = &mut app.screen
+    else {
+        return;
+    };
+    let stage = stages[*idx];
+    let entered = std::mem::take(value);
+    *error = None;
+
+    match stage {
+        MasterStage::Current => {
+            // Verify before going further, so a wrong password is caught here
+            // rather than after the user has typed a new one twice.
+            if let Err(e) = crate::secrets::open(&entered) {
+                *error = Some(format!("{e:#}"));
+                return;
+            }
+            *current = entered;
+        }
+        MasterStage::New => {
+            if entered.is_empty() {
+                *error = Some("Password must not be empty.".into());
+                return;
+            }
+            *new_first = entered;
+        }
+        MasterStage::Confirm => {
+            if entered != *new_first {
+                *error = Some("Passwords did not match — try the new password again.".into());
+                *idx -= 1;
+                new_first.clear();
+                app.input_cursor = 0;
+                return;
+            }
+            let had_store = crate::secrets::exists();
+            let result = if had_store {
+                crate::secrets::change_master(current, &entered)
+            } else {
+                crate::secrets::init(&entered)
+            };
+            match result {
+                Ok(()) => {
+                    app.screen = Screen::Main;
+                    app.needs_clear = true;
+                    app.status = if had_store {
+                        "Master password changed.".into()
+                    } else {
+                        "Master password store created — you'll be asked for it once per boot.".into()
+                    };
+                }
+                Err(e) => {
+                    *error = Some(format!("{e:#}"));
+                    *idx -= 1;
+                    new_first.clear();
+                    app.input_cursor = 0;
+                }
+            }
+            return;
+        }
+    }
+
+    *idx += 1;
+    app.input_cursor = 0;
+}
+
+/// One password an encrypted install needs before it can start.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum SecretStage {
+    /// Cached with `sudo -v` so VeraCrypt can mount without a terminal prompt.
+    Sudo,
+    MasterNew,
+    MasterNewConfirm,
+    MasterExisting,
+    ContainerNew,
+    ContainerConfirm,
+    /// Opens the container of an app being merged into — it already exists, so
+    /// it is entered once with no confirmation.
+    ContainerExisting,
+}
+
+impl SecretStage {
+    pub fn prompt(self) -> &'static str {
+        match self {
+            SecretStage::Sudo => "Your sudo password",
+            SecretStage::MasterNew => "New master password",
+            SecretStage::MasterNewConfirm => "Repeat the master password",
+            SecretStage::MasterExisting => "Master password",
+            SecretStage::ContainerNew => "New container password",
+            SecretStage::ContainerConfirm => "Repeat the container password",
+            SecretStage::ContainerExisting => "Container password",
+        }
+    }
+
+    pub fn hint(self) -> &'static str {
+        match self {
+            SecretStage::Sudo => "VeraCrypt needs root to mount the container.",
+            SecretStage::MasterNew => "You'll type this once per boot to unlock stored passwords.",
+            SecretStage::MasterNewConfirm => "Must match what you just typed.",
+            SecretStage::MasterExisting => "Unlocks the master password store for this boot.",
+            SecretStage::ContainerNew => "Opens this app's container. Not stored anywhere.",
+            SecretStage::ContainerConfirm => "Must match what you just typed.",
+            SecretStage::ContainerExisting => {
+                "Opens the container this app is being installed into."
+            }
+        }
+    }
+}
+
+/// Which passwords are still needed for this install, in the order to ask.
+///
+/// Everything already satisfied is skipped: an authenticated sudo, a master
+/// store already unlocked this boot, or a generated container password all drop
+/// their prompts, so the common repeat case asks for nothing at all.
+fn build_secret_stages(use_master: bool, generate: bool) -> Vec<SecretStage> {
+    let mut stages = Vec::new();
+    if !crate::veracrypt::sudo_is_primed() {
+        stages.push(SecretStage::Sudo);
+    }
+    if use_master {
+        if !crate::secrets::exists() {
+            stages.push(SecretStage::MasterNew);
+            stages.push(SecretStage::MasterNewConfirm);
+        } else if !crate::secrets::is_unlocked() {
+            stages.push(SecretStage::MasterExisting);
+        }
+    }
+    if !generate {
+        stages.push(SecretStage::ContainerNew);
+        stages.push(SecretStage::ContainerConfirm);
+    }
+    stages
+}
+
+/// Start an encrypted install: collect whatever passwords are still needed,
+/// then run it as a normal operation with its log in the TUI.
+fn begin_encrypted_install(app: &mut App, title: String, args: Vec<String>, use_master: bool, generate: bool) {
+    let stages = build_secret_stages(use_master, generate);
+    if stages.is_empty() {
+        launch_encrypted_install(app, title, args, "", "", "");
+        return;
+    }
+    app.screen = Screen::EncryptSecrets {
+        title,
+        args,
+        pass_to_child: true,
+        stages,
+        idx: 0,
+        value: String::new(),
+        first_entry: String::new(),
+        sudo: String::new(),
+        master: String::new(),
+        container: String::new(),
+        error: None,
+    };
+    app.input_cursor = 0;
+    app.needs_clear = true;
+}
+
+/// Run `args` as a normal operation, first caching sudo credentials if the
+/// operation will need root and doesn't have them.
+///
+/// Without this a container unmount inside the child makes `sudo` prompt on the
+/// shared terminal, where the TUI's animated progress bar immediately paints
+/// over it — leaving an invisible prompt the operation silently hangs on.
+fn launch_op_with_sudo(app: &mut App, title: String, args: Vec<String>) {
+    if crate::veracrypt::sudo_is_primed() {
+        launch_op(app, title, args, None, true);
+        return;
+    }
+    app.screen = Screen::EncryptSecrets {
+        title,
+        args,
+        pass_to_child: false,
+        stages: vec![SecretStage::Sudo],
+        idx: 0,
+        value: String::new(),
+        first_entry: String::new(),
+        sudo: String::new(),
+        master: String::new(),
+        container: String::new(),
+        error: None,
+    };
+    app.input_cursor = 0;
+    app.needs_clear = true;
+}
+
+/// Launch the install, handing the collected passwords to the child on stdin.
+fn launch_encrypted_install(
+    app: &mut App,
+    title: String,
+    mut args: Vec<String>,
+    sudo: &str,
+    master: &str,
+    container: &str,
+) {
+    args.push("--encrypt-secrets-stdin".into());
+    // Only non-empty secrets are sent; the child prompts for anything missing,
+    // and an empty line would be taken as an empty password.
+    let mut payload = String::new();
+    for (key, value) in [("sudo", sudo), ("master", master), ("container", container)] {
+        if !value.is_empty() {
+            payload.push_str(&format!("{key}={value}\n"));
+        }
+    }
+    launch_op_with_stdin(app, title, args, None, true, Some(payload));
+}
+
+fn on_encrypt_secrets(app: &mut App, code: KeyCode) {
+    match code {
+        KeyCode::Esc => {
+            app.install_queue.clear();
+            app.screen = Screen::Main;
+            app.needs_clear = true;
+            return;
+        }
+        KeyCode::Char(c) => {
+            if let Screen::EncryptSecrets { value, .. } = &mut app.screen {
+                value.push(c);
+                app.input_cursor = value.chars().count();
+            }
+            return;
+        }
+        KeyCode::Backspace => {
+            if let Screen::EncryptSecrets { value, .. } = &mut app.screen {
+                value.pop();
+                app.input_cursor = value.chars().count();
+            }
+            return;
+        }
+        KeyCode::Enter => {}
+        _ => return,
+    }
+
+    // Enter: validate the current field and advance.
+    let Screen::EncryptSecrets {
+        stages, idx, value, first_entry, sudo, master, container, error, ..
+    } = &mut app.screen
+    else {
+        return;
+    };
+    let stage = stages[*idx];
+    let entered = std::mem::take(value);
+    *error = None;
+
+    match stage {
+        SecretStage::Sudo => {
+            // Validate immediately: a wrong sudo password would otherwise only
+            // surface when VeraCrypt fails, long into the install.
+            if let Err(e) = crate::veracrypt::prime_sudo(&entered) {
+                *error = Some(format!("{e:#}"));
+                return;
+            }
+            *sudo = entered;
+        }
+        SecretStage::MasterNew | SecretStage::ContainerNew => {
+            if entered.is_empty() {
+                *error = Some("Password must not be empty.".into());
+                return;
+            }
+            *first_entry = entered;
+        }
+        SecretStage::MasterNewConfirm | SecretStage::ContainerConfirm => {
+            if entered != *first_entry {
+                *error = Some("Passwords did not match — starting that pair again.".into());
+                // Step back to the first half of the pair.
+                *idx -= 1;
+                first_entry.clear();
+                app.input_cursor = 0;
+                return;
+            }
+            if stage == SecretStage::MasterNewConfirm {
+                *master = std::mem::take(first_entry);
+            } else {
+                *container = std::mem::take(first_entry);
+            }
+        }
+        SecretStage::ContainerExisting => {
+            if entered.is_empty() {
+                *error = Some("Password must not be empty.".into());
+                return;
+            }
+            // Not verified here: checking it would mean mounting the container,
+            // which needs root and is exactly what the install is about to do.
+            // A wrong password surfaces as a clear mount failure in the log.
+            *container = entered;
+        }
+        SecretStage::MasterExisting => {
+            // Check it opens the store now, rather than after the install.
+            if let Err(e) = crate::secrets::open(&entered) {
+                *error = Some(format!("{e:#}"));
+                return;
+            }
+            *master = entered;
+        }
+    }
+
+    *idx += 1;
+    app.input_cursor = 0;
+    if *idx < stages.len() {
+        return;
+    }
+
+    // All collected — hand off to the normal operation runner.
+    let screen = std::mem::replace(&mut app.screen, Screen::Main);
+    if let Screen::EncryptSecrets { title, args, pass_to_child, sudo, master, container, .. } = screen
+    {
+        if pass_to_child {
+            launch_encrypted_install(app, title, args, &sudo, &master, &container);
+        } else {
+            // sudo is primed now; the operation needs nothing else.
+            launch_op(app, title, args, None, true);
+        }
     }
 }
 
@@ -1977,8 +2634,17 @@ fn execute_action(app: &mut App, action: PendingAction) {
                 danger: true,
             };
         }
-        PendingAction::ConfirmedRemove(name) =>
-            launch_op(app, format!("Remove — {name}"), vec!["remove".into(), name], None, true),
+        PendingAction::ConfirmedRemove(name) => {
+            // Removing an encrypted app unmounts and deletes its container,
+            // which needs root.
+            let title = format!("Remove — {name}");
+            let args = vec!["remove".into(), name.clone()];
+            if crate::veracrypt::is_encrypted(&name) {
+                launch_op_with_sudo(app, title, args);
+            } else {
+                launch_op(app, title, args, None, true);
+            }
+        }
         PendingAction::RemoveCascade(name, aliases) => {
             let alias_list = aliases.join(", ");
             app.screen = Screen::Confirm {
@@ -1993,8 +2659,15 @@ fn execute_action(app: &mut App, action: PendingAction) {
                 danger: true,
             };
         }
-        PendingAction::ConfirmedRemoveCascade(name) =>
-            launch_op(app, format!("Remove — {name}"), vec!["remove".into(), "--cascade".into(), name], None, true),
+        PendingAction::ConfirmedRemoveCascade(name) => {
+            let title = format!("Remove — {name}");
+            let args = vec!["remove".into(), "--cascade".into(), name.clone()];
+            if crate::veracrypt::is_encrypted(&name) {
+                launch_op_with_sudo(app, title, args);
+            } else {
+                launch_op(app, title, args, None, true);
+            }
+        }
         PendingAction::Update(name) =>
             launch_op(app, format!("Update — {name}"), vec!["update".into(), name], None, true),
         PendingAction::UpdateAll =>
@@ -2054,15 +2727,24 @@ fn on_op_running(app: &mut App, code: KeyCode) {
         match code {
             KeyCode::Char('t') => {
                 *show_log = !*show_log;
-                // When opening the log, jump to the bottom.
+                // Opening the log starts at the newest output and keeps up with
+                // it, rather than freezing at whatever offset was current.
                 if *show_log {
                     app.log_scroll = log.len().saturating_sub(1);
+                    app.log_follow = true;
                 }
             }
-            KeyCode::Up | KeyCode::Char('k') if *show_log
-                && app.log_scroll > 0 => { app.log_scroll -= 1; }
+            KeyCode::Up | KeyCode::Char('k') if *show_log => {
+                // Scrolling back is an explicit request to stop following.
+                app.log_follow = false;
+                app.log_scroll = app.log_scroll.min(log.len()).saturating_sub(1);
+            }
             KeyCode::Down | KeyCode::Char('j') if *show_log => {
                 app.log_scroll += 1;
+                // Reaching the end resumes following the live output.
+                if app.log_scroll >= log.len().saturating_sub(1) {
+                    app.log_follow = true;
+                }
             }
             _ => {}
         }
@@ -2075,13 +2757,22 @@ fn on_op_done(app: &mut App, code: KeyCode) -> Result<()> {
             *show_log = !*show_log;
             if *show_log {
                 app.log_scroll = log.len().saturating_sub(1);
+                app.log_follow = true;
             }
             return Ok(());
         }
         if *show_log {
             match code {
-                KeyCode::Up | KeyCode::Char('k') if app.log_scroll > 0 => { app.log_scroll -= 1; }
-                KeyCode::Down | KeyCode::Char('j') => { app.log_scroll += 1; }
+                KeyCode::Up | KeyCode::Char('k') if app.log_scroll > 0 => {
+                    app.log_follow = false;
+                    app.log_scroll -= 1;
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    app.log_scroll += 1;
+                    if app.log_scroll >= log.len().saturating_sub(1) {
+                        app.log_follow = true;
+                    }
+                }
                 _ => {}
             }
         }
@@ -2154,15 +2845,28 @@ pub const CFG_SPOOF_UPTIME: usize = 22;
 /// sits past every other row so the literal-indexed setting_* arms need no
 /// renumbering; its display position is set by SANDBOX_SECTIONS.
 pub const CFG_USB: usize = 23;
-pub const CFG_LEN: usize = 24;
+/// Where an encrypted app's container password comes from. Only shown for apps
+/// that are actually stored in a VeraCrypt container; like the two rows above,
+/// its storage index sits past every other row so nothing needs renumbering.
+pub const CFG_PASSWORD_SOURCE: usize = 24;
+/// Set or change the master password (global Settings only). An action row —
+/// it opens a masked prompt rather than cycling through values.
+pub const CFG_MASTER_PASSWORD: usize = 25;
+/// Unmount an encrypted app's container when it exits (per-app).
+pub const CFG_LOCK_ON_EXIT: usize = 26;
+/// Reveal the container passwords held in the master store (global, action).
+pub const CFG_MASTER_SHOW: usize = 27;
+/// Forget the cached master key so it must be typed again (global, action).
+pub const CFG_MASTER_FORGET: usize = 28;
+pub const CFG_LEN: usize = 29;
 
-/// Index of the Save button in the per-app Config screen. Shifts down by 2 when
-/// the screen carries wine_game rows.
-pub fn app_cfg_save_idx(has_wine_game: bool) -> usize {
+/// Index of the Save button in the per-app Config screen. Shifts down as
+/// optional row groups (wine game, encryption) appear.
+pub fn app_cfg_save_idx(has_wine_game: bool, is_encrypted: bool) -> usize {
     // The Save button is drawn right after the last selectable row, so its
     // position is simply the number of navigable rows. Deriving it from
     // config_nav_order keeps it correct as rows are added or removed.
-    config_nav_order(false, has_wine_game).len()
+    config_nav_order(false, has_wine_game, is_encrypted).len()
 }
 
 /// The sandbox config rows grouped into labelled sections, in display order.
@@ -2190,9 +2894,19 @@ pub const SANDBOX_SECTIONS: &[(&str, &[usize])] = &[
 /// indices)`. `is_global` chooses the trailing block: wryayer's own behaviour on
 /// the Settings tab, or a per-app Config's bound-apps (+ optional wine-game)
 /// rows.
-pub fn config_sections(is_global: bool, has_wine_game: bool) -> Vec<(&'static str, Vec<usize>)> {
+pub fn config_sections(
+    is_global: bool,
+    has_wine_game: bool,
+    is_encrypted: bool,
+) -> Vec<(&'static str, Vec<usize>)> {
     let mut out: Vec<(&'static str, Vec<usize>)> =
         SANDBOX_SECTIONS.iter().map(|(t, idxs)| (*t, idxs.to_vec())).collect();
+    // Only meaningful for an app stored in a VeraCrypt container, so the
+    // section is absent entirely for every other app rather than shown as an
+    // inert row.
+    if !is_global && is_encrypted {
+        out.push(("Encryption", vec![CFG_PASSWORD_SOURCE, CFG_LOCK_ON_EXIT]));
+    }
     if is_global {
         out.push((
             "Application settings",
@@ -2201,6 +2915,19 @@ pub fn config_sections(is_global: bool, has_wine_game: bool) -> Vec<(&'static st
                 CFG_CLEAN_CACHE, CFG_THEME, CFG_LAYOUT,
             ],
         ));
+        // The master password store is global by nature — one store covers every
+        // encrypted app — so it belongs here rather than in a per-app config.
+        // Only offered when VeraCrypt is present, since without it no app can be
+        // encrypted and the store would have nothing to protect.
+        if crate::veracrypt::available() {
+            let mut rows = vec![CFG_MASTER_PASSWORD];
+            // Only meaningful once a store exists to reveal or lock.
+            if crate::secrets::exists() {
+                rows.push(CFG_MASTER_SHOW);
+                rows.push(CFG_MASTER_FORGET);
+            }
+            out.push(("Encryption", rows));
+        }
     } else {
         let mut rows = vec![CFG_BOUND];
         if has_wine_game {
@@ -2214,8 +2941,8 @@ pub fn config_sections(is_global: bool, has_wine_game: bool) -> Vec<(&'static st
 
 /// The selectable row indices in display order (Save excluded), used to step
 /// ↑/↓ through the screen in the same order it is drawn.
-pub fn config_nav_order(is_global: bool, has_wine_game: bool) -> Vec<usize> {
-    config_sections(is_global, has_wine_game)
+pub fn config_nav_order(is_global: bool, has_wine_game: bool, is_encrypted: bool) -> Vec<usize> {
+    config_sections(is_global, has_wine_game, is_encrypted)
         .into_iter()
         .flat_map(|(_, idxs)| idxs)
         .collect()
@@ -2223,18 +2950,20 @@ pub fn config_nav_order(is_global: bool, has_wine_game: bool) -> Vec<usize> {
 
 /// Step from `selected` to the previous (`-1`) or next (`+1`) row in display
 /// order, wrapping around, with the Save button (`save_idx`) as the final stop.
-pub fn config_nav_step(is_global: bool, has_wine_game: bool, save_idx: usize, selected: usize, dir: i32) -> usize {
-    let mut order = config_nav_order(is_global, has_wine_game);
+pub fn config_nav_step(
+    is_global: bool,
+    has_wine_game: bool,
+    is_encrypted: bool,
+    save_idx: usize,
+    selected: usize,
+    dir: i32,
+) -> usize {
+    let mut order = config_nav_order(is_global, has_wine_game, is_encrypted);
     order.push(save_idx);
     let pos = order.iter().position(|&i| i == selected).unwrap_or(0);
     let len = order.len();
     let next = if dir < 0 { (pos + len - 1) % len } else { (pos + 1) % len };
     order[next]
-}
-
-/// Total navigable rows in the per-app Config screen.
-pub fn app_cfg_total_rows(has_wine_game: bool) -> usize {
-    if has_wine_game { 19 } else { 17 }
 }
 
 /// A fixed 32-char hex machine-id that apps can use as a plausible-looking ID.
@@ -2248,7 +2977,11 @@ fn on_config(app: &mut App, code: KeyCode) {
     // Capture wine_game presence before mut-borrowing app.screen so the row
     // count is known without dropping the borrow.
     let has_wg = app.editing_wine_game.is_some();
-    let save_idx = app_cfg_save_idx(has_wg);
+    let is_enc = match &app.screen {
+        Screen::Config { app_name, .. } => crate::veracrypt::is_encrypted(app_name),
+        _ => false,
+    };
+    let save_idx = app_cfg_save_idx(has_wg, is_enc);
 
     let Screen::Config { app_name, config, selected } = &mut app.screen else { return };
 
@@ -2260,10 +2993,10 @@ fn on_config(app: &mut App, code: KeyCode) {
             app.needs_clear = true;
         }
         KeyCode::Up | KeyCode::Char('k') => {
-            *selected = config_nav_step(false, has_wg, save_idx, *selected, -1);
+            *selected = config_nav_step(false, has_wg, is_enc, save_idx, *selected, -1);
         }
         KeyCode::Down | KeyCode::Char('j') => {
-            *selected = config_nav_step(false, has_wg, save_idx, *selected, 1);
+            *selected = config_nav_step(false, has_wg, is_enc, save_idx, *selected, 1);
         }
         KeyCode::Right | KeyCode::Char(' ') => {
             if *selected == save_idx {
@@ -2412,6 +3145,8 @@ pub fn setting_options(idx: usize) -> Vec<&'static str> {
         CFG_RAM_LIMIT => vec!["none", "512 MB", "1 GB", "2 GB", "4 GB", "8 GB", "custom"],
         CFG_AVAHI => vec!["stub", "host", "off"],
         CFG_USB => vec!["on", "off"],
+        CFG_PASSWORD_SOURCE => vec!["prompt", "master"],
+        CFG_LOCK_ON_EXIT => vec!["on", "off"],
         CFG_CREATE_SHORTCUT => vec!["yes", "no"],
         CFG_CONFIRM_INSTALL | CFG_ASK_SHORTCUT | CFG_CLEAN_CACHE => vec!["on", "off"],
         CFG_THEME => vec!["default", "amber", "matrix"],
@@ -2446,6 +3181,11 @@ pub fn setting_title(idx: usize) -> &'static str {
         20 => "Layout",
         CFG_SPOOF_UPTIME => "Spoof uptime",
         CFG_USB => "USB / removable media",
+        CFG_PASSWORD_SOURCE => "Container password",
+        CFG_MASTER_PASSWORD => "Master password",
+        CFG_MASTER_SHOW => "Stored passwords",
+        CFG_MASTER_FORGET => "Forget master password",
+        CFG_LOCK_ON_EXIT => "Lock on exit",
         _ => "Option",
     }
 }
@@ -2476,6 +3216,11 @@ pub fn setting_description(idx: usize) -> &'static str {
         20 => "Structural layout for the TUI (independent of Colour theme). Applies immediately.\n\n• default — horizontal tab strip on top, single-line borders\n• sidebar — vertical tab bar down the left, double-line borders, prompt-style cursor\n• bottom  — horizontal tab strip along the bottom, rounded borders, chevron cursor",
         CFG_SPOOF_UPTIME => "Report a fake system uptime inside the sandbox.\n\nFools fastfetch's 'Uptime', the uptime/w commands, and any sysinfo(2)/CLOCK_BOOTTIME reader via a /proc/uptime overlay plus an LD_PRELOAD shim. Time still advances from the fake value.\n\n• system — show the real uptime\n• 1 hour / 1 day / 1 week — fixed presets\n• custom — type a duration (3d4h, 90m) or bare seconds",
         CFG_USB => "Make USB / removable drives visible inside the sandbox.\n\nBinds the mount roots the desktop (or udisks/udevil/pmount) uses — /run/media, /media and /mnt — so drives show up in the app's file dialogs. Drives plugged in AFTER the app starts appear live, because the host mounts propagate into the sandbox.\n\n• on  — expose removable media\n• off — hide it (default; better isolation)",
+        CFG_MASTER_PASSWORD => "The one password that protects every stored container password.\n\nApps set to 'master' keep their container password in an encrypted store (~/.wryayer/.passwords.vault, Argon2id + AES-256-GCM). You type this master password once per boot; after that those apps unlock without prompting.\n\nPress Enter to create it, or to change it if it already exists. Changing it re-encrypts the store — the passwords inside are unaffected, so your containers keep working.",
+        CFG_LOCK_ON_EXIT => "Unmount this app's container when the app exits.\n\n• on  — the files become unreadable again the moment you close the app (default). Each launch mounts the container, which needs sudo.\n• off — leave it mounted until you lock it by hand. No sudo prompt per launch, but the files stay readable for the rest of the session.",
+        CFG_MASTER_SHOW => "Show the container passwords held in the master store.\n\nThe only way to read a password that was generated rather than typed — those are never printed when they're created. Needs the master password if the store isn't already unlocked this boot.",
+        CFG_MASTER_FORGET => "Forget the master key cached for this boot.\n\nThe store itself is untouched; only the cached key in $XDG_RUNTIME_DIR is dropped, so the next app needing a stored password asks for the master password again. Same as 'wryayer master lock'.",
+        CFG_PASSWORD_SOURCE => "Where this app's VeraCrypt container password comes from.\n\n• prompt — you type it before every launch, and the container is unmounted again when the app exits. Nothing is stored on disk.\n• master — it is read from the master password store, which you unlock once per boot. The container then stays mounted until you lock it.",
         _ => "No description available.",
     }
 }
@@ -2581,6 +3326,12 @@ pub fn option_description(setting_idx: usize, choice_idx: usize) -> &'static str
         (20, 0) => "default — Horizontal tab strip across the top with single-line panel borders.",
         (20, 1) => "sidebar — Vertical tab bar down the left edge, double-line borders and a '> ' cursor, for a terminal feel.",
         (20, 2) => "bottom — Horizontal tab strip along the bottom edge, rounded panel borders and a '» ' cursor.",
+        // Container password source
+        (CFG_PASSWORD_SOURCE, 0) => "prompt — Ask for the container password before every launch, and unmount it again when the app exits. Nothing is stored on disk.",
+        (CFG_PASSWORD_SOURCE, 1) => "master — Take the password from the master password store, unlocked once per boot.",
+        // Lock on exit
+        (CFG_LOCK_ON_EXIT, 0) => "on — Unmount the container as soon as the app exits, so its files stop being readable (default).",
+        (CFG_LOCK_ON_EXIT, 1) => "off — Leave the container mounted after the app exits. Avoids a sudo prompt per launch; the files stay readable until locked.",
         _ => "No description available.",
     }
 }
@@ -2645,6 +3396,11 @@ pub fn setting_current(config: &AppConfig, idx: usize) -> usize {
         },
         CFG_SPOOF_TERMINAL => usize::from(config.spoof_terminal),
         CFG_USB => if config.usb { 0 } else { 1 },
+        CFG_PASSWORD_SOURCE => match config.password_source {
+            PasswordSource::Prompt => 0,
+            PasswordSource::Master => 1,
+        },
+        CFG_LOCK_ON_EXIT => usize::from(!config.lock_on_exit),
         // Seconds. Exact preset -> its index; any other value -> "custom".
         CFG_SPOOF_UPTIME => match config.spoof_uptime {
             None            => 0,
@@ -2732,6 +3488,10 @@ pub fn apply_setting(config: &mut AppConfig, idx: usize, choice: usize) {
         (12, 1) => config.spoof_terminal = true,
         (CFG_USB, 0) => config.usb = true,
         (CFG_USB, 1) => config.usb = false,
+        (CFG_PASSWORD_SOURCE, 0) => config.password_source = PasswordSource::Prompt,
+        (CFG_PASSWORD_SOURCE, 1) => config.password_source = PasswordSource::Master,
+        (CFG_LOCK_ON_EXIT, 0) => config.lock_on_exit = true,
+        (CFG_LOCK_ON_EXIT, 1) => config.lock_on_exit = false,
         // Uptime values are seconds. "custom" (_, 4) opens a text input instead.
         (CFG_SPOOF_UPTIME, 0) => config.spoof_uptime = None,
         (CFG_SPOOF_UPTIME, 1) => config.spoof_uptime = Some(3600),   // 1 hour
@@ -3111,13 +3871,34 @@ fn on_space_tab(app: &mut App, code: KeyCode) {
 
 // ── Settings tab (global defaults) ───────────────────────────────────────────
 
+/// Master-store rows are actions, not values — they must never be cycled.
+fn is_master_action(idx: usize) -> bool {
+    matches!(idx, CFG_MASTER_PASSWORD | CFG_MASTER_SHOW | CFG_MASTER_FORGET)
+}
+
+/// Run the action for a master-store row. Returns whether it handled `idx`.
+fn handle_master_action(app: &mut App, idx: usize) -> bool {
+    match idx {
+        CFG_MASTER_PASSWORD => open_master_password(app),
+        CFG_MASTER_SHOW => open_reveal_passwords(app),
+        CFG_MASTER_FORGET => {
+            app.status = match crate::secrets::lock() {
+                Ok(()) => "Master password forgotten — it will be asked for again.".into(),
+                Err(e) => format!("error: {e:#}"),
+            };
+        }
+        _ => return false,
+    }
+    true
+}
+
 fn on_settings_tab(app: &mut App, code: KeyCode) {
     match code {
         KeyCode::Up | KeyCode::Char('k') => {
-            app.global_selected = config_nav_step(true, false, CFG_SAVE, app.global_selected, -1);
+            app.global_selected = config_nav_step(true, false, false, CFG_SAVE, app.global_selected, -1);
         }
         KeyCode::Down | KeyCode::Char('j') => {
-            app.global_selected = config_nav_step(true, false, CFG_SAVE, app.global_selected, 1);
+            app.global_selected = config_nav_step(true, false, false, CFG_SAVE, app.global_selected, 1);
         }
         KeyCode::Right | KeyCode::Char(' ') => {
             if app.global_selected == CFG_SAVE {
@@ -3133,10 +3914,15 @@ fn on_settings_tab(app: &mut App, code: KeyCode) {
                 open_shared_dirs_global(app);
                 return;
             }
+            if handle_master_action(app, app.global_selected) {
+                return;
+            }
             cycle_setting(&mut app.global_config, app.global_selected, 1);
         }
         KeyCode::Left
-            if app.global_selected != CFG_SAVE && app.global_selected != CFG_SHARES => {
+            if app.global_selected != CFG_SAVE
+                && app.global_selected != CFG_SHARES
+                && !is_master_action(app.global_selected) => {
                 cycle_setting(&mut app.global_config, app.global_selected, -1);
             }
         KeyCode::Enter => {
@@ -3151,6 +3937,9 @@ fn on_settings_tab(app: &mut App, code: KeyCode) {
             }
             if app.global_selected == CFG_SHARES {
                 open_shared_dirs_global(app);
+                return;
+            }
+            if handle_master_action(app, app.global_selected) {
                 return;
             }
             let idx = app.global_selected;
@@ -3523,11 +4312,42 @@ fn on_ask_shortcut(app: &mut App, code: KeyCode) {
         }
         KeyCode::Enter | KeyCode::Char(' ') => {
             let screen = std::mem::replace(&mut app.screen, Screen::Main);
-            if let Screen::AskShortcut { title, mut args, selected, .. } = screen {
+            if let Screen::AskShortcut { pkg, title, mut args, selected } = screen {
                 if selected == 1 {
                     args.push("--keep-without-launcher".into());
                 }
-                launch_op(app, title, args, None, true);
+                ask_encrypt(app, pkg, title, args);
+            }
+        }
+        _ => {}
+    }
+}
+
+// ── Container confirmation ────────────────────────────────────────────────────
+
+fn on_ask_encrypt(app: &mut App, code: KeyCode) {
+    let Screen::AskEncrypt { selected, .. } = &mut app.screen else { return };
+    if list_nav(selected, ENCRYPT_CHOICES.len(), code) {
+        return;
+    }
+    match code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            app.install_queue.clear();
+            app.screen = Screen::Main;
+            app.needs_clear = true;
+        }
+        KeyCode::Enter | KeyCode::Char(' ') => {
+            let screen = std::mem::replace(&mut app.screen, Screen::Main);
+            if let Screen::AskEncrypt { title, mut args, selected, .. } = screen {
+                let extra = ENCRYPT_CHOICES[selected].2;
+                args.extend(extra.iter().map(|s| s.to_string()));
+                if extra.is_empty() {
+                    launch_op(app, title, args, None, true);
+                } else {
+                    let use_master = extra.contains(&"--encrypt-master");
+                    let generate = extra.contains(&"--encrypt-generate");
+                    begin_encrypted_install(app, title, args, use_master, generate);
+                }
             }
         }
         _ => {}
@@ -3537,12 +4357,28 @@ fn on_ask_shortcut(app: &mut App, code: KeyCode) {
 // ── Shared helpers ────────────────────────────────────────────────────────────
 
 fn launch_op(app: &mut App, title: String, args: Vec<String>, total_bytes: Option<u64>, reload: bool) {
+    launch_op_with_stdin(app, title, args, total_bytes, reload, None)
+}
+
+/// As [`launch_op`], but writes `stdin_data` to the child's stdin and closes it.
+///
+/// Used to hand collected passwords to an encrypted install without putting
+/// them in argv (world-readable via /proc) or the environment (inherited by
+/// veracrypt and every other child).
+fn launch_op_with_stdin(
+    app: &mut App,
+    title: String,
+    args: Vec<String>,
+    total_bytes: Option<u64>,
+    reload: bool,
+    stdin_data: Option<String>,
+) {
     let into_target = args.windows(2)
         .find(|w| w[0] == "--into")
         .map(|w| w[1].clone());
     let (tx, rx) = mpsc::channel();
     let original_args = args.clone();
-    spawn_wryayer(args, tx);
+    spawn_wryayer(args, tx, stdin_data);
     app.log_scroll = 0;
     app.screen = Screen::Operation {
         title,
@@ -3619,12 +4455,12 @@ pub fn konami_status_for_toggle(now_active: bool) -> String {
     }
 }
 
-fn spawn_wryayer(args: Vec<String>, tx: mpsc::Sender<Msg>) {
+fn spawn_wryayer(args: Vec<String>, tx: mpsc::Sender<Msg>, stdin_data: Option<String>) {
     let exe = std::env::current_exe().unwrap_or_else(|_| "wryayer".into());
     thread::spawn(move || {
         let mut child = match Command::new(&exe)
             .args(&args)
-            .stdin(Stdio::null())
+            .stdin(if stdin_data.is_some() { Stdio::piped() } else { Stdio::null() })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -3636,6 +4472,15 @@ fn spawn_wryayer(args: Vec<String>, tx: mpsc::Sender<Msg>) {
                 return;
             }
         };
+
+        // Write the secrets and close stdin, so the child's reader sees EOF
+        // and stops waiting for more.
+        if let Some(data) = stdin_data {
+            if let Some(mut stdin) = child.stdin.take() {
+                use std::io::Write;
+                let _ = stdin.write_all(data.as_bytes());
+            }
+        }
 
         let stderr = child.stderr.take().unwrap();
         let tx2 = tx.clone();
@@ -3890,5 +4735,162 @@ fn on_game_confirm(app: &mut App, code: KeyCode) {
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod op_log_tests {
+    use super::*;
+
+    /// Build an Operation screen with `n` log lines, plus a live channel so the
+    /// receiver isn't dropped.
+    fn op_screen(n: usize, done: bool) -> (Screen, mpsc::Sender<Msg>) {
+        let (tx, rx) = mpsc::channel();
+        let screen = Screen::Operation {
+            title: "Install — bash".into(),
+            log: (0..n).map(|i| format!("line {i}")).collect(),
+            done,
+            success: false,
+            rx,
+            total_bytes: None,
+            progress: None,
+            started: Instant::now(),
+            reload: true,
+            show_log: false,
+            launcher_choice: None,
+            into_target: None,
+            outdated_pkg: None,
+            original_args: vec![],
+        };
+        (screen, tx)
+    }
+
+    fn show_log_of(app: &App) -> bool {
+        match &app.screen {
+            Screen::Operation { show_log, .. } => *show_log,
+            _ => panic!("not an Operation screen"),
+        }
+    }
+
+    #[test]
+    fn merge_target_is_read_from_the_into_flag() {
+        let args: Vec<String> = ["install", "vim", "--into", "toolbox"]
+            .iter().map(|s| s.to_string()).collect();
+        // No manifest for "toolbox" in the test environment, so it resolves to
+        // itself rather than following an alias.
+        assert_eq!(merge_target_root(&args).as_deref(), Some("toolbox"));
+    }
+
+    #[test]
+    fn a_fresh_install_has_no_merge_target() {
+        let args: Vec<String> = ["install", "vim"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(merge_target_root(&args), None);
+    }
+
+    #[test]
+    fn t_toggles_the_log_while_an_operation_runs() {
+        let mut app = App::new().unwrap();
+        let (screen, _tx) = op_screen(500, false);
+        app.screen = screen;
+
+        assert!(!show_log_of(&app), "log starts hidden");
+        handle_key(&mut app, KeyCode::Char('t')).unwrap();
+        assert!(show_log_of(&app), "'t' should open the log");
+        handle_key(&mut app, KeyCode::Char('t')).unwrap();
+        assert!(!show_log_of(&app), "'t' should close it again");
+    }
+
+    #[test]
+    fn t_toggles_the_log_after_an_operation_finishes() {
+        let mut app = App::new().unwrap();
+        let (screen, _tx) = op_screen(500, true);
+        app.screen = screen;
+
+        handle_key(&mut app, KeyCode::Char('t')).unwrap();
+        assert!(show_log_of(&app), "'t' should open the log when done");
+    }
+
+    /// Render the whole TUI to an off-screen buffer and return it as text.
+    fn render(app: &mut App, w: u16, h: u16) -> String {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| crate::tui::ui::draw(f, app)).unwrap();
+        let buf = term.backend().buffer().clone();
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn the_log_view_actually_shows_log_lines() {
+        // Regression: pressing 't' during an install showed an empty log.
+        let mut app = App::new().unwrap();
+        let (screen, _tx) = op_screen(500, false);
+        app.screen = screen;
+        handle_key(&mut app, KeyCode::Char('t')).unwrap();
+
+        let out = render(&mut app, 150, 46);
+        assert!(out.contains("Hide log"), "log view footer missing:\n{out}");
+        assert!(
+            out.contains("line 499") || out.contains("line 4"),
+            "no log lines rendered:\n{out}"
+        );
+    }
+
+    #[test]
+    fn the_log_view_follows_new_output() {
+        // With progress lines streaming in, a fixed offset strands the view on
+        // stale output. Following must always show the newest window.
+        let mut app = App::new().unwrap();
+        let (screen, _tx) = op_screen(20, false);
+        app.screen = screen;
+        handle_key(&mut app, KeyCode::Char('t')).unwrap();
+        assert!(app.log_follow);
+
+        // Simulate the operation emitting a lot more output.
+        if let Screen::Operation { log, .. } = &mut app.screen {
+            for i in 20..2000 {
+                log.push(format!("line {i}"));
+            }
+        }
+        let out = render(&mut app, 150, 46);
+        assert!(out.contains("line 1999"), "newest line not shown:\n{out}");
+
+        // Scrolling up detaches; the newest line should no longer be pinned.
+        handle_key(&mut app, KeyCode::Up).unwrap();
+        assert!(!app.log_follow, "scrolling up should stop following");
+    }
+
+    #[test]
+    fn opening_the_log_scrolls_to_content_that_exists() {
+        // Regression: log_scroll must leave the visible window inside the log,
+        // or the view renders blank even though lines are present.
+        let mut app = App::new().unwrap();
+        let (screen, _tx) = op_screen(500, false);
+        app.screen = screen;
+        handle_key(&mut app, KeyCode::Char('t')).unwrap();
+
+        let log_len = match &app.screen {
+            Screen::Operation { log, .. } => log.len(),
+            _ => unreachable!(),
+        };
+        for visible in [10usize, 28, 40] {
+            let scroll = app.log_scroll.min(log_len.saturating_sub(visible));
+            assert!(
+                scroll < log_len,
+                "scroll {scroll} past end of {log_len} lines (visible {visible})"
+            );
+            assert!(
+                log_len - scroll >= visible.min(log_len),
+                "only {} lines left to render for a {visible}-row window",
+                log_len - scroll
+            );
+        }
     }
 }

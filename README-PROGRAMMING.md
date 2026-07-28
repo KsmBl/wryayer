@@ -229,6 +229,7 @@ cargo test --all-features -- --test-threads=1 # serial: avoids races on shared
 | I want to change… | Go to |
 |---|---|
 | a config field | `config.rs` → `run.rs` → `main.rs`/`commands/config.rs` → `tui/` → `gui/config.rs` |
+| an encryption behaviour | `veracrypt.rs` (container ops) / `secrets.rs` (passwords) → `commands/encrypt.rs` → `main.rs` → `tui/` |
 | how an app is sandboxed | `commands/run.rs` (`bwrap_cmd`, `launch_bwrap`) |
 | CPU / topology spoofing | `cpu.rs` (data) + `csrc/cpuid_spoof.c` (CPUID/affinity) + `run.rs` (`/proc`, `/sys`) |
 | cross-container app binding | `csrc/portal_client.c` + `commands/portal.rs` + `run.rs` |
@@ -261,6 +262,9 @@ README-CODE.md for the diagram version.
 | `cpu.rs` | Built-in CPU profiles + the `CustomCpu` type; renders `/proc/cpuinfo`, and provides `cpuid_spoof_for` / `topology_for` for the launcher and shim. |
 | `distro.rs` | Detects the host distro and selects the package backend (pacman/apt/dnf); downloads packages and **verifies their signatures before extraction** (`gpg`/`rpmkeys`/apt auth). |
 | `launcher.rs` | Creates/removes the `~/bin/<app>` shell wrapper. |
+| `veracrypt.rs` | Per-app VeraCrypt containers: create/mount/unmount, `--list` parsing, container sizing, and the `.encrypted.toml` locked-state marker. |
+| `secrets.rs` | The master password store — Argon2id → AES-256-GCM, plus the per-boot derived-key cache in `$XDG_RUNTIME_DIR` and the no-echo password prompts. |
+| `entropy.rs` | Multi-source entropy pool (urandom, sensors, mouse, RAM, IRQs, clock) and the password generator built on it. |
 | `avahi_stub.rs` | Config/data for the in-sandbox Avahi stub bus. |
 
 **`commands/` — one file per subcommand**
@@ -276,6 +280,7 @@ README-CODE.md for the diagram version.
 | `export.rs` / `import.rs` | Zip an app tree / recreate one from a zip. |
 | `dedup.rs` | Cross-app hard-link identical files; disk-usage accounting (`format_bytes`, `all_du`). |
 | `repair.rs` | Resolve + install packages for missing sonames. |
+| `encrypt.rs` | Move an app into/out of a container (rollback-safe swap), lock/unlock, password-source resolution, master-store subcommands, and the `require_unlocked` guardrail. |
 | `list.rs` | The `wryayer list` table + size totals. |
 | `clean.rs` | Wipe the shared download/build cache. |
 | `config.rs` | The `wryayer config` CLI surface (reads/writes `AppConfig`). |

@@ -11,6 +11,7 @@ use zip::CompressionMethod;
 use zip::ZipWriter;
 
 pub fn run(app_name: &str, output: Option<&PathBuf>) -> Result<()> {
+    crate::commands::encrypt::require_unlocked(app_name, "export")?;
     read_manifest(app_name)
         .with_context(|| format!("'{app_name}' is not installed"))?;
 
@@ -50,10 +51,19 @@ pub fn run(app_name: &str, output: Option<&PathBuf>) -> Result<()> {
     let stride = (total_entries / 200).max(1);
 
     while let Some(dir) = queue.pop_front() {
-        for entry in fs::read_dir(&dir)
-            .with_context(|| format!("failed to read {}", dir.display()))?
-            .flatten()
-        {
+        // Skip-with-warning rather than abort, matching how unreadable *files*
+        // are handled below. A single unreadable directory used to fail the
+        // whole export — and worse, it did so after the zip was already open,
+        // leaving a truncated archive that looked plausible.
+        let entries = match fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("  warning: skipping {} ({e})", dir.display());
+                skipped += 1;
+                continue;
+            }
+        };
+        for entry in entries.flatten() {
             let path = entry.path();
             // Skip the snapshots subtree — those are wryayer-internal
             if path.file_name().map(|n| n == SNAP_DIR).unwrap_or(false) {

@@ -130,7 +130,7 @@ pub fn run(
         regenerate_runtime_caches(&container_dir);
 
         eprintln!("Checking for missing shared library dependencies...");
-        if let Ok(extra) = satisfy_missing_sonames_for(&container_dir, &cache_dir, &new_paths) {
+        if let Ok(extra) = satisfy_missing_sonames_for(&container_dir, &cache_dir, &new_paths, None) {
             if !extra.is_empty() {
                 eprintln!("  Added: {}", extra.join(", "));
             }

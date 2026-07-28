@@ -58,7 +58,8 @@ tagged `[repo]` or `[aur]`). Press `Space` to mark several packages, then
 **Settings tab** — global defaults inherited by every newly installed app:
 network and device toggles, temp mode, identity spoofing, RAM limit, the
 install-behaviour switches (**Confirm install** / **Ask shortcut** / **Clean
-cache**), and the **TUI theme** (`default`, `amber`, or `matrix` colours) and **layout**
+cache**), the **master password** for [encrypted containers](#encrypted-containers),
+and the **TUI theme** (`default`, `amber`, or `matrix` colours) and **layout**
 (`default` top tab strip; `sidebar` — a vertical tab bar with double-line
 borders and a prompt cursor; or `bottom` — a bottom tab strip with rounded
 borders). Theme and layout are independent, so any colour combines with any
@@ -102,13 +103,25 @@ Changes are saved to that app's own `config.ini`.
 
 **Multi-select install** — In the Install tab, press `Space` to mark one or more search results, then `Enter` to install all marked packages one after another. Marks persist across searches, so you can queue packages from several searches before starting. Pressing `Enter` with no marks installs the hovered item.
 
-**Install prompts** — Before an install begins, wryayer asks for a confirmation and then whether to create a `~/bin/<name>` launcher shortcut. Both can be turned off in the Settings tab if you'd rather installs start immediately:
+**Install prompts** — Before an install begins, wryayer asks for a confirmation, then whether to create a `~/bin/<name>` launcher shortcut, and finally whether to install the app into its own [encrypted container](#encrypted-containers). The first two can be turned off in the Settings tab if you'd rather installs start immediately:
 
 | Setting | Effect |
 |---|---|
 | **Default shortcut** | Whether the shortcut prompt pre-selects "Yes" or "No" |
 | **Confirm install** | `off` skips the "Install `<pkg>`?" prompt and starts the install immediately |
 | **Ask shortcut** | `off` skips the shortcut prompt and silently applies **Default shortcut** |
+
+The encryption prompt only appears when `veracrypt` is installed, and defaults to
+"No". Choosing an encrypt option asks for whatever passwords are still needed —
+your sudo password, the container password, the master password — each in a
+masked prompt, and each **checked as you enter it**. The install itself then runs
+in the normal operation window with its live log (`t` to expand), exactly like an
+unencrypted install.
+
+Because the passwords are validated up front, a typo costs a re-prompt rather
+than a completed multi-gigabyte install that then fails to encrypt. Prompts you
+have already satisfied are skipped, so a second encrypted install in the same
+session usually asks for nothing at all.
 
 Settings are stored in `~/.wryayer/defaults.ini` and apply as defaults to every newly installed app; per-app overrides always take precedence.
 
@@ -187,6 +200,7 @@ wryayer auto-detects your distro from `/etc/os-release` and uses the appropriate
 | `gdk-pixbuf-query-loaders` | `sudo pacman -S gdk-pixbuf2` | Optional — pixbuf loader cache |
 | `xdg-dbus-proxy` | `sudo pacman -S xdg-dbus-proxy` | Optional — required for the file-picker portal filter (on by default) |
 | `dbus-daemon` | Bundled with `dbus` | Optional — runs the private per-sandbox Avahi stub bus (`avahi = stub`, the default) that silences zeroconf errors in Electron/KDE apps without touching the host |
+| `veracrypt` | `sudo pacman -S veracrypt` | Optional — required only to install apps into [encrypted containers](#encrypted-containers) |
 
 ### Debian / Ubuntu
 
@@ -551,6 +565,168 @@ wryayer config firefox share list
 | `ramlimit <MiB\|none>` | Integer (MiB) or `none` | `none` | Hard cap on RAM **and** swap combined, enforced via `systemd-run --scope -p MemoryMax=NM -p MemorySwapMax=0` (requires systemd). Both limits are necessary — without `MemorySwapMax=0` the kernel silently offloads pages to swap (including zram), letting the app exceed the cap. |
 | `portal_filter` | `on` `off` | `on` | Hide the host desktop portal so in-sandbox file pickers list only your shared directories instead of the whole home tree. Turn `off` if an app needs portal features (screen-share, portal-based file open). |
 | `bind_app <name>` | Another installed app | — | Let this app open links/files in `<name>`'s sandbox (see below) |
+| `password_source` | `prompt` `master` | `prompt` | Only for apps in a VeraCrypt container: where the container password comes from (see [Encrypted containers](#encrypted-containers)) |
+| `lock-on-exit` | `on` `off` | `on` | Unmount an encrypted app's container when the app exits. `off` keeps it mounted until locked by hand — no sudo prompt per launch, but the files stay readable |
+
+## Encrypted containers
+
+An app can live inside its **own VeraCrypt container** instead of a plain
+directory. While the container is locked its files are unreadable — not just
+their contents but the entire tree: filenames, the package list, the browser
+profile, all of it. `~/.wryayer/<app>/` is simply an empty directory until the
+container is mounted over it.
+
+This is independent of encrypting `~/.wryayer` as a whole. Encrypting the root
+protects everything at once behind one password; a per-app container adds a
+second, separate lock so that unlocking your app collection doesn't
+automatically expose the one app you care most about.
+
+```fish
+# During install (the TUI asks right after the ~/bin shortcut question)
+wryayer install signal-desktop --encrypt
+
+# Or convert an already-installed app
+wryayer encrypt firefox
+wryayer encrypt firefox --master --generate   # generated password, kept in the master store
+
+wryayer unlock firefox      # mount it
+wryayer lock firefox        # unmount it
+wryayer encryption          # what's encrypted, and what's currently unlocked
+wryayer decrypt firefox     # move it back to a plain directory
+```
+
+The container is a completely ordinary VeraCrypt volume at
+`~/.wryayer/.containers/<app>.hc` — you can open it with the VeraCrypt GUI on
+any machine. It uses AES-256 with SHA-512 header derivation and an ext4
+filesystem (ext4 because app trees need symlinks, exec bits and hard links —
+snapshots and `wryayer dedup` are built on hard links).
+
+**Sizing.** The container is created *after* the install finishes, so it is
+sized from what the app actually occupies rather than a guess: `used + headroom`,
+where headroom is half the tree clamped to 512 MiB…2 GiB, plus ext4 overhead. A
+50 MiB utility gets 768 MiB; a 10 GiB game gets 12.5 GiB. Small apps get
+generous room to grow because it costs little; large apps get proportionally
+less because doubling 10 GiB is expensive.
+
+### Installing more into an encrypted app
+
+`wryayer install <pkg> --into <encrypted-app>` needs no decision: the files are
+written straight into that app's container, so the TUI doesn't ask whether to
+encrypt them — there is no second container to create. It unlocks the target
+first (asking only for what it doesn't already know) and installs into it.
+
+The container is grown automatically if it would run out of room. VeraCrypt
+volumes are fixed-size and cannot be resized in place, so growing means creating
+a larger container, copying the contents across and swapping the files — slow,
+but it only happens when actually needed, and the original is kept until the
+copy is complete. Space is checked again before each package the
+soname-repair pass pulls in, because one missing library can drag in a
+multi-gigabyte driver long after the install was sized.
+
+### Where the password comes from
+
+Set per app under **Encryption** in the config screen, or with
+`wryayer config <app> …`:
+
+| `password_source` | Behaviour |
+|---|---|
+| `prompt` (default) | You type the container password before every launch. Nothing is stored on disk. |
+| `master` | The password is read from the master password store, so launches don't prompt. |
+
+Either way the container is **unmounted when the app exits**, so its files stop
+being readable the moment you close it. That costs a sudo prompt per launch;
+`wryayer config <app> lock-on-exit off` trades it back for staying mounted until
+you `wryayer lock` it.
+
+### The master password store
+
+One file holding one container password per app, encrypted with a single master
+password you type **once per boot**:
+
+The TUI has all of this under **Settings tab → Encryption**:
+
+| Row | What it does |
+|---|---|
+| **Master password** | Create it, or change it (asks for the current one first) |
+| **Stored passwords** | Show the container passwords held in the store |
+| **Forget master password** | Drop the cached key so it's asked for again |
+
+`wryayer master show` is worth knowing about: a **generated** password is never
+printed when it is created, so this is the only way to read one — to put it in a
+password manager, or to open the container with the VeraCrypt GUI directly.
+Everything is also available on the command line:
+
+```fish
+wryayer master init              # create it
+wryayer master set firefox       # type a password for an app
+wryayer master set firefox --generate
+wryayer master list              # which apps have a stored password
+wryayer master show              # print every stored password
+wryayer master show firefox      # print just this one
+wryayer master forget firefox
+wryayer master change            # change the master password
+wryayer master lock              # require the master password again now
+```
+
+The store is at `~/.wryayer/.passwords.vault`: **Argon2id** stretches the master
+password into a 256-bit key, and **AES-256-GCM** encrypts the payload. GCM is
+authenticated, so a wrong master password, a corrupted file and a tampered one
+all fail loudly instead of yielding garbage.
+
+"Once per boot" works without any daemon: the *derived key* — never the master
+password, never the app passwords — is cached in `$XDG_RUNTIME_DIR`, a tmpfs the
+kernel discards on reboot. Changing the master password re-salts the store,
+which invalidates the cache automatically.
+
+### The password generator
+
+`wryayer genpw` (and the `--generate` flags) builds a password from an entropy
+pool that mixes `/dev/urandom`, `/dev/random`, every hardware temperature
+sensor, the mouse position, RAM usage, scheduler and interrupt counters, and the
+nanosecond clock — all folded together through SHA-512.
+
+```console
+$ wryayer genpw
+=A4$b84%Ty[-FVog}uFG^OL(_Xe;@[L(
+entropy sources: /dev/urandom, /dev/random, 24 temperature sensors, RAM usage, scheduler counters, interrupt counters, clock (ns)
+```
+
+Passwords are 32 characters by default, drawn from a 90-character alphabet
+(letters, digits and 28 symbols — quotes, backslashes and backticks are left out
+because these end up in shell-adjacent places). That's about **207 bits**. Each
+password is guaranteed to contain at least one lowercase, uppercase, digit and
+symbol, and characters are picked by rejection sampling so none is even slightly
+more likely than another.
+
+To be straight about the security model: `/dev/urandom` alone is already
+cryptographically secure and nothing else here improves on it. Because the
+sources are combined with a hash, the extra ones can only ever *add* to the pool
+— they can't weaken it. Their real value is covering the case where the kernel
+CSPRNG is broken or unseeded (a freshly imaged VM, a cloned container, a kernel
+RNG bug), where sensor noise and cycle-level timing are the only things that
+differ between two otherwise identical machines. Mouse position is read from the
+compositor where one exposes it (Hyprland, X11/XWayland) and otherwise from raw
+pointer deltas; Wayland deliberately offers no way to query the cursor, so on
+some sessions it contributes only while the mouse is moving.
+
+The exact construction — sources, the SHA-512 extractor, the counter-mode
+keystream and the unbiased character selection — is written up in
+[`README-CODE.md`](README-CODE.md#password-generation-entropyrs).
+
+### Caveats
+
+- **Mounting needs root.** VeraCrypt sets up a loop device, so wryayer runs it
+  under `sudo`. The first container operation after your sudo timeout expires
+  asks for your sudo password; later ones reuse the cached credentials. In the
+  TUI this is just the first prompt of the install — nothing drops to a bare
+  terminal.
+- **Locked apps are read-only to wryayer.** `update`, `repair`, `snapshot`,
+  `rollback` and `export` refuse to touch a locked app and tell you to unlock it
+  first. `wryayer update` (all apps) skips locked ones rather than failing.
+  Locked apps still appear in `list` and the TUI, with a 🔒 badge, and can still
+  be removed.
+- **With `prompt`, don't lose the password.** It is not stored anywhere. A
+  generated password is printed once, at creation.
 
 ### Open links in another app (bound apps)
 
@@ -732,6 +908,7 @@ The config is stored as a human-readable INI file at `~/.wryayer/<app>/config.in
 - [x] **Rollback support** — `wryayer snapshot` + `wryayer rollback` (hard-linked, instant)
 - [x] **Install into existing app** — `wryayer install <pkg> --into <existing>` for plugins and bundles; alias gets its own first-class entry under `~/.wryayer/<pkg>/` with `alias_of` pointer
 - [x] **TUI install target picker** — choosing Install on a search result now prompts whether to start a new app or merge into an existing one
+- [x] **Per-app encryption** — install an app into its own VeraCrypt container, with the password either typed at each launch or kept in an Argon2id/AES-GCM master password store unlocked once per boot
 - [ ] **Wayland isolation** — bind a private Wayland socket so apps can't impersonate each other
 - [x] **D-Bus portal filtering** — file pickers run in-sandbox and only show shared dirs, via an `xdg-dbus-proxy` filter that hides the host portal (`portal_filter`)
 - [x] **Package signing verification** — every downloaded package is authenticated before extraction (Arch `.pkg.tar.zst` via the pacman keyring, Fedora `.rpm` via the rpm keyring, Debian `.deb` via apt's signed repo metadata)

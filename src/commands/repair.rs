@@ -5,6 +5,7 @@ use anyhow::{Context, Result};
 use std::path::PathBuf;
 
 pub fn run(app_name: &str) -> Result<()> {
+    crate::commands::encrypt::require_unlocked(app_name, "repair")?;
     read_manifest(app_name)
         .with_context(|| format!("'{app_name}' is not installed"))?;
 

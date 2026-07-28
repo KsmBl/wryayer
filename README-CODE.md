@@ -19,6 +19,9 @@ src/
 ├── config.rs          ← AppConfig, INI parse/format, global defaults.ini
 ├── cpu.rs             ← CPU profiles + custom CPUs; /proc/cpuinfo & CPUID data
 ├── launcher.rs        ← ~/bin/<app> shell wrapper create/remove
+├── veracrypt.rs       ← per-app container create/mount/unmount, sizing, marker
+├── secrets.rs         ← master password store (Argon2id + AES-256-GCM)
+├── entropy.rs         ← multi-source entropy pool + password generator
 ├── distro.rs          ← per-distro backend (pacman / apt / dnf), auto-detected
 ├── package/
 │   ├── deps.rs        ← BFS dependency resolver, virtual/soname fallback
@@ -36,6 +39,7 @@ src/
 │   ├── import.rs      ← recreate an app from an exported zip
 │   ├── dedup.rs       ← cross-app hard-link identical files; du accounting
 │   ├── repair.rs      ← resolve+install packages for missing sonames
+│   ├── encrypt.rs     ← move an app into/out of a container; password sources
 │   ├── list.rs        ← table + apparent/on-disk/savings totals
 │   ├── portal.rs      ← host-side listener for cross-container app binding
 │   └── config.rs      ← `wryayer config` CLI surface
@@ -117,6 +121,11 @@ codebase is package-manager agnostic.
 
 ```
 ~/.wryayer/
+├── .containers/             ← VeraCrypt volumes backing encrypted apps
+│    ├── signal.hc           ← mounted over ~/.wryayer/signal/ when unlocked
+│    └── signal.toml         ← listing marker + password_source (readable when locked)
+├── .passwords.vault         ← master password store (Argon2id + AES-256-GCM)
+├── signal/                  ← encrypted app: an empty mount point while locked
 ├── firefox/                 ← isolated root (bind-mounted as / at runtime)
 │   ├── usr/
 │   │   ├── bin/firefox
@@ -419,6 +428,179 @@ bypasses verification. The pure verdict helpers (`rpm_checksig_ok`,
 app with a newer version available; the TUI runs it on a background thread at
 startup and after each reload to drive the update dots, and `Shift+U` updates
 every out-of-date app at once.
+
+---
+
+## Encrypted containers (`veracrypt.rs`, `secrets.rs`, `entropy.rs`, `commands/encrypt.rs`)
+
+An encrypted app's tree lives inside a VeraCrypt volume at
+`~/.wryayer/.containers/<app>.hc`, mounted **over** `~/.wryayer/<app>/`. Mounting
+over the app's normal path is what makes the feature cheap: every other
+subsystem — bwrap, update, snapshot, dedup — keeps operating on the same path it
+always used and needs no knowledge of encryption. While locked it simply sees an
+empty directory.
+
+wryayer shells out to the `veracrypt` binary rather than driving `cryptsetup`
+(which can open VeraCrypt volumes but not create them), so a container wryayer
+makes is an ordinary VeraCrypt volume the user can open anywhere. Passwords are
+fed on **stdin** (`--stdin`), never `--password=`, so they never appear in
+`/proc/<pid>/cmdline`.
+
+### Locked-state marker
+
+`.containers/<app>.toml` records name, launchers, `alias_of`, display name and
+`password_source`. `list_all_apps` and `read_manifest_or_marker` fall back to it
+so a locked app still lists and can still be removed. It deliberately does
+**not** carry the package list — that stays inside the container, so a locked
+app reveals nothing about its contents.
+
+It lives *beside the container*, not inside the app directory, because that
+directory is a mount point: a marker there is hidden exactly when the container
+is mounted, which makes it unwritable precisely when settings change. Keeping it
+outside means it is readable and writable in both states — which is what lets
+`password_source` be consulted while locked, the one moment the unlock path
+needs it and `config.ini` (which lives *inside* the container) cannot be read.
+`config::write_config` mirrors the setting across. The old in-app-directory
+location is still read, so containers made before the move keep working.
+
+### Root privileges
+
+VeraCrypt needs root to attach a loop device, and its own escalation path is
+unusable here: with `--non-interactive` it cannot ask for an admin password and
+just fails, and without it, it prompts on a terminal a TUI-spawned process does
+not have. So wryayer invokes `sudo veracrypt` itself. sudo reads its own password
+from `/dev/tty` or a cached ticket, leaving stdin free for the volume password —
+the two secrets never contend for the same channel. `prime_sudo` (`sudo -S -v`)
+lets the TUI cache credentials from a password typed in an overlay, so the
+install subprocess runs with fully piped stdio and its log stays in the TUI.
+
+Running veracrypt as root means the container file and the freshly formatted
+filesystem come out root-owned, so `create` chowns the file back and
+`ensure_owner_writable` chowns the mount point. ext4 has no `uid=` mount option,
+so this is the only way. `mkfs.ext4` also leaves a root-owned `lost+found`
+inside an otherwise user-owned tree; it is chowned on every mount, because
+leaving one unreadable directory there breaks every consumer that walks the app
+tree (`export` used to abort its whole archive on the failed `read_dir`).
+
+### Conversion is a rollback-safe swap
+
+`commands::encrypt::run` orders its steps so that **the staging directory
+`.<app>.wr-plain` existing means the conversion did not finish**, whatever else
+is on disk: the tree is renamed aside (atomic) → container created → marker
+written and container mounted → tree copied in → only then is staging deleted.
+`recover_interrupted_encrypt` therefore rolls the whole thing back rather than
+guessing how far it got — discarding a half-filled container is free, losing the
+app is not. It is called from `run` and from `encrypt` itself, mirroring
+`recover_interrupted_update`.
+
+The copy preserves hard links via a `(dev, ino)` map. Without that, snapshots and
+deduplicated libraries would each get their own inode and could multiply the
+tree's real size several times over, overflowing a container sized from the
+deduplicated total.
+
+### Sizing
+
+`recommended_size` runs *after* the install, against the finished tree, so it
+measures rather than guesses: `used + headroom + ext4 overhead`, headroom being
+half the tree clamped to 512 MiB…2 GiB, rounded up to 128 MiB. Small apps get
+generous absolute room; large ones get proportionally less.
+
+### Password sources and re-locking
+
+`password_source = prompt` unmounts the container when the app exits, so the
+password is genuinely required each launch. This is why `run/mod.rs` **disables
+its `exec()` fast-path** for such apps — an `exec` would replace the process and
+leave nothing to unmount afterwards, so the repaired-relaunch branch becomes a
+spawn+wait. Unmount failure is never fatal: a second running instance keeps the
+filesystem busy and the kernel refuses, which is the correct outcome.
+
+`password_source = master` reads from `secrets.rs`: Argon2id stretches the master
+password to a 256-bit key and AES-256-GCM encrypts the payload. "Type it once per
+boot" needs no daemon — the *derived key* is cached in `$XDG_RUNTIME_DIR` (tmpfs,
+gone on reboot) alongside the salt it came from, so re-keying invalidates the
+cache automatically. `Store` has a hand-written `Debug` that redacts, because a
+derived one would print every container password into any panic message.
+
+### Merge installs and container growth
+
+`install --into <encrypted-app>` writes into the target's container rather than
+creating one, so the encryption prompt is skipped entirely. `install::run`
+unlocks the target first — without that, every extracted file would land in the
+directory *underneath* the mount point and disappear the moment it was mounted —
+and keeps the password, because growing the container needs it again.
+
+Space is enforced in two places. Once up front, when the archive sizes are known
+but nothing has been written yet, and then again through a `SpaceGuard` handed
+to the soname-satisfy loop: that loop discovers and extracts further packages
+*after* the install was sized, and a single missing `libGL` can pull in an
+entire graphics driver. `ensure_room_for` grows the volume by the shortfall plus
+half again, so a run of merge installs doesn't rebuild the container each time.
+
+Growth is create-bigger, copy, swap — VeraCrypt cannot resize in place. The
+original container is only replaced once the new one holds a complete copy, so
+an interruption leaves the app exactly as it was.
+
+### Guardrails
+
+`require_unlocked` fails `update`, `repair`, `snapshot`, `rollback` and `export`
+on a locked app. This matters beyond convenience: the app directory is a mount
+point, so an operation run while locked would write its result into the
+*underlying* directory, where the next mount would hide it. `wryayer update`
+across all apps skips locked ones instead of failing the batch.
+
+### Password generation (`entropy.rs`)
+
+`generate_password(len)` runs in four stages: collect, extract, expand, select.
+
+**1. Collect.** Every source is folded into one SHA-512 state, each one
+length-prefixed so that two different splits of the same bytes can't produce the
+same input:
+
+| Source | What is read |
+|---|---|
+| `/dev/urandom` | 64 bytes — the load-bearing source |
+| `/dev/random` | 32 bytes, non-blocking |
+| hwmon / thermal | every `/sys/class/hwmon/*/temp*_input` and `/sys/class/thermal/thermal_zone*/temp` |
+| mouse position | `hyprctl cursorpos` (Wayland), else `xdotool getmouselocation` (X11/XWayland), else up to 32 bytes of movement deltas from `/dev/input/mice` |
+| RAM usage | `/proc/meminfo` |
+| scheduler | `/proc/stat` |
+| interrupts | `/proc/interrupts` — per-device IRQ totals, which move on every keystroke |
+| clock | `SystemTime` nanoseconds and the pid, then a *second* nanosecond read after collecting; the gap between them reflects how long collection actually took under live load |
+
+Anything unavailable contributes nothing. A `SourceReport` records which sources
+fired, which is what `wryayer genpw` prints on stderr.
+
+**2. Extract.** `seed = SHA-512(collected)` — 64 bytes.
+
+**3. Expand.** A hash-based DRBG in counter mode: block `i` is
+`SHA-512(seed ‖ i)` with `i` as a little-endian `u64`, consumed byte by byte.
+Output blocks reveal nothing about the seed or about each other.
+
+**4. Select.** `below(n)` draws a byte and **rejects** anything at or above
+`256 - (256 % n)`, redrawing instead — so every character is exactly equally
+likely. A plain `% n` would over-represent the first `256 % n` characters of the
+alphabet. One character is drawn from each of the four classes first so each is
+guaranteed present, the rest come from the full alphabet, and a Fisher-Yates
+shuffle (over the same stream) mixes them so the guaranteed characters aren't
+always in front.
+
+The alphabet is 90 characters — 26 lowercase, 26 uppercase, 10 digits and 28
+symbols. Quotes, backslashes and backticks are excluded because these passwords
+end up in shell-adjacent contexts; that costs about 0.05 bits per character.
+At log2(90) ≈ 6.49 bits each, the 32-character default is ≈ 207 bits.
+
+**On the extra sources.** `/dev/urandom` alone is already cryptographically
+secure and nothing else here improves on it. Because everything is combined by
+hashing, the auxiliary sources can only ever *add* — `SHA-512(strong ‖ weak)` is
+no weaker than `SHA-512(strong)`. They exist for one specific failure mode: a
+CSPRNG that is broken or unseeded (a freshly imaged VM, a container with a cloned
+entropy pool, a kernel RNG bug), where sensor noise, cursor position and
+cycle-level timing are the only things distinguishing two otherwise identical
+machines.
+
+**Liveness.** Every device read is non-blocking, and the mouse fallback is
+`poll(2)`-bounded to 50 ms, so an unseeded `/dev/random` or a mouse nobody is
+touching can never stall generation.
 
 ### AUR build quirks (`package/download.rs`)
 

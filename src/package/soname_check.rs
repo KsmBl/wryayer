@@ -2,13 +2,46 @@ use crate::package::{download_official, extract_package};
 use anyhow::{Context, Result};
 use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+/// How often a long-running phase reports what it is doing.
+///
+/// The soname pass has two phases that can run for a long time with nothing to
+/// say — walking a 400-package tree parsing every ELF, and querying the package
+/// manager for each missing soname (several forks per query). Without output the
+/// TUI just sits on "Checking for missing shared library dependencies…" and
+/// looks hung. Fast enough to feel live, slow enough not to flood the TUI's log
+/// channel with thousands of lines.
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(400);
+
+/// Rate-limited progress reporter for a phase with no natural line output.
+struct Ticker {
+    last: Instant,
+}
+
+impl Ticker {
+    fn new() -> Self {
+        // Start in the past so the first tick fires immediately: the user should
+        // see the phase begin, not wait out the first interval.
+        Self { last: Instant::now() - PROGRESS_INTERVAL }
+    }
+
+    /// Print `msg()` if enough time has passed. The closure means the message is
+    /// only formatted when it will actually be shown.
+    fn tick(&mut self, msg: impl FnOnce() -> String) {
+        if self.last.elapsed() >= PROGRESS_INTERVAL {
+            eprintln!("{}", msg());
+            self.last = Instant::now();
+        }
+    }
+}
 
 /// Walk `app_dir`, find every ELF NEEDED soname that is absent from the tree,
 /// and extract the owning package for each one. Loops until convergence so that
 /// transitive deps of newly added packages are also satisfied.
 /// Returns the list of package names that were installed.
 pub fn satisfy_missing_sonames(app_dir: &Path, cache_dir: &Path) -> Result<Vec<String>> {
-    satisfy_missing_sonames_impl(app_dir, cache_dir, None)
+    satisfy_missing_sonames_impl(app_dir, cache_dir, None, None)
 }
 
 /// Like `satisfy_missing_sonames` but on the first iteration only scans the
@@ -23,14 +56,16 @@ pub fn satisfy_missing_sonames_for(
     app_dir: &Path,
     cache_dir: &Path,
     seed_paths: &[PathBuf],
+    space: Option<&crate::veracrypt::SpaceGuard>,
 ) -> Result<Vec<String>> {
-    satisfy_missing_sonames_impl(app_dir, cache_dir, Some(seed_paths))
+    satisfy_missing_sonames_impl(app_dir, cache_dir, Some(seed_paths), space)
 }
 
 fn satisfy_missing_sonames_impl(
     app_dir: &Path,
     cache_dir: &Path,
     seed_paths: Option<&[PathBuf]>,
+    space: Option<&crate::veracrypt::SpaceGuard>,
 ) -> Result<Vec<String>> {
     // Per-soname progress/warnings are a wall of output on big apps (Steam et al).
     // Off by default: collapse to a one-line summary, full detail behind the env.
@@ -59,14 +94,28 @@ fn satisfy_missing_sonames_impl(
 
         let mut progress = false;
         let mut iter_new_paths: Vec<PathBuf> = Vec::new();
-        for soname in &missing {
+        let total = missing.len();
+        for (i, soname) in missing.iter().enumerate() {
+            // Not throttled: each lookup shells out to the package manager
+            // several times and can take a second or more, so one line per
+            // soname *is* the natural pace — and it names exactly what is being
+            // resolved right now.
+            eprintln!("  [{}/{total}] looking up {soname}", i + 1);
             match crate::distro::soname_owner(soname) {
                 Ok(Some(pkg)) if !visited.contains(&pkg) => {
-                    if verbose {
-                        eprintln!("  installing {pkg} (provides {soname})...");
-                    }
+                    // Worth showing unconditionally: it is bounded by the number
+                    // of packages actually installed, and it is the one part of
+                    // this phase that changes the app.
+                    eprintln!("  installing {pkg} (provides {soname})...");
                     let path = download_official(&pkg, cache_dir)
                         .with_context(|| format!("failed to download {pkg}"))?;
+                    // These packages are discovered mid-loop, long after the
+                    // install was sized, and a single missing soname can drag in
+                    // a multi-gigabyte driver. Reserve before unpacking.
+                    if let Some(guard) = space {
+                        let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                        guard.reserve(bytes)?;
+                    }
                     extract_package(&path, app_dir)
                         .with_context(|| format!("failed to extract {pkg}"))?;
                     for rel in crate::distro::list_pkg_files(&path) {
@@ -134,10 +183,13 @@ pub fn find_missing_sonames(app_dir: &Path) -> Result<Vec<String>> {
 /// from an earlier install.
 pub fn find_missing_sonames_in_paths(paths: &[PathBuf], app_dir: &Path) -> Result<Vec<String>> {
     let mut needed: HashSet<String> = HashSet::new();
-    for path in paths {
+    let mut ticker = Ticker::new();
+    let total = paths.len();
+    for (i, path) in paths.iter().enumerate() {
         if !path.is_file() {
             continue;
         }
+        ticker.tick(|| format!("  scanning new files ({}/{total})", i + 1));
         if let Ok(libs) = elf_needed(path) {
             needed.extend(libs);
         }
@@ -183,6 +235,9 @@ fn collect_needed_impl(start_dir: &Path, skip_hidden: bool) -> Result<HashSet<St
     let mut queue: VecDeque<PathBuf> = VecDeque::new();
     queue.push_back(start_dir.to_path_buf());
 
+    let mut scanned: u64 = 0;
+    let mut ticker = Ticker::new();
+
     while let Some(dir) = queue.pop_front() {
         for entry in std::fs::read_dir(&dir)?.flatten() {
             let path = entry.path();
@@ -193,6 +248,19 @@ fn collect_needed_impl(start_dir: &Path, skip_hidden: bool) -> Result<HashSet<St
                     queue.push_back(path);
                 }
             } else if ft.is_file() {
+                scanned += 1;
+                // Name the directory rather than the file: on a big tree the
+                // filename changes far too fast to read, while the directory
+                // shows real progress through the app.
+                ticker.tick(|| {
+                    let where_ = dir
+                        .strip_prefix(start_dir)
+                        .unwrap_or(&dir)
+                        .to_string_lossy()
+                        .into_owned();
+                    let where_ = if where_.is_empty() { ".".into() } else { where_ };
+                    format!("  scanning {where_} ({scanned} files read)")
+                });
                 if let Ok(libs) = elf_needed(&path) {
                     needed.extend(libs);
                 }
@@ -203,6 +271,9 @@ fn collect_needed_impl(start_dir: &Path, skip_hidden: bool) -> Result<HashSet<St
         }
     }
 
+    if scanned > 0 {
+        eprintln!("  scanned {scanned} files, {} distinct libraries required", needed.len());
+    }
     Ok(needed)
 }
 

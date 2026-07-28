@@ -11,6 +11,22 @@ use anyhow::{bail, Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Whether (and how) to move the app into a VeraCrypt container once it is
+/// installed.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EncryptOpts {
+    pub enabled: bool,
+    /// Store the container password in the master password store.
+    pub master: bool,
+    /// Generate the container password instead of prompting for one.
+    pub generate: bool,
+    /// Read the container / master / sudo passwords from stdin as `key=value`
+    /// lines instead of prompting. Set by the TUI, which collects and validates
+    /// them itself so the install can stream its log into the normal operation
+    /// window.
+    pub secrets_stdin: bool,
+}
+
 pub fn run(
     pkg_name: &str,
     app_name: Option<&str>,
@@ -18,8 +34,56 @@ pub fn run(
     into: Option<&str>,
     keep_no_launcher: bool,
     sync_db: bool,
+    encrypt: EncryptOpts,
 ) -> Result<()> {
-    let result = run_inner(pkg_name, app_name, bin_names, into, keep_no_launcher, sync_db);
+    // The app whose filesystem tree actually receives the files. A merge
+    // install (`--into`) writes into that app's tree, not into the alias dir
+    // created for this package.
+    let fs_target = match into {
+        Some(into_name) => read_manifest(into_name)
+            .ok()
+            .and_then(|m| m.app.alias_of)
+            .unwrap_or_else(|| into_name.to_string()),
+        None => app_name.unwrap_or(pkg_name).to_string(),
+    };
+
+    let supplied = if encrypt.secrets_stdin {
+        crate::commands::encrypt::SuppliedSecrets::from_stdin()?
+    } else {
+        crate::commands::encrypt::SuppliedSecrets::default()
+    };
+
+    // Installing into an app that already lives in a container: the container
+    // must be mounted first, or every extracted file would land in the hidden
+    // directory *under* the mount point and vanish the moment it is mounted.
+    // The password is kept because growing the container needs it again.
+    let parent_password = if crate::veracrypt::is_encrypted(&fs_target) {
+        eprintln!("'{fs_target}' is encrypted — unlocking it to install into its container.");
+        Some(crate::commands::encrypt::unlock_and_password(&fs_target, &supplied)?)
+    } else {
+        None
+    };
+
+    // Resolve and validate every encryption secret *before* downloading
+    // anything. Doing this afterwards means a mistyped master password is only
+    // discovered once a multi-gigabyte install has already completed, leaving
+    // the app sitting there unencrypted. Skipped when the target is already
+    // encrypted — there is nothing to create, the files simply go inside.
+    let prepared = if encrypt.enabled && parent_password.is_none() {
+        Some(crate::commands::encrypt::prepare(
+            &fs_target,
+            encrypt.master,
+            encrypt.generate,
+            &supplied,
+        )?)
+    } else {
+        None
+    };
+
+    let result = run_inner(
+        pkg_name, app_name, bin_names, into, keep_no_launcher, sync_db,
+        parent_password.as_deref().map(|p| &**p),
+    );
     // Wipe the shared download/build cache after any successful install (even a
     // no-op reinstall) when clean_cache is enabled, so no record of what was
     // installed is left outside ~/.wryayer — useful when that dir is an
@@ -28,9 +92,23 @@ pub fn run(
     if result.is_ok() && crate::config::read_global_config().clean_cache {
         crate::commands::clean::clean_cache();
     }
-    result
+    result?;
+
+    // Encryption runs after a fully successful install, against the finished
+    // tree: the container can then be sized from what the app actually occupies
+    // rather than from a guess made before anything was downloaded.
+    if let Some(prepared) = prepared {
+        crate::commands::encrypt::run_prepared(&fs_target, prepared)
+            .with_context(|| format!("installed '{pkg_name}', but encrypting it failed"))?;
+    } else if parent_password.is_some() {
+        // Merged into an already-encrypted app: the files landed inside the
+        // mounted container as they were extracted, so it is already protected.
+        eprintln!("Installed into '{fs_target}' — already inside its encrypted container.");
+    }
+    Ok(())
 }
 
+#[allow(clippy::too_many_arguments)] // one install has this many knobs
 fn run_inner(
     pkg_name: &str,
     app_name: Option<&str>,
@@ -38,6 +116,9 @@ fn run_inner(
     into: Option<&str>,
     keep_no_launcher: bool,
     sync_db: bool,
+    // Password of the encrypted container the files are going into, when the
+    // target app is encrypted. Needed to grow the container if it runs short.
+    parent_password: Option<&str>,
 ) -> Result<()> {
     if sync_db {
         eprintln!("  Updating package databases...");
@@ -168,6 +249,20 @@ fn run_inner(
         }
     }
 
+    // Everything is downloaded, so the archive sizes are known: make sure the
+    // container has room to unpack them before a single file is written, since
+    // running out of space part-way leaves a half-extracted tree.
+    if let Some(password) = parent_password {
+        let archive_bytes: u64 = resolved
+            .iter()
+            .filter_map(|p| p.pkg_path.as_ref())
+            .filter_map(|p| fs::metadata(p).ok())
+            .map(|m| m.len())
+            .sum();
+        crate::veracrypt::ensure_room_for(&target_name, archive_bytes, password)
+            .with_context(|| format!("failed to make room in '{target_name}'s container"))?;
+    }
+
     fs::create_dir_all(&target_dir)
         .with_context(|| format!("failed to create app dir {}", target_dir.display()))?;
     if merge_mode {
@@ -213,7 +308,14 @@ fn run_inner(
             regenerate_runtime_caches(&target_dir);
 
             eprintln!("Checking for missing shared library dependencies...");
-            let scan = satisfy_missing_sonames_for(&target_dir, &cache_dir, &new_paths);
+            // Same guard as the initial sizing: soname packages are found
+            // here and can be far larger than what the user asked for.
+            let space = parent_password.map(|password| crate::veracrypt::SpaceGuard {
+                app: &target_name_owned,
+                password,
+            });
+            let scan =
+                satisfy_missing_sonames_for(&target_dir, &cache_dir, &new_paths, space.as_ref());
             match scan {
                 Ok(extra) if !extra.is_empty() => eprintln!("  Added: {}", extra.join(", ")),
                 Ok(_) => {}

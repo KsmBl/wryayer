@@ -32,6 +32,13 @@ pub fn run(app_name: &str, bin: Option<&str>, args: &[String]) -> Result<()> {
     // below once we know the real fs-root name.
     crate::commands::update::recover_interrupted_update(app_name)?;
 
+    // An encrypted app's tree — manifest and config included — lives inside its
+    // container, so it has to be mounted before anything below can read it.
+    // Unlocking is keyed on the launched name first; for an alias the target's
+    // container is unlocked once `alias_of` is known.
+    crate::commands::encrypt::recover_interrupted_encrypt(app_name)?;
+    crate::commands::encrypt::ensure_unlocked(app_name)?;
+
     let manifest = read_manifest(app_name)
         .with_context(|| format!("'{app_name}' is not installed"))?;
 
@@ -39,9 +46,12 @@ pub fn run(app_name: &str, bin: Option<&str>, args: &[String]) -> Result<()> {
     // in `alias_of`. The alias has its own config and launchers list; the
     // filesystem tree (bwrap root) belongs to the target.
     let fs_root_name = manifest.app.alias_of.clone().unwrap_or_else(|| app_name.to_string());
-    // For an alias, the tree belongs to the target app — heal that one too.
+    // For an alias, the tree belongs to the target app — heal and unlock that
+    // one too.
     if fs_root_name != app_name {
         crate::commands::update::recover_interrupted_update(&fs_root_name)?;
+        crate::commands::encrypt::recover_interrupted_encrypt(&fs_root_name)?;
+        crate::commands::encrypt::ensure_unlocked(&fs_root_name)?;
     }
     let app_root = app_dir(&fs_root_name)?;
     if !app_root.exists() {
@@ -148,6 +158,12 @@ pub fn run(app_name: &str, bin: Option<&str>, args: &[String]) -> Result<()> {
         None => args.to_vec(),
     };
 
+    // Apps whose password is typed at every launch get their container
+    // unmounted again once they exit, so "type it before every start" is
+    // actually true. Apps backed by the master store stay mounted until the
+    // user locks them explicitly.
+    let relock = crate::commands::encrypt::should_relock_on_exit(&fs_root_name);
+
     let status = launch_bwrap(&app_root_str, &binary, &effective_args, &temp, &config, wine_ctx.as_ref(), &appimage_env)?;
 
     // Post-launch: if bwrap exited abnormally, the app may have written a new
@@ -162,8 +178,9 @@ pub fn run(app_name: &str, bin: Option<&str>, args: &[String]) -> Result<()> {
             let _ = launch_bwrap(&app_root_str, &binary, &effective_args, &temp, &config, wine_ctx.as_ref(), &appimage_env);
         }
         let _ = std::fs::remove_dir_all(&cleanup_path);
+        crate::commands::encrypt::relock_on_exit(&fs_root_name, relock);
         std::process::exit(status.code().unwrap_or(1));
-    } else if repaired {
+    } else if repaired && !relock {
         // Replace this process with a fresh bwrap so the retry gets a clean
         // exec() hand-off (correct signal disposition, no extra wryayer in the
         // process tree). The dbus proxy carries PR_SET_PDEATHSIG, so it dies
@@ -177,7 +194,14 @@ pub fn run(app_name: &str, bin: Option<&str>, args: &[String]) -> Result<()> {
         }
         let err = cmd.exec();
         bail!("failed to exec bwrap: {err}");
+    } else if repaired {
+        // Same retry, but as a child rather than an exec(): this process has to
+        // outlive the app so it can unmount the container afterwards.
+        let retry = launch_bwrap(&app_root_str, &binary, &effective_args, &temp, &config, wine_ctx.as_ref(), &appimage_env)?;
+        crate::commands::encrypt::relock_on_exit(&fs_root_name, relock);
+        std::process::exit(retry.code().unwrap_or(0));
     } else {
+        crate::commands::encrypt::relock_on_exit(&fs_root_name, relock);
         std::process::exit(status.code().unwrap_or(0));
     }
 }

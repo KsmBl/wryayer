@@ -43,6 +43,21 @@ enum Commands {
         /// Used internally by the TUI after the user confirms an outdated-databases popup.
         #[arg(long, hide = true)]
         sync_db: bool,
+        /// After installing, move the app into its own VeraCrypt container.
+        /// Needs an interactive terminal (VeraCrypt asks for sudo to mount).
+        #[arg(long)]
+        encrypt: bool,
+        /// With --encrypt, keep the container password in the master password
+        /// store instead of asking for it at every launch.
+        #[arg(long)]
+        encrypt_master: bool,
+        /// With --encrypt, generate the container password instead of typing one.
+        #[arg(long)]
+        encrypt_generate: bool,
+        /// Read the container/master/sudo passwords from stdin as key=value
+        /// lines. Used internally by the TUI, which collects them itself.
+        #[arg(long, hide = true)]
+        encrypt_secrets_stdin: bool,
     },
     /// Remove an installed app and its launchers
     Remove {
@@ -154,6 +169,46 @@ enum Commands {
         /// Snapshot label to delete (see `wryayer snapshots <app>`)
         snapshot: String,
     },
+    /// Move an installed app into its own VeraCrypt container
+    Encrypt {
+        /// The app name as shown by `wryayer list`
+        app_name: String,
+        /// Keep the container password in the master password store instead of
+        /// asking for it at every launch
+        #[arg(long)]
+        master: bool,
+        /// Generate the password instead of typing one
+        #[arg(long)]
+        generate: bool,
+    },
+    /// Move an app out of its VeraCrypt container back into a plain directory
+    Decrypt {
+        /// The app name as shown by `wryayer list`
+        app_name: String,
+    },
+    /// Unlock (mount) an encrypted app's container
+    Unlock {
+        /// The app name as shown by `wryayer list`
+        app_name: String,
+    },
+    /// Lock (unmount) an encrypted app's container
+    Lock {
+        /// The app name as shown by `wryayer list`
+        app_name: String,
+    },
+    /// Show which apps are encrypted and whether they're currently unlocked
+    Encryption,
+    /// Manage the master password store
+    Master {
+        #[command(subcommand)]
+        action: MasterAction,
+    },
+    /// Generate a password from the multi-source entropy pool and print it
+    Genpw {
+        /// Number of characters (default: 32)
+        #[arg(long, default_value = "32")]
+        length: usize,
+    },
     /// Launch the interactive TUI
     Tui,
     /// Launch the native GTK desktop GUI (requires a build with --features gui)
@@ -186,6 +241,36 @@ enum Commands {
         socket: String,
         /// Comma-separated list of app names allowed to be launched
         allowed: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum MasterAction {
+    /// Create the master password store
+    Init,
+    /// Change the master password
+    Change,
+    /// Forget this boot's cached key, so the master password is needed again
+    Lock,
+    /// List which apps have a stored password (never prints the passwords)
+    List,
+    /// Store a container password for an app
+    Set {
+        /// The app name as shown by `wryayer list`
+        app_name: String,
+        /// Generate the password instead of typing one
+        #[arg(long)]
+        generate: bool,
+    },
+    /// Print stored container passwords (including generated ones)
+    Show {
+        /// The app to show; omit to list every stored password
+        app_name: Option<String>,
+    },
+    /// Remove an app's stored password
+    Forget {
+        /// The app name as shown by `wryayer list`
+        app_name: String,
     },
 }
 
@@ -271,6 +356,16 @@ enum ConfigSetting {
         /// Duration like 3d4h / 90m, bare seconds, or "system" to disable
         value: String,
     },
+    /// Unmount an encrypted app's container when the app exits
+    LockOnExit {
+        /// on = unmount when the app closes (default), off = stay mounted
+        value: String,
+    },
+    /// Where an encrypted app's container password comes from
+    PasswordSource {
+        /// prompt = ask before every launch, master = read from the master store
+        value: String,
+    },
     /// Limit maximum RAM usage in MiB via systemd-run (0 or "none" = no limit)
     RamLimit {
         /// RAM limit in MiB (e.g. 2048 for 2 GiB), or "none" to disable
@@ -298,7 +393,10 @@ fn main() {
     let cli = Cli::parse();
 
     let result = match cli.command {
-        Commands::Install { pkg, app_name, bin_name, bin_names, into, keep_without_launcher, sync_db } => {
+        Commands::Install {
+            pkg, app_name, bin_name, bin_names, into, keep_without_launcher, sync_db,
+            encrypt, encrypt_master, encrypt_generate, encrypt_secrets_stdin,
+        } => {
             let names: Vec<String> = if !bin_names.is_empty() {
                 bin_names
             } else if let Some(b) = bin_name {
@@ -306,7 +404,15 @@ fn main() {
             } else {
                 vec![]
             };
-            commands::install::run(&pkg, app_name.as_deref(), &names, into.as_deref(), keep_without_launcher, sync_db)
+            commands::install::run(
+                &pkg, app_name.as_deref(), &names, into.as_deref(), keep_without_launcher, sync_db,
+                commands::install::EncryptOpts {
+                    enabled: encrypt,
+                    master: encrypt_master,
+                    generate: encrypt_generate,
+                    secrets_stdin: encrypt_secrets_stdin,
+                },
+            )
         }
         Commands::Remove { app_name, cascade } => {
             if cascade {
@@ -343,6 +449,12 @@ fn main() {
             }
             Some(ConfigSetting::Usb { enabled }) => {
                 commands::config::run(&app_name, None, None, None, None, None, None, Some(&enabled), None, None, None, None, None, None, None, None)
+            }
+            Some(ConfigSetting::LockOnExit { value }) => {
+                commands::config::lock_on_exit(&app_name, &value)
+            }
+            Some(ConfigSetting::PasswordSource { value }) => {
+                commands::config::password_source(&app_name, &value)
             }
             Some(ConfigSetting::Share { action }) => match action {
                 ShareAction::Add { path } => commands::config::share_add(&app_name, &path),
@@ -396,6 +508,27 @@ fn main() {
         Commands::SnapshotDelete { app_name, snapshot } => {
             commands::snapshot::delete(&app_name, &snapshot)
         }
+        Commands::Encrypt { app_name, master, generate } => {
+            commands::encrypt::run(&app_name, master, generate)
+        }
+        Commands::Decrypt { app_name } => commands::encrypt::decrypt(&app_name),
+        Commands::Unlock { app_name } => commands::encrypt::unlock(&app_name),
+        Commands::Lock { app_name } => commands::encrypt::lock(&app_name),
+        Commands::Encryption => commands::encrypt::status(),
+        Commands::Master { action } => match action {
+            MasterAction::Init => commands::encrypt::master_init(),
+            MasterAction::Change => commands::encrypt::master_change(),
+            MasterAction::Lock => commands::encrypt::master_lock(),
+            MasterAction::List => commands::encrypt::master_list(),
+            MasterAction::Set { app_name, generate } => {
+                commands::encrypt::master_set(&app_name, generate)
+            }
+            MasterAction::Show { app_name } => {
+                commands::encrypt::master_show(app_name.as_deref())
+            }
+            MasterAction::Forget { app_name } => commands::encrypt::master_forget(&app_name),
+        },
+        Commands::Genpw { length } => commands::encrypt::generate_password(length),
         Commands::Tui => {
             #[cfg(feature = "tui")]
             {
