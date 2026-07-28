@@ -31,6 +31,17 @@ libc = "0.2"
 # of forking readelf/strings per file across a whole container tree.
 goblin = "0.9"
 gtk4 = { version = "0.11", features = ["v4_10"], optional = true }
+# Master-password store. App trees themselves are encrypted by VeraCrypt (see
+# src/veracrypt.rs); these cover only the small file holding one container
+# password per app, using a standard Argon2id -> AES-256-GCM construction
+# rather than anything hand-rolled.
+argon2 = "0.5"
+aes-gcm = "0.10"
+# Entropy extractor for the password generator (src/entropy.rs).
+sha2 = "0.10"
+zeroize = { version = "1", features = ["derive"] }
+# No-echo password entry on the terminal.
+rpassword = "7"
 
 [features]
 # The interactive terminal UI (ratatui/crossterm). On by default so the plain
