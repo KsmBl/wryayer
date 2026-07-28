@@ -548,16 +548,59 @@ point, so an operation run while locked would write its result into the
 *underlying* directory, where the next mount would hide it. `wryayer update`
 across all apps skips locked ones instead of failing the batch.
 
-### Entropy pool (`entropy.rs`)
+### Password generation (`entropy.rs`)
 
-`generate_password` folds `/dev/urandom`, `/dev/random`, hwmon/thermal sensors,
-the mouse position, `/proc/meminfo`, `/proc/stat`, `/proc/interrupts` and the
-nanosecond clock through SHA-512, then draws characters from a SHA-512
-counter-mode keystream with rejection sampling (no modulo bias) and a
-Fisher-Yates shuffle. Since sources are combined by hashing, the auxiliary ones
-can only add to the pool; they exist to cover a broken or unseeded CSPRNG, not to
-improve on a working one. Every device read is non-blocking or poll-bounded, so a
-still mouse or an unseeded `/dev/random` can never stall generation.
+`generate_password(len)` runs in four stages: collect, extract, expand, select.
+
+**1. Collect.** Every source is folded into one SHA-512 state, each one
+length-prefixed so that two different splits of the same bytes can't produce the
+same input:
+
+| Source | What is read |
+|---|---|
+| `/dev/urandom` | 64 bytes — the load-bearing source |
+| `/dev/random` | 32 bytes, non-blocking |
+| hwmon / thermal | every `/sys/class/hwmon/*/temp*_input` and `/sys/class/thermal/thermal_zone*/temp` |
+| mouse position | `hyprctl cursorpos` (Wayland), else `xdotool getmouselocation` (X11/XWayland), else up to 32 bytes of movement deltas from `/dev/input/mice` |
+| RAM usage | `/proc/meminfo` |
+| scheduler | `/proc/stat` |
+| interrupts | `/proc/interrupts` — per-device IRQ totals, which move on every keystroke |
+| clock | `SystemTime` nanoseconds and the pid, then a *second* nanosecond read after collecting; the gap between them reflects how long collection actually took under live load |
+
+Anything unavailable contributes nothing. A `SourceReport` records which sources
+fired, which is what `wryayer genpw` prints on stderr.
+
+**2. Extract.** `seed = SHA-512(collected)` — 64 bytes.
+
+**3. Expand.** A hash-based DRBG in counter mode: block `i` is
+`SHA-512(seed ‖ i)` with `i` as a little-endian `u64`, consumed byte by byte.
+Output blocks reveal nothing about the seed or about each other.
+
+**4. Select.** `below(n)` draws a byte and **rejects** anything at or above
+`256 - (256 % n)`, redrawing instead — so every character is exactly equally
+likely. A plain `% n` would over-represent the first `256 % n` characters of the
+alphabet. One character is drawn from each of the four classes first so each is
+guaranteed present, the rest come from the full alphabet, and a Fisher-Yates
+shuffle (over the same stream) mixes them so the guaranteed characters aren't
+always in front.
+
+The alphabet is 90 characters — 26 lowercase, 26 uppercase, 10 digits and 28
+symbols. Quotes, backslashes and backticks are excluded because these passwords
+end up in shell-adjacent contexts; that costs about 0.05 bits per character.
+At log2(90) ≈ 6.49 bits each, the 32-character default is ≈ 207 bits.
+
+**On the extra sources.** `/dev/urandom` alone is already cryptographically
+secure and nothing else here improves on it. Because everything is combined by
+hashing, the auxiliary sources can only ever *add* — `SHA-512(strong ‖ weak)` is
+no weaker than `SHA-512(strong)`. They exist for one specific failure mode: a
+CSPRNG that is broken or unseeded (a freshly imaged VM, a container with a cloned
+entropy pool, a kernel RNG bug), where sensor noise, cursor position and
+cycle-level timing are the only things distinguishing two otherwise identical
+machines.
+
+**Liveness.** Every device read is non-blocking, and the mouse fallback is
+`poll(2)`-bounded to 50 ms, so an unseeded `/dev/random` or a mouse nobody is
+touching can never stall generation.
 
 ### AUR build quirks (`package/download.rs`)
 

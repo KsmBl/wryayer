@@ -691,6 +691,13 @@ $ wryayer genpw
 entropy sources: /dev/urandom, /dev/random, 24 temperature sensors, RAM usage, scheduler counters, interrupt counters, clock (ns)
 ```
 
+Passwords are 32 characters by default, drawn from a 90-character alphabet
+(letters, digits and 28 symbols — quotes, backslashes and backticks are left out
+because these end up in shell-adjacent places). That's about **207 bits**. Each
+password is guaranteed to contain at least one lowercase, uppercase, digit and
+symbol, and characters are picked by rejection sampling so none is even slightly
+more likely than another.
+
 To be straight about the security model: `/dev/urandom` alone is already
 cryptographically secure and nothing else here improves on it. Because the
 sources are combined with a hash, the extra ones can only ever *add* to the pool
@@ -701,6 +708,10 @@ differ between two otherwise identical machines. Mouse position is read from the
 compositor where one exposes it (Hyprland, X11/XWayland) and otherwise from raw
 pointer deltas; Wayland deliberately offers no way to query the cursor, so on
 some sessions it contributes only while the mouse is moving.
+
+The exact construction — sources, the SHA-512 extractor, the counter-mode
+keystream and the unbiased character selection — is written up in
+[`README-CODE.md`](README-CODE.md#password-generation-entropyrs).
 
 ### Caveats
 

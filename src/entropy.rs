@@ -43,8 +43,9 @@ const SYMBOLS: &[u8] = b"!#$%&()*+,-./:;<=>?@[]^_{|}~";
 
 /// Default length for a generated container password.
 ///
-/// 32 characters over the ~89-symbol alphabet above is ~207 bits — far past any
-/// brute-force concern, and comfortably below VeraCrypt's 128-character limit.
+/// The alphabet above is 90 characters (26 + 26 + 10 + 28), so each one carries
+/// log2(90) ≈ 6.49 bits: 32 of them is ≈ 207 bits — far past any brute-force
+/// concern, and comfortably below VeraCrypt's 128-character limit.
 pub const DEFAULT_LENGTH: usize = 32;
 
 /// Which sources contributed to a generated password, for display to the user.
