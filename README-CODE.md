@@ -521,6 +521,25 @@ gone on reboot) alongside the salt it came from, so re-keying invalidates the
 cache automatically. `Store` has a hand-written `Debug` that redacts, because a
 derived one would print every container password into any panic message.
 
+### Merge installs and container growth
+
+`install --into <encrypted-app>` writes into the target's container rather than
+creating one, so the encryption prompt is skipped entirely. `install::run`
+unlocks the target first — without that, every extracted file would land in the
+directory *underneath* the mount point and disappear the moment it was mounted —
+and keeps the password, because growing the container needs it again.
+
+Space is enforced in two places. Once up front, when the archive sizes are known
+but nothing has been written yet, and then again through a `SpaceGuard` handed
+to the soname-satisfy loop: that loop discovers and extracts further packages
+*after* the install was sized, and a single missing `libGL` can pull in an
+entire graphics driver. `ensure_room_for` grows the volume by the shortfall plus
+half again, so a run of merge installs doesn't rebuild the container each time.
+
+Growth is create-bigger, copy, swap — VeraCrypt cannot resize in place. The
+original container is only replaced once the new one holds a complete copy, so
+an interruption leaves the app exactly as it was.
+
 ### Guardrails
 
 `require_unlocked` fails `update`, `repair`, `snapshot`, `rollback` and `export`

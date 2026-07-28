@@ -607,6 +607,21 @@ where headroom is half the tree clamped to 512 MiB…2 GiB, plus ext4 overhead. 
 generous room to grow because it costs little; large apps get proportionally
 less because doubling 10 GiB is expensive.
 
+### Installing more into an encrypted app
+
+`wryayer install <pkg> --into <encrypted-app>` needs no decision: the files are
+written straight into that app's container, so the TUI doesn't ask whether to
+encrypt them — there is no second container to create. It unlocks the target
+first (asking only for what it doesn't already know) and installs into it.
+
+The container is grown automatically if it would run out of room. VeraCrypt
+volumes are fixed-size and cannot be resized in place, so growing means creating
+a larger container, copying the contents across and swapping the files — slow,
+but it only happens when actually needed, and the original is kept until the
+copy is complete. Space is checked again before each package the
+soname-repair pass pulls in, because one missing library can drag in a
+multi-gigabyte driver long after the install was sized.
+
 ### Where the password comes from
 
 Set per app under **Encryption** in the config screen, or with

@@ -486,6 +486,10 @@ pub struct App {
     pub screen: Screen,
     pub status: String,
     pub log_scroll: usize,
+    /// Whether the log view sticks to the newest lines. True until the user
+    /// scrolls up; a running operation can emit hundreds of lines a second, so
+    /// a fixed scroll offset would leave the view stranded on stale output.
+    pub log_follow: bool,
     pub needs_clear: bool,
     /// Caret position (in characters) for whichever text-input overlay is
     /// active. Only one input is on screen at a time, so a single shared cursor
@@ -561,6 +565,7 @@ impl App {
             screen: Screen::Main,
             status: String::new(),
             log_scroll: 0,
+            log_follow: true,
             needs_clear: false,
             input_cursor: 0,
             locked_apps: HashMap::new(),
@@ -2063,14 +2068,72 @@ pub const ENCRYPT_CHOICES: &[(&str, &str, &[&str])] = &[
     ),
 ];
 
+/// The `--into` target in an install argument list, resolved to the app that
+/// actually owns the filesystem tree (following one alias hop).
+fn merge_target_root(args: &[String]) -> Option<String> {
+    let target = args.windows(2).find(|w| w[0] == "--into").map(|w| w[1].clone())?;
+    Some(
+        crate::manifest::read_manifest(&target)
+            .ok()
+            .and_then(|m| m.app.alias_of)
+            .unwrap_or(target),
+    )
+}
+
 /// Ask whether to install into a VeraCrypt container, or go straight to the
-/// install when VeraCrypt isn't available to do it with.
+/// install when there is nothing to decide.
 fn ask_encrypt(app: &mut App, pkg: String, title: String, args: Vec<String>) {
     if !crate::veracrypt::available() {
         launch_op(app, title, args, None, true);
         return;
     }
+    // Merging into an app that already lives in a container: the files are
+    // written straight into that container, so there is no choice to offer —
+    // asking "encrypt?" here would imply a second container that never exists.
+    if let Some(root) = merge_target_root(&args) {
+        if crate::veracrypt::is_encrypted(&root) {
+            begin_merge_into_encrypted(app, title, args, &root);
+            return;
+        }
+    }
     app.screen = Screen::AskEncrypt { pkg, title, args, selected: 0 };
+    app.needs_clear = true;
+}
+
+/// Start an install into an already-encrypted app: no encryption question, just
+/// whatever is needed to open that app's container.
+fn begin_merge_into_encrypted(app: &mut App, title: String, args: Vec<String>, root: &str) {
+    let mut stages = Vec::new();
+    if !crate::veracrypt::sudo_is_primed() {
+        stages.push(SecretStage::Sudo);
+    }
+    // The master store may already know this container's password, in which
+    // case the install can open it without asking anything.
+    let known = crate::secrets::open_cached()
+        .ok()
+        .flatten()
+        .is_some_and(|s| s.get(root).is_some());
+    if !known {
+        stages.push(SecretStage::ContainerExisting);
+    }
+
+    if stages.is_empty() {
+        launch_encrypted_install(app, title, args, "", "", "");
+        return;
+    }
+    app.screen = Screen::EncryptSecrets {
+        title,
+        args,
+        stages,
+        idx: 0,
+        value: String::new(),
+        first_entry: String::new(),
+        sudo: String::new(),
+        master: String::new(),
+        container: String::new(),
+        error: None,
+    };
+    app.input_cursor = 0;
     app.needs_clear = true;
 }
 
@@ -2219,6 +2282,9 @@ pub enum SecretStage {
     MasterExisting,
     ContainerNew,
     ContainerConfirm,
+    /// Opens the container of an app being merged into — it already exists, so
+    /// it is entered once with no confirmation.
+    ContainerExisting,
 }
 
 impl SecretStage {
@@ -2230,6 +2296,7 @@ impl SecretStage {
             SecretStage::MasterExisting => "Master password",
             SecretStage::ContainerNew => "New container password",
             SecretStage::ContainerConfirm => "Repeat the container password",
+            SecretStage::ContainerExisting => "Container password",
         }
     }
 
@@ -2241,6 +2308,9 @@ impl SecretStage {
             SecretStage::MasterExisting => "Unlocks the master password store for this boot.",
             SecretStage::ContainerNew => "Opens this app's container. Not stored anywhere.",
             SecretStage::ContainerConfirm => "Must match what you just typed.",
+            SecretStage::ContainerExisting => {
+                "Opens the container this app is being installed into."
+            }
         }
     }
 }
@@ -2384,6 +2454,16 @@ fn on_encrypt_secrets(app: &mut App, code: KeyCode) {
                 *container = std::mem::take(first_entry);
             }
         }
+        SecretStage::ContainerExisting => {
+            if entered.is_empty() {
+                *error = Some("Password must not be empty.".into());
+                return;
+            }
+            // Not verified here: checking it would mean mounting the container,
+            // which needs root and is exactly what the install is about to do.
+            // A wrong password surfaces as a clear mount failure in the log.
+            *container = entered;
+        }
         SecretStage::MasterExisting => {
             // Check it opens the store now, rather than after the install.
             if let Err(e) = crate::secrets::open(&entered) {
@@ -2499,15 +2579,24 @@ fn on_op_running(app: &mut App, code: KeyCode) {
         match code {
             KeyCode::Char('t') => {
                 *show_log = !*show_log;
-                // When opening the log, jump to the bottom.
+                // Opening the log starts at the newest output and keeps up with
+                // it, rather than freezing at whatever offset was current.
                 if *show_log {
                     app.log_scroll = log.len().saturating_sub(1);
+                    app.log_follow = true;
                 }
             }
-            KeyCode::Up | KeyCode::Char('k') if *show_log
-                && app.log_scroll > 0 => { app.log_scroll -= 1; }
+            KeyCode::Up | KeyCode::Char('k') if *show_log => {
+                // Scrolling back is an explicit request to stop following.
+                app.log_follow = false;
+                app.log_scroll = app.log_scroll.min(log.len()).saturating_sub(1);
+            }
             KeyCode::Down | KeyCode::Char('j') if *show_log => {
                 app.log_scroll += 1;
+                // Reaching the end resumes following the live output.
+                if app.log_scroll >= log.len().saturating_sub(1) {
+                    app.log_follow = true;
+                }
             }
             _ => {}
         }
@@ -2520,13 +2609,22 @@ fn on_op_done(app: &mut App, code: KeyCode) -> Result<()> {
             *show_log = !*show_log;
             if *show_log {
                 app.log_scroll = log.len().saturating_sub(1);
+                app.log_follow = true;
             }
             return Ok(());
         }
         if *show_log {
             match code {
-                KeyCode::Up | KeyCode::Char('k') if app.log_scroll > 0 => { app.log_scroll -= 1; }
-                KeyCode::Down | KeyCode::Char('j') => { app.log_scroll += 1; }
+                KeyCode::Up | KeyCode::Char('k') if app.log_scroll > 0 => {
+                    app.log_follow = false;
+                    app.log_scroll -= 1;
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    app.log_scroll += 1;
+                    if app.log_scroll >= log.len().saturating_sub(1) {
+                        app.log_follow = true;
+                    }
+                }
                 _ => {}
             }
         }
@@ -4445,5 +4543,162 @@ fn on_game_confirm(app: &mut App, code: KeyCode) {
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod op_log_tests {
+    use super::*;
+
+    /// Build an Operation screen with `n` log lines, plus a live channel so the
+    /// receiver isn't dropped.
+    fn op_screen(n: usize, done: bool) -> (Screen, mpsc::Sender<Msg>) {
+        let (tx, rx) = mpsc::channel();
+        let screen = Screen::Operation {
+            title: "Install — bash".into(),
+            log: (0..n).map(|i| format!("line {i}")).collect(),
+            done,
+            success: false,
+            rx,
+            total_bytes: None,
+            progress: None,
+            started: Instant::now(),
+            reload: true,
+            show_log: false,
+            launcher_choice: None,
+            into_target: None,
+            outdated_pkg: None,
+            original_args: vec![],
+        };
+        (screen, tx)
+    }
+
+    fn show_log_of(app: &App) -> bool {
+        match &app.screen {
+            Screen::Operation { show_log, .. } => *show_log,
+            _ => panic!("not an Operation screen"),
+        }
+    }
+
+    #[test]
+    fn merge_target_is_read_from_the_into_flag() {
+        let args: Vec<String> = ["install", "vim", "--into", "toolbox"]
+            .iter().map(|s| s.to_string()).collect();
+        // No manifest for "toolbox" in the test environment, so it resolves to
+        // itself rather than following an alias.
+        assert_eq!(merge_target_root(&args).as_deref(), Some("toolbox"));
+    }
+
+    #[test]
+    fn a_fresh_install_has_no_merge_target() {
+        let args: Vec<String> = ["install", "vim"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(merge_target_root(&args), None);
+    }
+
+    #[test]
+    fn t_toggles_the_log_while_an_operation_runs() {
+        let mut app = App::new().unwrap();
+        let (screen, _tx) = op_screen(500, false);
+        app.screen = screen;
+
+        assert!(!show_log_of(&app), "log starts hidden");
+        handle_key(&mut app, KeyCode::Char('t')).unwrap();
+        assert!(show_log_of(&app), "'t' should open the log");
+        handle_key(&mut app, KeyCode::Char('t')).unwrap();
+        assert!(!show_log_of(&app), "'t' should close it again");
+    }
+
+    #[test]
+    fn t_toggles_the_log_after_an_operation_finishes() {
+        let mut app = App::new().unwrap();
+        let (screen, _tx) = op_screen(500, true);
+        app.screen = screen;
+
+        handle_key(&mut app, KeyCode::Char('t')).unwrap();
+        assert!(show_log_of(&app), "'t' should open the log when done");
+    }
+
+    /// Render the whole TUI to an off-screen buffer and return it as text.
+    fn render(app: &mut App, w: u16, h: u16) -> String {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| crate::tui::ui::draw(f, app)).unwrap();
+        let buf = term.backend().buffer().clone();
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn the_log_view_actually_shows_log_lines() {
+        // Regression: pressing 't' during an install showed an empty log.
+        let mut app = App::new().unwrap();
+        let (screen, _tx) = op_screen(500, false);
+        app.screen = screen;
+        handle_key(&mut app, KeyCode::Char('t')).unwrap();
+
+        let out = render(&mut app, 150, 46);
+        assert!(out.contains("Hide log"), "log view footer missing:\n{out}");
+        assert!(
+            out.contains("line 499") || out.contains("line 4"),
+            "no log lines rendered:\n{out}"
+        );
+    }
+
+    #[test]
+    fn the_log_view_follows_new_output() {
+        // With progress lines streaming in, a fixed offset strands the view on
+        // stale output. Following must always show the newest window.
+        let mut app = App::new().unwrap();
+        let (screen, _tx) = op_screen(20, false);
+        app.screen = screen;
+        handle_key(&mut app, KeyCode::Char('t')).unwrap();
+        assert!(app.log_follow);
+
+        // Simulate the operation emitting a lot more output.
+        if let Screen::Operation { log, .. } = &mut app.screen {
+            for i in 20..2000 {
+                log.push(format!("line {i}"));
+            }
+        }
+        let out = render(&mut app, 150, 46);
+        assert!(out.contains("line 1999"), "newest line not shown:\n{out}");
+
+        // Scrolling up detaches; the newest line should no longer be pinned.
+        handle_key(&mut app, KeyCode::Up).unwrap();
+        assert!(!app.log_follow, "scrolling up should stop following");
+    }
+
+    #[test]
+    fn opening_the_log_scrolls_to_content_that_exists() {
+        // Regression: log_scroll must leave the visible window inside the log,
+        // or the view renders blank even though lines are present.
+        let mut app = App::new().unwrap();
+        let (screen, _tx) = op_screen(500, false);
+        app.screen = screen;
+        handle_key(&mut app, KeyCode::Char('t')).unwrap();
+
+        let log_len = match &app.screen {
+            Screen::Operation { log, .. } => log.len(),
+            _ => unreachable!(),
+        };
+        for visible in [10usize, 28, 40] {
+            let scroll = app.log_scroll.min(log_len.saturating_sub(visible));
+            assert!(
+                scroll < log_len,
+                "scroll {scroll} past end of {log_len} lines (visible {visible})"
+            );
+            assert!(
+                log_len - scroll >= visible.min(log_len),
+                "only {} lines left to render for a {visible}-row window",
+                log_len - scroll
+            );
+        }
     }
 }

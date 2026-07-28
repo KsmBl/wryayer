@@ -41,7 +41,7 @@ impl Ticker {
 /// transitive deps of newly added packages are also satisfied.
 /// Returns the list of package names that were installed.
 pub fn satisfy_missing_sonames(app_dir: &Path, cache_dir: &Path) -> Result<Vec<String>> {
-    satisfy_missing_sonames_impl(app_dir, cache_dir, None)
+    satisfy_missing_sonames_impl(app_dir, cache_dir, None, None)
 }
 
 /// Like `satisfy_missing_sonames` but on the first iteration only scans the
@@ -56,14 +56,16 @@ pub fn satisfy_missing_sonames_for(
     app_dir: &Path,
     cache_dir: &Path,
     seed_paths: &[PathBuf],
+    space: Option<&crate::veracrypt::SpaceGuard>,
 ) -> Result<Vec<String>> {
-    satisfy_missing_sonames_impl(app_dir, cache_dir, Some(seed_paths))
+    satisfy_missing_sonames_impl(app_dir, cache_dir, Some(seed_paths), space)
 }
 
 fn satisfy_missing_sonames_impl(
     app_dir: &Path,
     cache_dir: &Path,
     seed_paths: Option<&[PathBuf]>,
+    space: Option<&crate::veracrypt::SpaceGuard>,
 ) -> Result<Vec<String>> {
     // Per-soname progress/warnings are a wall of output on big apps (Steam et al).
     // Off by default: collapse to a one-line summary, full detail behind the env.
@@ -107,6 +109,13 @@ fn satisfy_missing_sonames_impl(
                     eprintln!("  installing {pkg} (provides {soname})...");
                     let path = download_official(&pkg, cache_dir)
                         .with_context(|| format!("failed to download {pkg}"))?;
+                    // These packages are discovered mid-loop, long after the
+                    // install was sized, and a single missing soname can drag in
+                    // a multi-gigabyte driver. Reserve before unpacking.
+                    if let Some(guard) = space {
+                        let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                        guard.reserve(bytes)?;
+                    }
                     extract_package(&path, app_dir)
                         .with_context(|| format!("failed to extract {pkg}"))?;
                     for rel in crate::distro::list_pkg_files(&path) {

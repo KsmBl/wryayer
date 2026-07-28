@@ -457,6 +457,23 @@ pub fn ensure_unlocked(app_name: &str) -> Result<()> {
     veracrypt::mount(app_name, &password)
 }
 
+/// Unlock `app_name`'s container for an install, returning the password used.
+///
+/// The caller keeps it because a merge install may also have to *grow* the
+/// container, which means re-creating it — and that needs the password again.
+pub fn unlock_and_password(
+    app_name: &str,
+    supplied: &SuppliedSecrets,
+) -> Result<Zeroizing<String>> {
+    let password = match &supplied.container {
+        Some(pw) => pw.clone(),
+        None => resolve_password(app_name)?,
+    };
+    // No-op when it is already mounted.
+    veracrypt::mount(app_name, &password)?;
+    Ok(password)
+}
+
 /// Look up or ask for `app_name`'s container password.
 fn resolve_password(app_name: &str) -> Result<Zeroizing<String>> {
     if password_source(app_name) == PasswordSource::Master {
@@ -664,6 +681,12 @@ pub fn generate_password(length: usize) -> Result<()> {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Copy a whole tree, for callers outside this module (container growth).
+pub fn copy_tree_public(src: &Path, dst: &Path) -> Result<()> {
+    let total = veracrypt::tree_size(src);
+    copy_tree(src, dst, total)
+}
 
 /// Recursive copy preserving symlinks, permissions and — importantly — hard
 /// links.

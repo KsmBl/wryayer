@@ -292,6 +292,182 @@ pub fn is_locked(app_name: &str) -> bool {
     is_encrypted(app_name) && !is_mounted(app_name).unwrap_or(false)
 }
 
+/// Free bytes inside `app_name`'s mounted container, or `None` if it isn't
+/// mounted (or the filesystem can't be queried).
+pub fn free_space(app_name: &str) -> Option<u64> {
+    let dir = crate::manifest::app_dir(app_name).ok()?;
+    let c_path = std::ffi::CString::new(dir.as_os_str().as_encoded_bytes()).ok()?;
+    // SAFETY: c_path is a valid NUL-terminated string; statvfs only writes to sv.
+    unsafe {
+        let mut sv: libc::statvfs = std::mem::zeroed();
+        if libc::statvfs(c_path.as_ptr(), &mut sv) != 0 {
+            return None;
+        }
+        Some(sv.f_bavail as u64 * sv.f_frsize as u64)
+    }
+}
+
+/// How much a compressed package archive is assumed to expand to on disk.
+///
+/// Deliberately generous — running out of space *inside* a container mid-way
+/// through an extraction is far more painful than briefly over-reserving, since
+/// growing afterwards costs a full copy of the volume.
+const ARCHIVE_EXPANSION: u64 = 4;
+
+/// Free space always kept spare inside a container, so an app has somewhere to
+/// write at runtime even straight after a big install.
+const FREE_SPACE_MARGIN: u64 = 512 * MIB;
+
+/// Bytes needed inside a container to safely unpack `archive_bytes` of packages.
+pub fn space_needed_for(archive_bytes: u64) -> u64 {
+    archive_bytes * ARCHIVE_EXPANSION + FREE_SPACE_MARGIN
+}
+
+/// Keeps an encrypted container from filling up while packages are added to it.
+///
+/// A single up-front check is not enough: the soname-satisfy loop discovers and
+/// extracts further packages *after* the initial set is sized, and those can be
+/// far larger than the package the user asked for (a missing `libGL` pulls in
+/// the whole graphics driver). Handing this guard down means every extraction
+/// reserves its own space first.
+pub struct SpaceGuard<'a> {
+    pub app: &'a str,
+    pub password: &'a str,
+}
+
+impl SpaceGuard<'_> {
+    /// Make room for `archive_bytes` about to be unpacked, growing the
+    /// container if it would otherwise run out.
+    pub fn reserve(&self, archive_bytes: u64) -> Result<()> {
+        ensure_room_for(self.app, archive_bytes, self.password)
+    }
+}
+
+/// Grow `app_name`'s container so it can hold `archive_bytes` of new packages.
+///
+/// A no-op when there is already room. VeraCrypt cannot resize a volume in
+/// place, so growing means creating a larger container, copying the contents
+/// across and swapping the files — expensive, hence the generous headroom used
+/// when containers are first created.
+///
+/// The old container is only deleted once the new one holds a verified copy, so
+/// an interruption leaves the original intact.
+pub fn ensure_room_for(app_name: &str, archive_bytes: u64, password: &str) -> Result<()> {
+    let needed = space_needed_for(archive_bytes);
+    let Some(free) = free_space(app_name) else {
+        // Not mounted, or an unqueryable filesystem: nothing sensible to do.
+        return Ok(());
+    };
+    if free >= needed {
+        return Ok(());
+    }
+
+    let container = container_path(app_name)?;
+    let current = std::fs::metadata(&container)
+        .with_context(|| format!("failed to stat {}", container.display()))?
+        .len();
+    // Add what's missing, plus the same headroom rule used at creation, so a
+    // series of merge installs doesn't grow the volume once per install.
+    let shortfall = needed - free;
+    let new_size = round_up(current + shortfall + shortfall / 2, 128 * MIB);
+
+    println!(
+        "Container for '{app_name}' needs more room ({} free, {} required) — growing to {}.",
+        human(free),
+        human(needed),
+        human(new_size)
+    );
+    println!("This copies the whole container and may take a while.");
+
+    grow(app_name, new_size, password)
+}
+
+/// Rebuild `app_name`'s container at `new_size`, preserving its contents.
+fn grow(app_name: &str, new_size: u64, password: &str) -> Result<()> {
+    let container = container_path(app_name)?;
+    let bigger = container.with_extension("hc.growing");
+    let mount_point = crate::manifest::app_dir(app_name)?;
+    let staging_mount = containers_dir()?.join(format!(".{app_name}.grow-mnt"));
+
+    // Start clean: a leftover from an interrupted growth is worthless, since the
+    // original container was never touched.
+    let _ = std::fs::remove_file(&bigger);
+    let _ = std::fs::remove_dir_all(&staging_mount);
+
+    create(&bigger, new_size, password)?;
+    std::fs::create_dir_all(&staging_mount)
+        .with_context(|| format!("failed to create {}", staging_mount.display()))?;
+
+    let result = (|| -> Result<()> {
+        mount_at(&bigger, &staging_mount, password)?;
+        crate::commands::encrypt::copy_tree_public(&mount_point, &staging_mount)?;
+        Ok(())
+    })();
+
+    // Whatever happened, unmount the new volume before touching the files.
+    let _ = dismount_path(&bigger);
+    if let Err(e) = result {
+        let _ = std::fs::remove_file(&bigger);
+        let _ = std::fs::remove_dir_all(&staging_mount);
+        return Err(e);
+    }
+
+    // The copy is complete and unmounted: swap the containers. The app's own
+    // volume has to come down first so its file can be replaced.
+    dismount(app_name)?;
+    std::fs::rename(&bigger, &container).with_context(|| {
+        format!(
+            "failed to replace {} with the grown container at {}",
+            container.display(),
+            bigger.display()
+        )
+    })?;
+    let _ = std::fs::remove_dir_all(&staging_mount);
+
+    // Put it back the way we found it: mounted.
+    mount(app_name, password)?;
+    println!("Container for '{app_name}' grown to {}.", human(new_size));
+    Ok(())
+}
+
+/// Mount an arbitrary container file at an arbitrary directory.
+fn mount_at(container: &Path, mount_point: &Path, password: &str) -> Result<()> {
+    let c = container.to_string_lossy().into_owned();
+    let m = mount_point.to_string_lossy().into_owned();
+    run_with_password(
+        &[
+            "--text", "--mount", &c, &m, "--pim", "0", "--keyfiles", "",
+            "--protect-hidden", "no", "--stdin", "--non-interactive",
+        ],
+        password,
+        "mount the new container",
+    )?;
+    ensure_owner_writable(mount_point)
+}
+
+/// Unmount by container path (used for volumes not tied to an app directory).
+fn dismount_path(container: &Path) -> Result<()> {
+    let c = container.to_string_lossy().into_owned();
+    let status = Command::new("sudo")
+        .arg("veracrypt")
+        .args(["--text", "--dismount", &c, "--non-interactive"])
+        .status()
+        .context("failed to run veracrypt to unmount")?;
+    if !status.success() {
+        bail!("failed to unmount {}", container.display());
+    }
+    Ok(())
+}
+
+/// Compact human-readable byte count, for the messages above.
+fn human(bytes: u64) -> String {
+    if bytes >= GIB {
+        format!("{:.1} GB", bytes as f64 / GIB as f64)
+    } else {
+        format!("{} MB", bytes / MIB)
+    }
+}
+
 /// Round `bytes` up to the next whole multiple of `unit`.
 fn round_up(bytes: u64, unit: u64) -> u64 {
     bytes.div_ceil(unit) * unit
@@ -744,6 +920,17 @@ garbage without a colon
             size < used * 2,
             "container {size} is more than double the tree {used}"
         );
+    }
+
+    #[test]
+    fn space_needed_covers_expansion_and_a_margin() {
+        // Archives expand when unpacked, and an app needs somewhere to write
+        // afterwards — so the requirement must exceed the archive size by a lot.
+        let archives = 500 * MIB;
+        let needed = space_needed_for(archives);
+        assert!(needed > archives * 3, "{needed} is not enough for {archives}");
+        // Even a trivial install reserves the runtime margin.
+        assert!(space_needed_for(0) >= 512 * MIB);
     }
 
     #[test]

@@ -1164,7 +1164,10 @@ fn draw_operation(
 
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(3), Constraint::Min(0), Constraint::Length(1)])
+            // The footer gets 2 rows, not 1: its block draws a bottom border,
+            // so a single row leaves zero inner height and the hint — including
+            // the [t] Hide log reminder — is clipped away entirely.
+            .constraints([Constraint::Length(3), Constraint::Min(0), Constraint::Length(2)])
             .split(popup);
 
         let header_block = Block::default()
@@ -1224,7 +1227,14 @@ fn draw_operation(
         f.render_widget(log_block, chunks[1]);
 
         let visible = inner.height as usize;
-        let scroll = app.log_scroll.min(log.len().saturating_sub(visible));
+        // While following, always render the newest window. A stored offset
+        // can't keep up with an operation emitting hundreds of lines a second,
+        // which left the view sitting on long-stale output.
+        let scroll = if app.log_follow {
+            log.len().saturating_sub(visible)
+        } else {
+            app.log_scroll.min(log.len().saturating_sub(visible))
+        };
         let lines: Vec<Line> = log.iter().skip(scroll).take(visible).map(|l| {
             Line::from(Span::styled(format!(" {l}"), Style::default().fg(log_line_color(l))))
         }).collect();
