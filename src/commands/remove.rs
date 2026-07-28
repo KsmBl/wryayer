@@ -72,6 +72,7 @@ pub fn run(app_name: &str) -> Result<()> {
         let container = crate::veracrypt::container_path(app_name)?;
         fs::remove_file(&container)
             .map_err(|e| anyhow::anyhow!("failed to remove {}: {e}", container.display()))?;
+        crate::veracrypt::remove_marker(app_name);
         eprintln!("Removed container: {}", container.display());
 
         // Drop the stored password, if the master store held one.

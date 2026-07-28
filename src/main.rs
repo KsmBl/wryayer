@@ -54,6 +54,10 @@ enum Commands {
         /// With --encrypt, generate the container password instead of typing one.
         #[arg(long)]
         encrypt_generate: bool,
+        /// Read the container/master/sudo passwords from stdin as key=value
+        /// lines. Used internally by the TUI, which collects them itself.
+        #[arg(long, hide = true)]
+        encrypt_secrets_stdin: bool,
     },
     /// Remove an installed app and its launchers
     Remove {
@@ -381,7 +385,7 @@ fn main() {
     let result = match cli.command {
         Commands::Install {
             pkg, app_name, bin_name, bin_names, into, keep_without_launcher, sync_db,
-            encrypt, encrypt_master, encrypt_generate,
+            encrypt, encrypt_master, encrypt_generate, encrypt_secrets_stdin,
         } => {
             let names: Vec<String> = if !bin_names.is_empty() {
                 bin_names
@@ -396,6 +400,7 @@ fn main() {
                     enabled: encrypt,
                     master: encrypt_master,
                     generate: encrypt_generate,
+                    secrets_stdin: encrypt_secrets_stdin,
                 },
             )
         }

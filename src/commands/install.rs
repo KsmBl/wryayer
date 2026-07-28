@@ -20,6 +20,11 @@ pub struct EncryptOpts {
     pub master: bool,
     /// Generate the container password instead of prompting for one.
     pub generate: bool,
+    /// Read the container / master / sudo passwords from stdin as `key=value`
+    /// lines instead of prompting. Set by the TUI, which collects and validates
+    /// them itself so the install can stream its log into the normal operation
+    /// window.
+    pub secrets_stdin: bool,
 }
 
 pub fn run(
@@ -31,6 +36,37 @@ pub fn run(
     sync_db: bool,
     encrypt: EncryptOpts,
 ) -> Result<()> {
+    // Where the container will belong. Merge installs add files to an existing
+    // app's tree, so the container is that app's, not the alias created here.
+    let encrypt_target = encrypt.enabled.then(|| match into {
+        Some(into_name) => read_manifest(into_name)
+            .ok()
+            .and_then(|m| m.app.alias_of)
+            .unwrap_or_else(|| into_name.to_string()),
+        None => app_name.unwrap_or(pkg_name).to_string(),
+    });
+
+    // Resolve and validate every encryption secret *before* downloading
+    // anything. Doing this afterwards means a mistyped master password is only
+    // discovered once a multi-gigabyte install has already completed, leaving
+    // the app sitting there unencrypted.
+    let prepared = match &encrypt_target {
+        Some(target) if !crate::veracrypt::is_encrypted(target) => {
+            let supplied = if encrypt.secrets_stdin {
+                crate::commands::encrypt::SuppliedSecrets::from_stdin()?
+            } else {
+                crate::commands::encrypt::SuppliedSecrets::default()
+            };
+            Some(crate::commands::encrypt::prepare(
+                target,
+                encrypt.master,
+                encrypt.generate,
+                &supplied,
+            )?)
+        }
+        _ => None,
+    };
+
     let result = run_inner(pkg_name, app_name, bin_names, into, keep_no_launcher, sync_db);
     // Wipe the shared download/build cache after any successful install (even a
     // no-op reinstall) when clean_cache is enabled, so no record of what was
@@ -45,24 +81,17 @@ pub fn run(
     // Encryption runs after a fully successful install, against the finished
     // tree: the container can then be sized from what the app actually occupies
     // rather than from a guess made before anything was downloaded.
-    if encrypt.enabled {
-        // Merge installs add files to an existing app's tree, so the container
-        // belongs to that app, not to the alias created here.
-        let target = match into {
-            Some(into_name) => read_manifest(into_name)
-                .ok()
-                .and_then(|m| m.app.alias_of)
-                .unwrap_or_else(|| into_name.to_string()),
-            None => app_name.unwrap_or(pkg_name).to_string(),
-        };
-        if crate::veracrypt::is_encrypted(&target) {
+    match (encrypt_target, prepared) {
+        (Some(target), Some(prepared)) => {
+            crate::commands::encrypt::run_prepared(&target, prepared)
+                .with_context(|| format!("installed '{pkg_name}', but encrypting it failed"))?;
+        }
+        (Some(target), None) => {
             // A merge into an already-encrypted app: the files landed inside the
             // mounted container already, so there is nothing left to do.
             eprintln!("'{target}' is already stored in an encrypted container");
-        } else {
-            crate::commands::encrypt::run(&target, encrypt.master, encrypt.generate)
-                .with_context(|| format!("installed '{pkg_name}', but encrypting it failed"))?;
         }
+        _ => {}
     }
     Ok(())
 }

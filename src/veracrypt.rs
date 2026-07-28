@@ -144,18 +144,21 @@ pub fn is_mounted(app_name: &str) -> Result<bool> {
         .any(|v| v.mount_point.as_deref() == Some(target.as_str())))
 }
 
-/// Filename of the locked-state marker inside an encrypted app's directory.
-///
-/// It lives in the *underlying* directory, so mounting the container hides it
-/// and unmounting reveals it again — which makes its visibility an exact
-/// indicator of "this app is encrypted and currently locked".
+/// Legacy marker location: inside the app's own directory, where mounting the
+/// container hid it. Still read so containers made before the move keep working.
 pub const MARKER_FILE: &str = ".encrypted.toml";
 
 /// The minimum an encrypted app must record outside its container so it can
-/// still be listed, renamed and removed while locked.
+/// still be listed, renamed, removed and *unlocked* while locked.
 ///
 /// Deliberately not the full manifest: the installed package list stays inside
 /// the container, so a locked app reveals nothing about what it is built from.
+///
+/// It lives next to the container file rather than inside the app directory,
+/// because the app directory is a mount point — a marker there is hidden
+/// whenever the container is mounted, which makes it unwritable exactly when
+/// settings change. Keeping it outside means it is readable *and* writable in
+/// both states.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Marker {
     pub name: String,
@@ -169,6 +172,18 @@ pub struct Marker {
     pub display_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pkg_name: Option<String>,
+    /// Mirror of the app's `password_source` setting.
+    ///
+    /// The real setting lives in `config.ini` *inside* the container, so it
+    /// can't be consulted while locked — which is precisely when the unlock
+    /// path needs to know whether to prompt or to read the master store. Kept
+    /// in step by `config::write_config`.
+    #[serde(default = "default_password_source")]
+    pub password_source: String,
+}
+
+fn default_password_source() -> String {
+    "prompt".to_string()
 }
 
 impl Marker {
@@ -182,6 +197,7 @@ impl Marker {
             alias_of: m.app.alias_of.clone(),
             display_name: m.app.display_name.clone(),
             pkg_name: m.app.pkg_name.clone(),
+            password_source: default_password_source(),
         }
     }
 
@@ -204,13 +220,13 @@ impl Marker {
     }
 }
 
-/// Path of the locked-state marker for `app_name`.
+/// Path of the locked-state marker for `app_name`, beside its container file.
 pub fn marker_path(app_name: &str) -> Result<PathBuf> {
-    Ok(crate::manifest::app_dir(app_name)?.join(MARKER_FILE))
+    Ok(containers_dir()?.join(format!("{app_name}.toml")))
 }
 
-/// Write the locked-state marker. Must run while the container is unmounted,
-/// otherwise it lands inside the container and vanishes when it is unmounted.
+/// Write the locked-state marker. Safe in either state — it lives outside the
+/// mount point.
 pub fn write_marker(app_name: &str, marker: &Marker) -> Result<()> {
     let path = marker_path(app_name)?;
     if let Some(parent) = path.parent() {
@@ -222,11 +238,44 @@ pub fn write_marker(app_name: &str, marker: &Marker) -> Result<()> {
         .with_context(|| format!("failed to write {}", path.display()))
 }
 
-/// Read the locked-state marker for `app_name`, if one is visible.
+/// Read the locked-state marker for `app_name`.
+///
+/// Falls back to the legacy in-app-directory location so containers created
+/// before the marker moved still list and unlock correctly.
 pub fn read_marker(app_name: &str) -> Option<Marker> {
-    let path = marker_path(app_name).ok()?;
-    let text = std::fs::read_to_string(path).ok()?;
-    toml::from_str(&text).ok()
+    let read = |p: PathBuf| -> Option<Marker> {
+        toml::from_str(&std::fs::read_to_string(p).ok()?).ok()
+    };
+    marker_path(app_name)
+        .ok()
+        .and_then(read)
+        .or_else(|| crate::manifest::app_dir(app_name).ok().and_then(|d| read(d.join(MARKER_FILE))))
+}
+
+/// Update just the recorded password source, leaving the rest of the marker
+/// alone. No-op for apps that aren't encrypted.
+pub fn set_marker_password_source(app_name: &str, source: &str) -> Result<()> {
+    if !is_encrypted(app_name) {
+        return Ok(());
+    }
+    let Some(mut marker) = read_marker(app_name) else {
+        return Ok(());
+    };
+    if marker.password_source == source {
+        return Ok(());
+    }
+    marker.password_source = source.to_string();
+    write_marker(app_name, &marker)
+}
+
+/// Delete the marker (used when an app stops being encrypted, or is removed).
+pub fn remove_marker(app_name: &str) {
+    if let Ok(p) = marker_path(app_name) {
+        let _ = std::fs::remove_file(p);
+    }
+    if let Ok(d) = crate::manifest::app_dir(app_name) {
+        let _ = std::fs::remove_file(d.join(MARKER_FILE));
+    }
 }
 
 /// Whether `app_name` is stored in an encrypted container at all.
@@ -308,14 +357,67 @@ pub fn tree_size(dir: &Path) -> u64 {
     total
 }
 
-/// Run a veracrypt subcommand, feeding `password` on stdin.
+/// Whether sudo can currently run without asking for a password.
 ///
-/// The password goes through stdin rather than `--password=` so it never
+/// Used to tell an "authenticate first" situation apart from a real failure,
+/// and by the TUI to decide whether it needs to ask for the sudo password
+/// before starting a container operation.
+pub fn sudo_is_primed() -> bool {
+    Command::new("sudo")
+        .args(["-n", "true"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Cache sudo credentials using `password`, so later container operations run
+/// without prompting.
+///
+/// Feeds `sudo -S -v`, which reads the password from stdin instead of the
+/// terminal. This is what lets the TUI collect the password in an overlay and
+/// then run the install as a normal piped operation.
+pub fn prime_sudo(password: &str) -> Result<()> {
+    let mut child = Command::new("sudo")
+        .args(["-S", "-v"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        // Swallow the "[sudo] password for …" prompt; the caller already asked.
+        .stderr(Stdio::null())
+        .spawn()
+        .context("failed to run sudo")?;
+    child
+        .stdin
+        .as_mut()
+        .context("failed to open sudo stdin")?
+        .write_all(format!("{password}\n").as_bytes())
+        .context("failed to send the sudo password")?;
+    let status = child.wait().context("failed to wait for sudo")?;
+    if !status.success() {
+        bail!("sudo authentication failed — wrong password?");
+    }
+    Ok(())
+}
+
+/// Run a veracrypt subcommand under sudo, feeding the *volume* password on
+/// stdin.
+///
+/// Two separate secrets are in play and they must not collide. VeraCrypt needs
+/// root to set up a loop device, and its own escalation path can't be used
+/// here: with `--non-interactive` it has no way to ask for an admin password
+/// and simply fails, while without it, it would prompt on a terminal that a
+/// TUI-spawned process doesn't have. So wryayer invokes `sudo` itself — sudo
+/// reads its password from `/dev/tty` (or from a cached ticket, see
+/// [`prime_sudo`]), leaving stdin free for the volume password.
+///
+/// The volume password goes through stdin rather than `--password=` so it never
 /// appears in `/proc/<pid>/cmdline`, where any process on the system could read
-/// it. stdout/stderr stay inherited so VeraCrypt's own sudo prompt reaches the
-/// user's terminal.
+/// it.
 fn run_with_password(args: &[&str], password: &str, what: &str) -> Result<()> {
-    let mut child = Command::new("veracrypt")
+    let mut child = Command::new("sudo")
+        .arg("veracrypt")
         .args(args)
         .stdin(Stdio::piped())
         .spawn()
@@ -336,10 +438,35 @@ fn run_with_password(args: &[&str], password: &str, what: &str) -> Result<()> {
         .wait()
         .with_context(|| format!("failed to wait for veracrypt to {what}"))?;
     if !status.success() {
+        // The overwhelmingly common cause is sudo having nothing to work with:
+        // no cached ticket and no terminal to prompt on.
+        if !sudo_is_primed() {
+            bail!(
+                "veracrypt failed to {what} — could not get root.\n\
+                 Container operations need sudo. Run this from a terminal, or \
+                 authenticate first with:\n    sudo -v"
+            );
+        }
         bail!(
             "veracrypt failed to {what} (exit {})",
             status.code().unwrap_or(-1)
         );
+    }
+    Ok(())
+}
+
+/// Give `path` back to the invoking user after a root-run veracrypt created it.
+fn chown_to_user(path: &Path) -> Result<()> {
+    let uid = unsafe { libc::getuid() };
+    let gid = unsafe { libc::getgid() };
+    let status = Command::new("sudo")
+        .arg("chown")
+        .arg(format!("{uid}:{gid}"))
+        .arg(path)
+        .status()
+        .context("failed to run sudo chown")?;
+    if !status.success() {
+        bail!("failed to take ownership of {}", path.display());
     }
     Ok(())
 }
@@ -397,9 +524,16 @@ pub fn create(path: &Path, size_bytes: u64, password: &str) -> Result<()> {
     )
     .inspect_err(|_| {
         // A failed create can leave a partial file behind; drop it so a retry
-        // isn't blocked by the "container already exists" check above.
-        let _ = std::fs::remove_file(path);
-    })
+        // isn't blocked by the "container already exists" check above. It may
+        // be root-owned, so remove it with the same privileges that made it.
+        if path.exists() {
+            let _ = Command::new("sudo").arg("rm").arg("-f").arg(path).status();
+        }
+    })?;
+
+    // veracrypt ran as root, so the container file belongs to root and the user
+    // couldn't even open it. Hand it back.
+    chown_to_user(path)
 }
 
 /// Mount `app_name`'s container over its app directory.
@@ -457,11 +591,19 @@ pub fn dismount(app_name: &str) -> Result<()> {
     }
     let container = container_path(app_name)?;
     let container_str = container.to_string_lossy().into_owned();
-    let status = Command::new("veracrypt")
+    // Unmounting needs root for the same reason mounting does.
+    let status = Command::new("sudo")
+        .arg("veracrypt")
         .args(["--text", "--dismount", &container_str, "--non-interactive"])
         .status()
         .with_context(|| format!("failed to run veracrypt to unmount '{app_name}'"))?;
     if !status.success() {
+        if !sudo_is_primed() {
+            bail!(
+                "failed to unmount '{app_name}' — could not get root. Run this from a \
+                 terminal, or authenticate first with:\n    sudo -v"
+            );
+        }
         bail!(
             "failed to unmount '{app_name}' — is a program still using files inside it? \
              Close the app and try again"
@@ -479,35 +621,55 @@ pub fn dismount(app_name: &str) -> Result<()> {
 fn ensure_owner_writable(mount_point: &Path) -> Result<()> {
     // Cheapest possible probe: try to create and remove a file.
     let probe = mount_point.join(".wryayer-write-probe");
-    match std::fs::File::create(&probe) {
+    let writable = match std::fs::File::create(&probe) {
         Ok(_) => {
             let _ = std::fs::remove_file(&probe);
-            return Ok(());
+            true
         }
         Err(e) if e.kind() != std::io::ErrorKind::PermissionDenied => {
             return Err(e).with_context(|| {
                 format!("failed to write inside container at {}", mount_point.display())
             })
         }
-        Err(_) => {}
-    }
+        Err(_) => false,
+    };
 
-    let uid = unsafe { libc::getuid() };
-    let gid = unsafe { libc::getgid() };
-    eprintln!("Container filesystem is root-owned; taking ownership (needs sudo)…");
-    let status = Command::new("sudo")
-        .arg("chown")
-        .arg(format!("{uid}:{gid}"))
-        .arg(mount_point)
-        .status()
-        .context("failed to run sudo chown on the container mount point")?;
-    if !status.success() {
-        bail!(
-            "could not take ownership of {} — the container is mounted but not writable",
-            mount_point.display()
-        );
+    if !writable {
+        chown_to_user(mount_point).with_context(|| {
+            format!(
+                "the container is mounted at {} but is not writable",
+                mount_point.display()
+            )
+        })?;
     }
+    // Checked on every mount, not just the first: the mount point itself keeps
+    // its ownership across remounts, so a container created before this was
+    // handled would otherwise never get its lost+found fixed.
+    take_ownership_of_lost_found(mount_point);
     Ok(())
+}
+
+/// Hand ext4's `lost+found` to the invoking user.
+///
+/// `mkfs.ext4` creates it as root with mode 0700, which leaves one unreadable
+/// directory inside an otherwise user-owned tree. That breaks every consumer
+/// that walks the app tree — `export` aborts its whole archive on the failed
+/// `read_dir`, and size accounting silently under-reports. Everything else
+/// assumes the tree is fully owned by the user, so restore that invariant here
+/// rather than teaching each walker about this one directory.
+///
+/// Best-effort: a container that somehow lacks it is fine, and failing to chown
+/// it must not block an otherwise good mount.
+fn take_ownership_of_lost_found(mount_point: &Path) {
+    let lf = mount_point.join("lost+found");
+    if !lf.exists() {
+        return;
+    }
+    // Already ours (a container mounted before) — nothing to do.
+    if std::fs::read_dir(&lf).is_ok() {
+        return;
+    }
+    let _ = chown_to_user(&lf);
 }
 
 #[cfg(test)]

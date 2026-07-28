@@ -399,6 +399,13 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             let selected = *selected;
             draw_ask_encrypt(f, area, &pkg, selected);
         }
+        Screen::EncryptSecrets { stages, idx, value, error, .. } => {
+            let stage = stages[*idx];
+            let step = (*idx + 1, stages.len());
+            let len = value.chars().count();
+            let error = error.clone();
+            draw_encrypt_secrets(f, area, stage, step, len, error.as_deref());
+        }
         Screen::SnapshotManager { app_name, snaps, selected } => {
             let app_name = app_name.clone();
             let snaps = snaps.clone();
@@ -2828,6 +2835,79 @@ fn draw_ask_encrypt(f: &mut Frame, area: Rect, pkg: &str, selected: usize) {
     f.render_widget(
         Paragraph::new(Span::styled(
             " [↑↓] Navigate  [Enter] Confirm  [Esc] Cancel",
+            Style::default().fg(c_dim()),
+        )),
+        chunks[3],
+    );
+}
+
+/// Masked password entry for an encrypted install.
+///
+/// Renders the typed length as bullets rather than the characters — the TUI
+/// runs on a screen someone else may be looking at, and these are the passwords
+/// protecting the container.
+fn draw_encrypt_secrets(
+    f: &mut Frame,
+    area: Rect,
+    stage: super::SecretStage,
+    step: (usize, usize),
+    typed_len: usize,
+    error: Option<&str>,
+) {
+    let (n, total) = step;
+    let inner = popup_frame(
+        f,
+        area,
+        60,
+        40,
+        &format!("Encrypted install — step {n} of {total}"),
+        c_accent(),
+    );
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        // prompt · input · hint/error · footer
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Length(2),
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            format!("  {}", stage.prompt()),
+            Style::default().fg(c_fg()).add_modifier(Modifier::BOLD),
+        ))),
+        chunks[0],
+    );
+
+    let bullets: String = "•".repeat(typed_len);
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("  > ", Style::default().fg(c_accent())),
+            Span::styled(bullets, Style::default().fg(c_fg())),
+            Span::styled("_", Style::default().fg(c_accent())),
+        ])),
+        chunks[1],
+    );
+
+    let note = match error {
+        Some(e) => Line::from(Span::styled(
+            format!("  {e}"),
+            Style::default().fg(c_red()).add_modifier(Modifier::BOLD),
+        )),
+        None => Line::from(Span::styled(
+            format!("  {}", stage.hint()),
+            Style::default().fg(c_dim()),
+        )),
+    };
+    f.render_widget(Paragraph::new(note).wrap(Wrap { trim: false }), chunks[2]);
+
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            " [Enter] Continue  [Esc] Cancel install",
             Style::default().fg(c_dim()),
         )),
         chunks[3],

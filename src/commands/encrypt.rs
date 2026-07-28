@@ -49,6 +49,77 @@ fn decrypt_staging_dir(app_name: &str) -> Result<PathBuf> {
 
 // ── Converting an app into a container ────────────────────────────────────────
 
+/// Secrets handed in non-interactively instead of being prompted for.
+///
+/// The TUI collects these in its own overlays (so it can validate them before
+/// starting a long install, and keep the install's log on screen) and passes
+/// them to the child process on stdin.
+#[derive(Default)]
+pub struct SuppliedSecrets {
+    pub container: Option<Zeroizing<String>>,
+    pub master: Option<Zeroizing<String>>,
+    pub sudo: Option<Zeroizing<String>>,
+}
+
+impl SuppliedSecrets {
+    /// Read `key=value` lines from stdin until EOF.
+    ///
+    /// Passed on stdin rather than argv or the environment: argv is world
+    /// readable through `/proc`, and an environment variable would be inherited
+    /// by veracrypt and every other child process.
+    pub fn from_stdin() -> Result<Self> {
+        use std::io::BufRead;
+        let mut out = Self::default();
+        let stdin = std::io::stdin();
+        for line in stdin.lock().lines() {
+            let line = line.context("failed to read secrets from stdin")?;
+            let Some((key, value)) = line.split_once('=') else { continue };
+            let value = Zeroizing::new(value.to_string());
+            match key {
+                "container" => out.container = Some(value),
+                "master" => out.master = Some(value),
+                "sudo" => out.sudo = Some(value),
+                _ => {}
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// The container password for a pending encryption, resolved and validated.
+///
+/// Produced by [`prepare`] *before* any long-running work starts, so a mistyped
+/// master password costs a re-prompt rather than a completed multi-gigabyte
+/// install that then refuses to encrypt.
+pub struct Prepared {
+    password: Zeroizing<String>,
+    use_master: bool,
+}
+
+/// Resolve every secret an encryption will need, up front.
+///
+/// Also records the container password in the master store when that's the
+/// chosen source. Storing it *before* the container exists is deliberate: a
+/// stored password for an app that failed to encrypt is harmless and gets
+/// overwritten, whereas a container created but never recorded would be
+/// permanently unopenable.
+pub fn prepare(
+    app_name: &str,
+    use_master: bool,
+    generate: bool,
+    supplied: &SuppliedSecrets,
+) -> Result<Prepared> {
+    if !veracrypt::available() {
+        return Err(veracrypt::missing_binary_error());
+    }
+    if let Some(sudo) = &supplied.sudo {
+        veracrypt::prime_sudo(sudo)?;
+    }
+
+    let password = obtain_password(app_name, use_master, generate, supplied)?;
+    Ok(Prepared { password, use_master })
+}
+
 /// Move `app_name`'s tree into a new VeraCrypt container.
 ///
 /// `use_master` stores the container password in the master password store
@@ -56,6 +127,13 @@ fn decrypt_staging_dir(app_name: &str) -> Result<PathBuf> {
 /// `generate` produces the password with the multi-source generator rather than
 /// asking the user to type one.
 pub fn run(app_name: &str, use_master: bool, generate: bool) -> Result<()> {
+    let prepared = prepare(app_name, use_master, generate, &SuppliedSecrets::default())?;
+    run_prepared(app_name, prepared)
+}
+
+/// Perform the conversion using secrets already resolved by [`prepare`].
+pub fn run_prepared(app_name: &str, prepared: Prepared) -> Result<()> {
+    let Prepared { password, use_master } = prepared;
     if !veracrypt::available() {
         return Err(veracrypt::missing_binary_error());
     }
@@ -83,10 +161,6 @@ pub fn run(app_name: &str, use_master: bool, generate: bool) -> Result<()> {
         human_size(size)
     );
 
-    // Settle on the password before touching anything on disk, so a mistyped or
-    // mismatched entry costs nothing.
-    let password = obtain_password(app_name, use_master, generate)?;
-
     let staging = staging_dir(app_name)?;
     let container = veracrypt::container_path(app_name)?;
 
@@ -105,7 +179,10 @@ pub fn run(app_name: &str, use_master: bool, generate: bool) -> Result<()> {
         //    locked, then mount the container over it.
         std::fs::create_dir_all(&dir)
             .with_context(|| format!("failed to recreate {}", dir.display()))?;
-        veracrypt::write_marker(app_name, &veracrypt::Marker::from_manifest(&manifest))?;
+        let mut marker = veracrypt::Marker::from_manifest(&manifest);
+        marker.password_source =
+            if use_master { "master".into() } else { "prompt".into() };
+        veracrypt::write_marker(app_name, &marker)?;
         veracrypt::mount(app_name, &password)?;
 
         // 4. Copy the tree in.
@@ -144,8 +221,16 @@ pub fn run(app_name: &str, use_master: bool, generate: bool) -> Result<()> {
 
 /// Decide the container password for a new encryption, storing it in the master
 /// store when that's the chosen source.
-fn obtain_password(app_name: &str, use_master: bool, generate: bool) -> Result<Zeroizing<String>> {
+fn obtain_password(
+    app_name: &str,
+    use_master: bool,
+    generate: bool,
+    supplied: &SuppliedSecrets,
+) -> Result<Zeroizing<String>> {
     if !use_master {
+        if let Some(pw) = &supplied.container {
+            return Ok(pw.clone());
+        }
         if generate {
             let (pw, report) = crate::entropy::generate_password(crate::entropy::DEFAULT_LENGTH)?;
             println!("Generated password (entropy: {}):\n\n    {}\n", report.summary(), pw.as_str());
@@ -162,13 +247,20 @@ fn obtain_password(app_name: &str, use_master: bool, generate: bool) -> Result<Z
 
     // Master mode: make sure the store exists, then record the password in it.
     if !crate::secrets::exists() {
-        println!("No master password store yet — creating one.");
-        let master = crate::secrets::prompt_new_password("New master password: ")?;
+        let master = match &supplied.master {
+            Some(m) => m.clone(),
+            None => {
+                println!("No master password store yet — creating one.");
+                crate::secrets::prompt_new_password("New master password: ")?
+            }
+        };
         crate::secrets::init(&master)?;
     }
-    let mut store = crate::secrets::open_interactive()?;
+    let mut store = open_master_store(supplied)?;
 
-    let password = if generate {
+    let password = if let Some(pw) = &supplied.container {
+        pw.clone()
+    } else if generate {
         let (pw, report) = crate::entropy::generate_password(crate::entropy::DEFAULT_LENGTH)?;
         println!("Generated a {}-character password (entropy: {}).", pw.chars().count(), report.summary());
         pw
@@ -178,6 +270,35 @@ fn obtain_password(app_name: &str, use_master: bool, generate: bool) -> Result<Z
     store.set(app_name, &password);
     store.save()?;
     Ok(password)
+}
+
+/// How many times an interactive master-password entry may be retried.
+const MASTER_PASSWORD_ATTEMPTS: usize = 3;
+
+/// Open the master store, using a supplied password if there is one and
+/// otherwise prompting — with retries, so one typo doesn't abort the operation
+/// the user was in the middle of.
+fn open_master_store(supplied: &SuppliedSecrets) -> Result<crate::secrets::Store> {
+    if let Some(master) = &supplied.master {
+        return crate::secrets::open(master);
+    }
+    if let Some(store) = crate::secrets::open_cached()? {
+        return Ok(store);
+    }
+    let mut last_err = None;
+    for attempt in 1..=MASTER_PASSWORD_ATTEMPTS {
+        let pw = crate::secrets::prompt_password("Master password: ")?;
+        match crate::secrets::open(&pw) {
+            Ok(store) => return Ok(store),
+            Err(e) => {
+                if attempt < MASTER_PASSWORD_ATTEMPTS {
+                    eprintln!("{e:#} — try again ({} left)", MASTER_PASSWORD_ATTEMPTS - attempt);
+                }
+                last_err = Some(e);
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("could not open the master password store")))
 }
 
 /// Undo a partial conversion, restoring the plaintext tree from staging.
@@ -208,6 +329,7 @@ fn rollback_to_plaintext(app_name: &str) -> Result<()> {
     }
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_file(&container);
+    veracrypt::remove_marker(app_name);
     std::fs::rename(&staging, &dir).with_context(|| {
         format!(
             "failed to restore {} from {} — the app's files are safe there",
@@ -275,7 +397,7 @@ pub fn decrypt(app_name: &str) -> Result<()> {
         .with_context(|| format!("failed to delete {}", container.display()))?;
 
     // The marker was only relevant while the app could be locked.
-    let _ = std::fs::remove_file(dir.join(veracrypt::MARKER_FILE));
+    veracrypt::remove_marker(app_name);
 
     // Drop the stored password, if there was one.
     if let Ok(Some(mut store)) = crate::secrets::open_cached() {
@@ -337,24 +459,14 @@ pub fn ensure_unlocked(app_name: &str) -> Result<()> {
 
 /// Look up or ask for `app_name`'s container password.
 fn resolve_password(app_name: &str) -> Result<Zeroizing<String>> {
-    // The config lives inside the container, so while locked it is unreadable.
-    // Fall back to the default (prompt) in that case, and prefer the stored
-    // password whenever the master store already knows this app — that check
-    // costs nothing and makes a locked app's setting effectively persistent.
-    let source = read_config(app_name)
-        .map(|c| c.password_source)
-        .unwrap_or(PasswordSource::Prompt);
-
-    if source == PasswordSource::Master || crate::secrets::exists() {
+    if password_source(app_name) == PasswordSource::Master {
         if let Some(pw) = password_from_master(app_name)? {
             return Ok(pw);
         }
-        if source == PasswordSource::Master {
-            bail!(
-                "'{app_name}' is set to use the master password store, but the store has no \
-                 password for it. Add one with:\n    wryayer master set {app_name}"
-            );
-        }
+        bail!(
+            "'{app_name}' is set to use the master password store, but the store has no \
+             password for it. Add one with:\n    wryayer master set {app_name}"
+        );
     }
     crate::secrets::prompt_password(&format!("Password for '{app_name}': "))
 }
@@ -439,11 +551,10 @@ pub fn status() -> Result<()> {
                 .and_then(|p| std::fs::metadata(p).ok())
                 .map(|md| human_size(md.len()))
                 .unwrap_or_else(|| "?".into());
-            let source = match read_config(name).map(|c| c.password_source) {
-                Ok(PasswordSource::Master) => "master",
-                // Unreadable while locked; the marker doesn't record it.
-                _ if state == "locked" => "-",
-                _ => "prompt",
+            // Read through the marker, so this stays accurate while locked.
+            let source = match password_source(name) {
+                PasswordSource::Master => "master",
+                PasswordSource::Prompt => "prompt",
             };
             println!("{name:<24} {state:<10} {size:>10}  {source}");
         }
@@ -653,8 +764,19 @@ pub fn is_encrypted_app(app_name: &str) -> bool {
     veracrypt::is_encrypted(app_name)
 }
 
-/// The password source recorded for `app_name`, defaulting to prompt.
+/// The password source in effect for `app_name`, defaulting to prompt.
+///
+/// The marker is authoritative, not `config.ini`: the config lives *inside* the
+/// container, so while locked it can't be read — which is exactly when the
+/// unlock path needs to know whether to prompt or consult the master store.
+/// The config is only consulted for apps with no marker at all.
 pub fn password_source(app_name: &str) -> PasswordSource {
+    if let Some(marker) = veracrypt::read_marker(app_name) {
+        return match marker.password_source.as_str() {
+            "master" => PasswordSource::Master,
+            _ => PasswordSource::Prompt,
+        };
+    }
     read_config(app_name)
         .map(|c: AppConfig| c.password_source)
         .unwrap_or(PasswordSource::Prompt)
@@ -734,6 +856,64 @@ mod tests {
             recover_interrupted_encrypt("demo").unwrap();
 
             assert!(root.join("demo/.manifest.toml").exists());
+        });
+    }
+
+    #[test]
+    fn password_source_comes_from_the_marker_not_the_config() {
+        with_temp_home(|root| {
+            // config.ini lives inside the container and is unreadable while
+            // locked, so the marker has to be the authority. Here they
+            // disagree on purpose: the marker must win.
+            std::fs::create_dir_all(root.join("demo")).unwrap();
+            std::fs::write(
+                root.join("demo/config.ini"),
+                "[encryption]\npassword_source = prompt\n",
+            )
+            .unwrap();
+
+            let mut marker = veracrypt::Marker {
+                name: "demo".into(),
+                main_binary: "demo".into(),
+                installed_at: "now".into(),
+                launchers: vec![],
+                alias_of: None,
+                display_name: None,
+                pkg_name: None,
+                password_source: "master".into(),
+            };
+            veracrypt::write_marker("demo", &marker).unwrap();
+            assert_eq!(password_source("demo"), PasswordSource::Master);
+
+            marker.password_source = "prompt".into();
+            veracrypt::write_marker("demo", &marker).unwrap();
+            assert_eq!(password_source("demo"), PasswordSource::Prompt);
+        });
+    }
+
+    #[test]
+    fn password_source_defaults_to_prompt_without_a_marker() {
+        with_temp_home(|root| {
+            std::fs::create_dir_all(root.join("demo")).unwrap();
+            assert_eq!(password_source("demo"), PasswordSource::Prompt);
+        });
+    }
+
+    #[test]
+    fn a_legacy_in_app_dir_marker_is_still_read() {
+        with_temp_home(|root| {
+            // Containers created before the marker moved beside the container
+            // must keep listing and unlocking.
+            std::fs::create_dir_all(root.join("demo")).unwrap();
+            std::fs::write(
+                root.join("demo").join(veracrypt::MARKER_FILE),
+                "name = \"demo\"\nmain_binary = \"demo\"\ninstalled_at = \"now\"\n\
+                 launchers = [\"demo\"]\npassword_source = \"master\"\n",
+            )
+            .unwrap();
+            let m = veracrypt::read_marker("demo").expect("legacy marker should be read");
+            assert_eq!(m.name, "demo");
+            assert_eq!(password_source("demo"), PasswordSource::Master);
         });
     }
 

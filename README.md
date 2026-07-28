@@ -111,9 +111,16 @@ Changes are saved to that app's own `config.ini`.
 | **Ask shortcut** | `off` skips the shortcut prompt and silently applies **Default shortcut** |
 
 The encryption prompt only appears when `veracrypt` is installed, and defaults to
-"No". Choosing any of its encrypt options drops the TUI back to the terminal for
-the install, because VeraCrypt needs to ask for your sudo password to mount the
-new container — the TUI returns as soon as it finishes.
+"No". Choosing an encrypt option asks for whatever passwords are still needed —
+your sudo password, the container password, the master password — each in a
+masked prompt, and each **checked as you enter it**. The install itself then runs
+in the normal operation window with its live log (`t` to expand), exactly like an
+unencrypted install.
+
+Because the passwords are validated up front, a typo costs a re-prompt rather
+than a completed multi-gigabyte install that then fails to encrypt. Prompts you
+have already satisfied are skipped, so a second encrypted install in the same
+session usually asks for nothing at all.
 
 Settings are stored in `~/.wryayer/defaults.ini` and apply as defaults to every newly installed app; per-app overrides always take precedence.
 
@@ -660,10 +667,11 @@ some sessions it contributes only while the mouse is moving.
 
 ### Caveats
 
-- **Mounting needs root.** VeraCrypt sets up a loop device, so it re-execs under
-  `sudo`. Every unlock, lock and container creation prompts for your sudo
-  password, and must run attached to a terminal — the TUI drops out of its
-  alternate screen to run these, then returns.
+- **Mounting needs root.** VeraCrypt sets up a loop device, so wryayer runs it
+  under `sudo`. The first container operation after your sudo timeout expires
+  asks for your sudo password; later ones reuse the cached credentials. In the
+  TUI this is just the first prompt of the install — nothing drops to a bare
+  terminal.
 - **Locked apps are read-only to wryayer.** `update`, `repair`, `snapshot`,
   `rollback` and `export` refuse to touch a locked app and tell you to unlock it
   first. `wryayer update` (all apps) skips locked ones rather than failing.

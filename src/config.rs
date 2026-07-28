@@ -227,6 +227,15 @@ pub fn write_config(app_name: &str, config: &AppConfig) -> Result<()> {
     fs::write(&path, format_ini(config))
         .with_context(|| format!("failed to write {}", path.display()))?;
     sync_container_aliases(app_name, config)?;
+    // Mirror the password source into the container marker, which lives outside
+    // the mount point and so stays readable while the app is locked — the one
+    // moment the unlock path needs it. Best-effort: a config write must not fail
+    // because of it.
+    let source = match config.password_source {
+        PasswordSource::Master => "master",
+        PasswordSource::Prompt => "prompt",
+    };
+    let _ = crate::veracrypt::set_marker_password_source(app_name, source);
     Ok(())
 }
 

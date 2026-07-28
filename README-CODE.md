@@ -122,10 +122,10 @@ codebase is package-manager agnostic.
 ```
 ~/.wryayer/
 ├── .containers/             ← VeraCrypt volumes backing encrypted apps
-│    └── signal.hc           ← mounted over ~/.wryayer/signal/ when unlocked
+│    ├── signal.hc           ← mounted over ~/.wryayer/signal/ when unlocked
+│    └── signal.toml         ← listing marker + password_source (readable when locked)
 ├── .passwords.vault         ← master password store (Argon2id + AES-256-GCM)
 ├── signal/                  ← encrypted app: an empty mount point while locked
-│   └── .encrypted.toml      ← listing marker, visible only while locked
 ├── firefox/                 ← isolated root (bind-mounted as / at runtime)
 │   ├── usr/
 │   │   ├── bin/firefox
@@ -448,13 +448,39 @@ fed on **stdin** (`--stdin`), never `--password=`, so they never appear in
 
 ### Locked-state marker
 
-A locked app's directory holds only `.encrypted.toml` — name, launchers,
-`alias_of`, display name. It lives in the *underlying* directory, so mounting
-hides it and unmounting reveals it; its visibility is therefore an exact
-"encrypted and currently locked" signal. `list_all_apps` and
-`read_manifest_or_marker` fall back to it so a locked app still lists and can
-still be removed. It deliberately does **not** carry the package list — that
-stays inside the container, so a locked app reveals nothing about its contents.
+`.containers/<app>.toml` records name, launchers, `alias_of`, display name and
+`password_source`. `list_all_apps` and `read_manifest_or_marker` fall back to it
+so a locked app still lists and can still be removed. It deliberately does
+**not** carry the package list — that stays inside the container, so a locked
+app reveals nothing about its contents.
+
+It lives *beside the container*, not inside the app directory, because that
+directory is a mount point: a marker there is hidden exactly when the container
+is mounted, which makes it unwritable precisely when settings change. Keeping it
+outside means it is readable and writable in both states — which is what lets
+`password_source` be consulted while locked, the one moment the unlock path
+needs it and `config.ini` (which lives *inside* the container) cannot be read.
+`config::write_config` mirrors the setting across. The old in-app-directory
+location is still read, so containers made before the move keep working.
+
+### Root privileges
+
+VeraCrypt needs root to attach a loop device, and its own escalation path is
+unusable here: with `--non-interactive` it cannot ask for an admin password and
+just fails, and without it, it prompts on a terminal a TUI-spawned process does
+not have. So wryayer invokes `sudo veracrypt` itself. sudo reads its own password
+from `/dev/tty` or a cached ticket, leaving stdin free for the volume password —
+the two secrets never contend for the same channel. `prime_sudo` (`sudo -S -v`)
+lets the TUI cache credentials from a password typed in an overlay, so the
+install subprocess runs with fully piped stdio and its log stays in the TUI.
+
+Running veracrypt as root means the container file and the freshly formatted
+filesystem come out root-owned, so `create` chowns the file back and
+`ensure_owner_writable` chowns the mount point. ext4 has no `uid=` mount option,
+so this is the only way. `mkfs.ext4` also leaves a root-owned `lost+found`
+inside an otherwise user-owned tree; it is chowned on every mount, because
+leaving one unreadable directory there breaks every consumer that walks the app
+tree (`export` used to abort its whole archive on the failed `read_dir`).
 
 ### Conversion is a rollback-safe swap
 

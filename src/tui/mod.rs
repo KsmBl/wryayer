@@ -209,6 +209,25 @@ pub enum Screen {
         args: Vec<String>,
         selected: usize, // see ENCRYPT_CHOICES
     },
+    /// Collect the passwords an encrypted install needs, one masked field at a
+    /// time. Each is validated as it is entered, so the install never starts
+    /// with a secret that will turn out to be wrong.
+    EncryptSecrets {
+        title: String,
+        args: Vec<String>,
+        /// Remaining fields to ask for, in order.
+        stages: Vec<SecretStage>,
+        idx: usize,
+        /// The field being typed.
+        value: String,
+        /// First entry of a type-it-twice pair, awaiting confirmation.
+        first_entry: String,
+        sudo: String,
+        master: String,
+        container: String,
+        /// Validation failure to show above the input.
+        error: Option<String>,
+    },
     /// Snapshot manager: pick a snapshot to roll back to or delete.
     SnapshotManager {
         app_name: String,
@@ -473,12 +492,6 @@ pub struct App {
     /// given path, save config to "custom" after, then resume.
     /// Tuple: (app_name, path_to_edit)
     pub editor_request: Option<(String, PathBuf)>,
-    /// If Some, the event loop will suspend the TUI and run `wryayer install …`
-    /// with inherited stdio, then resume. Used for installs into a VeraCrypt
-    /// container, which must be able to prompt for a container password and for
-    /// the sudo password VeraCrypt needs to mount.
-    /// Tuple: (title, install args)
-    pub inline_install_request: Option<(String, Vec<String>)>,
     // ── Easter egg ────────────────────────────────────────────────────────────
     pub konami_mode: bool,
     pub konami_state: usize,
@@ -541,7 +554,6 @@ impl App {
             input_cursor: 0,
             locked_apps: HashMap::new(),
             run_request: None,
-            inline_install_request: None,
             editor_request: None,
             konami_mode: false,
             konami_state: 0,
@@ -835,9 +847,6 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(
             if let Some((app_name, cpuinfo_path)) = app.editor_request.take() {
                 open_editor_inline(terminal, &app_name, cpuinfo_path, &mut app)?;
             }
-            if let Some((title, args)) = app.inline_install_request.take() {
-                run_install_inline(terminal, &title, &args, &mut app)?;
-            }
             if app.needs_clear {
                 app.needs_clear = false;
                 terminal.clear()?;
@@ -909,53 +918,6 @@ fn scan_locked_apps(installed: &[Manifest]) -> HashMap<String, bool> {
         out.insert(name.to_string(), !is_mounted);
     }
     out
-}
-
-/// Suspend the TUI and run an install on the real terminal, then resume.
-///
-/// Installs into a VeraCrypt container can't use the normal piped-subprocess
-/// path: the container password is read with echo disabled, and VeraCrypt
-/// re-execs itself under sudo to mount, which also needs a terminal. Both would
-/// deadlock against a pipe, so the whole install runs with inherited stdio and
-/// the TUI simply steps out of the way.
-fn run_install_inline(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    title: &str,
-    args: &[String],
-    app: &mut App,
-) -> Result<()> {
-    disable_raw_mode()?;
-    terminal.backend_mut().execute(LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
-
-    println!("── {title} ──\n");
-    let exe = std::env::current_exe().unwrap_or_else(|_| "wryayer".into());
-    let status = Command::new(&exe).args(args).status();
-
-    // Give the user a chance to read the result (and note a generated password)
-    // before the TUI paints over it.
-    match &status {
-        Ok(s) if s.success() => println!("\nDone."),
-        Ok(s) => println!("\nFailed (exit {}).", s.code().unwrap_or(-1)),
-        Err(e) => println!("\nFailed to start: {e}"),
-    }
-    println!("Press Enter to return to wryayer.");
-    let mut line = String::new();
-    let _ = std::io::stdin().read_line(&mut line);
-
-    enable_raw_mode()?;
-    terminal.backend_mut().execute(EnterAlternateScreen)?;
-    terminal.hide_cursor()?;
-    terminal.clear()?;
-    app.needs_clear = false;
-
-    app.status = match status {
-        Ok(s) if s.success() => format!("{title} — done"),
-        Ok(s) => format!("{title} — failed (exit {})", s.code().unwrap_or(-1)),
-        Err(e) => format!("{title} — failed to start: {e}"),
-    };
-    app.reload_installed();
-    Ok(())
 }
 
 /// Suspend the TUI, let the user pick an editor and edit the cpuinfo file,
@@ -1114,6 +1076,7 @@ fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
         Screen::OutdatedPackages { .. } => on_outdated_packages(app, code),
         Screen::AskShortcut { .. } => on_ask_shortcut(app, code),
         Screen::AskEncrypt { .. } => on_ask_encrypt(app, code),
+        Screen::EncryptSecrets { .. } => on_encrypt_secrets(app, code),
         Screen::GameExePick { .. } => on_game_exe_pick(app, code),
         Screen::GameNameInput { .. } => on_game_name_input(app, code),
         Screen::GameConfirm { .. } => on_game_confirm(app, code),
@@ -2097,6 +2060,204 @@ fn ask_encrypt(app: &mut App, pkg: String, title: String, args: Vec<String>) {
     }
     app.screen = Screen::AskEncrypt { pkg, title, args, selected: 0 };
     app.needs_clear = true;
+}
+
+/// One password an encrypted install needs before it can start.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum SecretStage {
+    /// Cached with `sudo -v` so VeraCrypt can mount without a terminal prompt.
+    Sudo,
+    MasterNew,
+    MasterNewConfirm,
+    MasterExisting,
+    ContainerNew,
+    ContainerConfirm,
+}
+
+impl SecretStage {
+    pub fn prompt(self) -> &'static str {
+        match self {
+            SecretStage::Sudo => "Your sudo password",
+            SecretStage::MasterNew => "New master password",
+            SecretStage::MasterNewConfirm => "Repeat the master password",
+            SecretStage::MasterExisting => "Master password",
+            SecretStage::ContainerNew => "New container password",
+            SecretStage::ContainerConfirm => "Repeat the container password",
+        }
+    }
+
+    pub fn hint(self) -> &'static str {
+        match self {
+            SecretStage::Sudo => "VeraCrypt needs root to mount the container.",
+            SecretStage::MasterNew => "You'll type this once per boot to unlock stored passwords.",
+            SecretStage::MasterNewConfirm => "Must match what you just typed.",
+            SecretStage::MasterExisting => "Unlocks the master password store for this boot.",
+            SecretStage::ContainerNew => "Opens this app's container. Not stored anywhere.",
+            SecretStage::ContainerConfirm => "Must match what you just typed.",
+        }
+    }
+}
+
+/// Which passwords are still needed for this install, in the order to ask.
+///
+/// Everything already satisfied is skipped: an authenticated sudo, a master
+/// store already unlocked this boot, or a generated container password all drop
+/// their prompts, so the common repeat case asks for nothing at all.
+fn build_secret_stages(use_master: bool, generate: bool) -> Vec<SecretStage> {
+    let mut stages = Vec::new();
+    if !crate::veracrypt::sudo_is_primed() {
+        stages.push(SecretStage::Sudo);
+    }
+    if use_master {
+        if !crate::secrets::exists() {
+            stages.push(SecretStage::MasterNew);
+            stages.push(SecretStage::MasterNewConfirm);
+        } else if !crate::secrets::is_unlocked() {
+            stages.push(SecretStage::MasterExisting);
+        }
+    }
+    if !generate {
+        stages.push(SecretStage::ContainerNew);
+        stages.push(SecretStage::ContainerConfirm);
+    }
+    stages
+}
+
+/// Start an encrypted install: collect whatever passwords are still needed,
+/// then run it as a normal operation with its log in the TUI.
+fn begin_encrypted_install(app: &mut App, title: String, args: Vec<String>, use_master: bool, generate: bool) {
+    let stages = build_secret_stages(use_master, generate);
+    if stages.is_empty() {
+        launch_encrypted_install(app, title, args, "", "", "");
+        return;
+    }
+    app.screen = Screen::EncryptSecrets {
+        title,
+        args,
+        stages,
+        idx: 0,
+        value: String::new(),
+        first_entry: String::new(),
+        sudo: String::new(),
+        master: String::new(),
+        container: String::new(),
+        error: None,
+    };
+    app.input_cursor = 0;
+    app.needs_clear = true;
+}
+
+/// Launch the install, handing the collected passwords to the child on stdin.
+fn launch_encrypted_install(
+    app: &mut App,
+    title: String,
+    mut args: Vec<String>,
+    sudo: &str,
+    master: &str,
+    container: &str,
+) {
+    args.push("--encrypt-secrets-stdin".into());
+    // Only non-empty secrets are sent; the child prompts for anything missing,
+    // and an empty line would be taken as an empty password.
+    let mut payload = String::new();
+    for (key, value) in [("sudo", sudo), ("master", master), ("container", container)] {
+        if !value.is_empty() {
+            payload.push_str(&format!("{key}={value}\n"));
+        }
+    }
+    launch_op_with_stdin(app, title, args, None, true, Some(payload));
+}
+
+fn on_encrypt_secrets(app: &mut App, code: KeyCode) {
+    match code {
+        KeyCode::Esc => {
+            app.install_queue.clear();
+            app.screen = Screen::Main;
+            app.needs_clear = true;
+            return;
+        }
+        KeyCode::Char(c) => {
+            if let Screen::EncryptSecrets { value, .. } = &mut app.screen {
+                value.push(c);
+                app.input_cursor = value.chars().count();
+            }
+            return;
+        }
+        KeyCode::Backspace => {
+            if let Screen::EncryptSecrets { value, .. } = &mut app.screen {
+                value.pop();
+                app.input_cursor = value.chars().count();
+            }
+            return;
+        }
+        KeyCode::Enter => {}
+        _ => return,
+    }
+
+    // Enter: validate the current field and advance.
+    let Screen::EncryptSecrets {
+        stages, idx, value, first_entry, sudo, master, container, error, ..
+    } = &mut app.screen
+    else {
+        return;
+    };
+    let stage = stages[*idx];
+    let entered = std::mem::take(value);
+    *error = None;
+
+    match stage {
+        SecretStage::Sudo => {
+            // Validate immediately: a wrong sudo password would otherwise only
+            // surface when VeraCrypt fails, long into the install.
+            if let Err(e) = crate::veracrypt::prime_sudo(&entered) {
+                *error = Some(format!("{e:#}"));
+                return;
+            }
+            *sudo = entered;
+        }
+        SecretStage::MasterNew | SecretStage::ContainerNew => {
+            if entered.is_empty() {
+                *error = Some("Password must not be empty.".into());
+                return;
+            }
+            *first_entry = entered;
+        }
+        SecretStage::MasterNewConfirm | SecretStage::ContainerConfirm => {
+            if entered != *first_entry {
+                *error = Some("Passwords did not match — starting that pair again.".into());
+                // Step back to the first half of the pair.
+                *idx -= 1;
+                first_entry.clear();
+                app.input_cursor = 0;
+                return;
+            }
+            if stage == SecretStage::MasterNewConfirm {
+                *master = std::mem::take(first_entry);
+            } else {
+                *container = std::mem::take(first_entry);
+            }
+        }
+        SecretStage::MasterExisting => {
+            // Check it opens the store now, rather than after the install.
+            if let Err(e) = crate::secrets::open(&entered) {
+                *error = Some(format!("{e:#}"));
+                return;
+            }
+            *master = entered;
+        }
+    }
+
+    *idx += 1;
+    app.input_cursor = 0;
+    if *idx < stages.len() {
+        return;
+    }
+
+    // All collected — hand off to the normal operation runner.
+    let screen = std::mem::replace(&mut app.screen, Screen::Main);
+    if let Screen::EncryptSecrets { title, args, sudo, master, container, .. } = screen {
+        launch_encrypted_install(app, title, args, &sudo, &master, &container);
+    }
 }
 
 fn execute_action(app: &mut App, action: PendingAction) {
@@ -3724,10 +3885,9 @@ fn on_ask_encrypt(app: &mut App, code: KeyCode) {
                 if extra.is_empty() {
                     launch_op(app, title, args, None, true);
                 } else {
-                    // Encrypted installs need a real terminal — see
-                    // run_install_inline.
-                    app.needs_clear = true;
-                    app.inline_install_request = Some((title, args));
+                    let use_master = extra.contains(&"--encrypt-master");
+                    let generate = extra.contains(&"--encrypt-generate");
+                    begin_encrypted_install(app, title, args, use_master, generate);
                 }
             }
         }
@@ -3738,12 +3898,28 @@ fn on_ask_encrypt(app: &mut App, code: KeyCode) {
 // ── Shared helpers ────────────────────────────────────────────────────────────
 
 fn launch_op(app: &mut App, title: String, args: Vec<String>, total_bytes: Option<u64>, reload: bool) {
+    launch_op_with_stdin(app, title, args, total_bytes, reload, None)
+}
+
+/// As [`launch_op`], but writes `stdin_data` to the child's stdin and closes it.
+///
+/// Used to hand collected passwords to an encrypted install without putting
+/// them in argv (world-readable via /proc) or the environment (inherited by
+/// veracrypt and every other child).
+fn launch_op_with_stdin(
+    app: &mut App,
+    title: String,
+    args: Vec<String>,
+    total_bytes: Option<u64>,
+    reload: bool,
+    stdin_data: Option<String>,
+) {
     let into_target = args.windows(2)
         .find(|w| w[0] == "--into")
         .map(|w| w[1].clone());
     let (tx, rx) = mpsc::channel();
     let original_args = args.clone();
-    spawn_wryayer(args, tx);
+    spawn_wryayer(args, tx, stdin_data);
     app.log_scroll = 0;
     app.screen = Screen::Operation {
         title,
@@ -3820,12 +3996,12 @@ pub fn konami_status_for_toggle(now_active: bool) -> String {
     }
 }
 
-fn spawn_wryayer(args: Vec<String>, tx: mpsc::Sender<Msg>) {
+fn spawn_wryayer(args: Vec<String>, tx: mpsc::Sender<Msg>, stdin_data: Option<String>) {
     let exe = std::env::current_exe().unwrap_or_else(|_| "wryayer".into());
     thread::spawn(move || {
         let mut child = match Command::new(&exe)
             .args(&args)
-            .stdin(Stdio::null())
+            .stdin(if stdin_data.is_some() { Stdio::piped() } else { Stdio::null() })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -3837,6 +4013,15 @@ fn spawn_wryayer(args: Vec<String>, tx: mpsc::Sender<Msg>) {
                 return;
             }
         };
+
+        // Write the secrets and close stdin, so the child's reader sees EOF
+        // and stops waiting for more.
+        if let Some(data) = stdin_data {
+            if let Some(mut stdin) = child.stdin.take() {
+                use std::io::Write;
+                let _ = stdin.write_all(data.as_bytes());
+            }
+        }
 
         let stderr = child.stderr.take().unwrap();
         let tx2 = tx.clone();
