@@ -681,12 +681,20 @@ fn copy_tree(src: &Path, dst: &Path, total: u64) -> Result<()> {
     let mut copied: u64 = 0;
     let mut last_report: u64 = 0;
     let mut stack: Vec<(PathBuf, PathBuf)> = vec![(src.to_path_buf(), dst.to_path_buf())];
+    // Destination directory modes, applied only once the whole copy is done.
+    // Setting them during the walk would be self-defeating: a source directory
+    // shipped read-only (0555 is common in packages) would leave its
+    // destination unwritable before its contents had been copied in.
+    let mut dir_modes: Vec<(PathBuf, u32)> = Vec::new();
 
     while let Some((s, d)) = stack.pop() {
         std::fs::create_dir_all(&d).with_context(|| format!("mkdir {}", d.display()))?;
         if let Ok(md) = std::fs::metadata(&s) {
-            let _ = std::fs::set_permissions(&d, std::fs::Permissions::from_mode(md.mode()));
+            dir_modes.push((d.clone(), md.mode()));
         }
+        // A directory the owner can't read or search stops the walk dead.
+        // Borrow the missing bits for the duration and hand them back.
+        let dir_guard = ModeGuard::grant(&s, 0o500);
         let entries = std::fs::read_dir(&s).with_context(|| format!("read {}", s.display()))?;
         for entry in entries.flatten() {
             let path = entry.path();
@@ -719,9 +727,18 @@ fn copy_tree(src: &Path, dst: &Path, total: u64) -> Result<()> {
                     links.insert(key, target.clone());
                 }
 
-                std::fs::copy(&path, &target).with_context(|| {
+                // Some packages ship helpers the owner cannot read — dbus's
+                // setuid dbus-daemon-launch-helper is the classic, mode 4750.
+                // fs::copy has to read the source, so borrow the read bit for
+                // the copy and restore the mode afterwards. Skipping the file
+                // instead would silently drop it out of the app.
+                let guard = ModeGuard::grant(&path, 0o400);
+                let result = std::fs::copy(&path, &target);
+                drop(guard);
+                result.with_context(|| {
                     format!("copy {} -> {}", path.display(), target.display())
                 })?;
+
                 let _ = std::fs::set_permissions(&target, std::fs::Permissions::from_mode(md.mode()));
                 copied += md.len();
                 if total > 0 && copied - last_report >= 64 * 1024 * 1024 {
@@ -730,11 +747,54 @@ fn copy_tree(src: &Path, dst: &Path, total: u64) -> Result<()> {
                 }
             }
         }
+        drop(dir_guard);
+    }
+
+    // Now that every file is in place, stamp the directory modes.
+    for (dir, mode) in dir_modes {
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(mode));
     }
     if total > 0 {
         eprintln!("PROGRESS {total}/{total}");
     }
     Ok(())
+}
+
+/// Temporarily adds permission bits to a path, restoring the original mode when
+/// dropped.
+///
+/// Package trees legitimately contain files and directories the owner cannot
+/// read (setuid helpers) or search. Rather than skipping them — which would
+/// quietly lose data — wryayer borrows the bits it needs for the length of one
+/// operation. Restoring on drop means an error path can't leave the tree with
+/// loosened permissions.
+struct ModeGuard {
+    path: PathBuf,
+    original: u32,
+}
+
+impl ModeGuard {
+    /// Grant `bits` if they aren't already set. Returns `None` when nothing
+    /// needed changing, or when the mode couldn't be read or altered.
+    fn grant(path: &Path, bits: u32) -> Option<Self> {
+        use std::os::unix::fs::PermissionsExt;
+        let original = std::fs::symlink_metadata(path).ok()?.permissions().mode();
+        if original & bits == bits {
+            return None;
+        }
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(original | bits)).ok()?;
+        Some(Self { path: path.to_path_buf(), original })
+    }
+}
+
+impl Drop for ModeGuard {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(
+            &self.path,
+            std::fs::Permissions::from_mode(self.original),
+        );
+    }
 }
 
 /// Format a byte count as a short human-readable string.
@@ -987,6 +1047,82 @@ mod tests {
         );
         let mode = std::fs::metadata(dst.join("run.sh")).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o755, "exec bit lost");
+    }
+
+    #[test]
+    fn copy_tree_copies_a_file_the_owner_cannot_read() {
+        // dbus ships usr/lib/dbus-1.0/dbus-daemon-launch-helper as mode 4750 —
+        // no owner read bit — which made fs::copy fail and aborted the whole
+        // encryption.
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(src.join("usr/lib/dbus-1.0")).unwrap();
+        let helper = src.join("usr/lib/dbus-1.0/dbus-daemon-launch-helper");
+        std::fs::write(&helper, b"ELF-ish payload").unwrap();
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o4750)).unwrap();
+
+        copy_tree(&src, &dst, 0).unwrap();
+
+        let out = dst.join("usr/lib/dbus-1.0/dbus-daemon-launch-helper");
+        // Read it back through a borrowed read bit, the same way the copy did.
+        let _g = ModeGuard::grant(&out, 0o400);
+        assert_eq!(std::fs::read(&out).unwrap(), b"ELF-ish payload");
+        drop(_g);
+        assert_eq!(
+            std::fs::metadata(&out).unwrap().permissions().mode() & 0o7777,
+            0o4750,
+            "the setuid helper's mode must be reproduced exactly"
+        );
+        // The source must be left exactly as it was found.
+        assert_eq!(
+            std::fs::metadata(&helper).unwrap().permissions().mode() & 0o7777,
+            0o4750,
+            "the source mode must be restored"
+        );
+    }
+
+    #[test]
+    fn copy_tree_handles_read_only_directories() {
+        // A 0555 directory must still receive its contents, and end up 0555.
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(src.join("ro")).unwrap();
+        std::fs::write(src.join("ro/data.txt"), b"payload").unwrap();
+        std::fs::set_permissions(src.join("ro"), std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        copy_tree(&src, &dst, 0).unwrap();
+
+        assert_eq!(std::fs::read(dst.join("ro/data.txt")).unwrap(), b"payload");
+        assert_eq!(
+            std::fs::metadata(dst.join("ro")).unwrap().permissions().mode() & 0o777,
+            0o555,
+            "directory mode should be reproduced"
+        );
+        // Make the temp dir removable again.
+        std::fs::set_permissions(src.join("ro"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(dst.join("ro"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    fn copy_tree_descends_into_unsearchable_directories() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(src.join("locked")).unwrap();
+        std::fs::write(src.join("locked/secret.bin"), b"inside").unwrap();
+        // No owner read/execute at all — read_dir would fail outright.
+        std::fs::set_permissions(src.join("locked"), std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        copy_tree(&src, &dst, 0).unwrap();
+
+        std::fs::set_permissions(dst.join("locked"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(std::fs::read(dst.join("locked/secret.bin")).unwrap(), b"inside");
+        std::fs::set_permissions(src.join("locked"), std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
     #[test]
