@@ -643,7 +643,8 @@ impl App {
             // Piggy-backed on the same throttle: listing mounted volumes forks
             // `veracrypt --list`, which must never run per-frame from the
             // renderer. Cached here and read by draw_installed.
-            self.encrypted_apps = scan_encrypted_apps(&self.installed);
+            self.encrypted_apps =
+                crate::commands::encrypt::scan(self.installed.iter().map(|m| m.app.name.as_str()));
             self.last_instance_scan = Instant::now();
         }
     }
@@ -941,55 +942,11 @@ fn run_app_inline(
     Ok(())
 }
 
-/// How an encrypted app's container currently stands, as far as the list needs
-/// to know.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct EncState {
-    /// The container is not mounted: the app's files are sealed away.
-    pub locked: bool,
-    /// Its password is in the master store, so unlocking needs no typing once
-    /// the store itself has been opened for this boot.
-    pub master: bool,
-    /// How full the container is, once it is open enough to ask. `None` while
-    /// locked — an unmounted mount point answers for the host filesystem, and a
-    /// plausible wrong number is worse here than no number.
-    pub fill: Option<crate::veracrypt::Usage>,
-}
-
-/// Map every encrypted app to the state of its container.
+/// How an encrypted app's container currently stands.
 ///
-/// Takes one `veracrypt --list` snapshot and matches mount points against it,
-/// rather than asking per app, so the cost is a single fork regardless of how
-/// many apps are installed.
-fn scan_encrypted_apps(installed: &[Manifest]) -> HashMap<String, EncState> {
-    let mut out = HashMap::new();
-    let encrypted: Vec<&str> = installed
-        .iter()
-        .map(|m| m.app.name.as_str())
-        .filter(|n| crate::veracrypt::is_encrypted(n))
-        .collect();
-    if encrypted.is_empty() {
-        return out;
-    }
-    let mounted = crate::veracrypt::list_mounted().unwrap_or_default();
-    for name in encrypted {
-        let dir = match crate::manifest::app_dir(name) {
-            Ok(d) => d.to_string_lossy().into_owned(),
-            Err(_) => continue,
-        };
-        let is_mounted = mounted
-            .iter()
-            .any(|v| v.mount_point.as_deref() == Some(dir.as_str()));
-        // Read through the marker (which lives outside the mount point), so the
-        // source is known even while the container is locked — exactly when the
-        // config.ini holding the same value is unreachable.
-        let master = crate::commands::encrypt::password_source(name)
-            == crate::config::PasswordSource::Master;
-        let fill = is_mounted.then(|| crate::veracrypt::usage(name)).flatten();
-        out.insert(name.to_string(), EncState { locked: !is_mounted, master, fill });
-    }
-    out
-}
+/// The GUI needs exactly the same facts on the same refresh cadence, so both
+/// the type and the scan that fills it live in `commands::encrypt`.
+pub use crate::commands::encrypt::AppEncryption as EncState;
 
 /// Suspend the TUI, let the user pick an editor and edit the cpuinfo file,
 /// save "custom" into the app config, then resume the TUI.

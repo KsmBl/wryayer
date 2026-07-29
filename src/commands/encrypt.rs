@@ -22,6 +22,7 @@
 //! not-yet-finished encryption is free; losing the app is not.
 
 use anyhow::{bail, Context, Result};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
@@ -743,6 +744,51 @@ pub fn grow_hint(app_name: &str) -> String {
         "The app will start failing to write once it is full. Give it more room with:\n    \
          wryayer grow {app_name}"
     )
+}
+
+// ── What a front-end needs to know about a container ──────────────────────────
+
+/// How an encrypted app's container currently stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AppEncryption {
+    /// The container is not mounted: the app's files are sealed away.
+    pub locked: bool,
+    /// Its password is in the master store, so unlocking needs no typing once
+    /// the store itself has been opened for this boot.
+    pub master: bool,
+    /// How full the container is, once it is open enough to ask. `None` while
+    /// locked — an unmounted mount point answers for the host filesystem, and a
+    /// plausible wrong number is worse here than no number.
+    pub fill: Option<veracrypt::Usage>,
+}
+
+/// Map every encrypted app among `names` to the state of its container.
+///
+/// Takes one `veracrypt --list` snapshot and matches mount points against it
+/// rather than asking per app, so the cost is a single fork however many apps
+/// are installed — which matters because both front-ends refresh this on a
+/// timer.
+pub fn scan<'a>(names: impl IntoIterator<Item = &'a str>) -> HashMap<String, AppEncryption> {
+    let mut out = HashMap::new();
+    let encrypted: Vec<&str> = names.into_iter().filter(|n| veracrypt::is_encrypted(n)).collect();
+    if encrypted.is_empty() {
+        return out;
+    }
+    let mounted = veracrypt::list_mounted().unwrap_or_default();
+    for name in encrypted {
+        let Ok(dir) = app_dir(name) else { continue };
+        let dir = dir.to_string_lossy().into_owned();
+        let is_mounted = mounted
+            .iter()
+            .any(|v| v.mount_point.as_deref() == Some(dir.as_str()));
+        // Read through the marker (which lives outside the mount point), so the
+        // source is known even while the container is locked — exactly when the
+        // config.ini holding the same value is unreachable.
+        let master = password_source(name) == PasswordSource::Master;
+        let fill = is_mounted.then(|| veracrypt::usage(name)).flatten();
+        out.insert(name.to_string(), AppEncryption { locked: !is_mounted, master, fill });
+    }
+    out
 }
 
 // ── Status ────────────────────────────────────────────────────────────────────
