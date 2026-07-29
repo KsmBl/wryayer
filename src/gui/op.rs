@@ -130,6 +130,26 @@ pub fn run_jobs<F>(
     run_queue(parent, title, jobs, on_done);
 }
 
+/// As [`run_jobs`], but every job is handed the same `stdin_data`.
+///
+/// A batch of encrypted installs needs the same sudo and master password for
+/// each; the child re-reads them per job because each is its own process.
+pub fn run_jobs_with_stdin<F>(
+    parent: &gtk::ApplicationWindow,
+    title: &str,
+    jobs: Vec<(String, Vec<String>)>,
+    stdin_data: String,
+    on_done: F,
+) where
+    F: Fn(bool) + 'static,
+{
+    let jobs = jobs
+        .into_iter()
+        .map(|(label, args)| Job { label, args, stdin: Some(stdin_data.clone()) })
+        .collect();
+    run_queue(parent, title, jobs, on_done);
+}
+
 fn run_queue<F>(
     parent: &gtk::ApplicationWindow,
     title: &str,

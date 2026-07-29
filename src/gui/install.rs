@@ -12,7 +12,7 @@ use gtk4 as gtk;
 use gtk::prelude::*;
 use gtk::glib;
 
-use super::{confirm, op, text_prompt, Ctx};
+use super::{confirm, encryption, op, text_prompt, Ctx};
 use crate::manifest::read_manifest;
 
 struct PkgResult {
@@ -68,9 +68,35 @@ pub fn build_tab(ctx: &Ctx) -> gtk::Box {
     count_label.set_hexpand(true);
     let install_btn = gtk::Button::with_label("Install selected");
     install_btn.set_sensitive(false);
+
+    // Encryption is offered here rather than after the fact, mirroring the TUI's
+    // install-time prompt: the container is sized from what the app actually
+    // occupies, so making the choice now saves a whole second copy of the tree.
+    let encrypt_check = gtk::CheckButton::with_label("Encrypt");
+    encrypt_check.set_tooltip_text(Some(
+        "Install into its own VeraCrypt container, mounted over the app's normal \
+         directory. While locked its whole tree is unreadable, filenames included.",
+    ));
+    let encrypt_source = gtk::DropDown::from_strings(&[
+        "password at every launch",
+        "password in the master store",
+        "generated password in the master store",
+    ]);
+    encrypt_source.set_selected(2);
+    encrypt_source.set_sensitive(false);
+    if crate::veracrypt::available() {
+        bottom.append(&encrypt_check);
+        bottom.append(&encrypt_source);
+    }
+
     bottom.append(&count_label);
     bottom.append(&install_btn);
     vbox.append(&bottom);
+
+    {
+        let encrypt_source = encrypt_source.clone();
+        encrypt_check.connect_toggled(move |c| encrypt_source.set_sensitive(c.is_active()));
+    }
 
     let selection: Selection = Rc::new(RefCell::new(Vec::new()));
 
@@ -181,14 +207,39 @@ pub fn build_tab(ctx: &Ctx) -> gtk::Box {
                 already_installed_dialog(&ctx, existing);
                 return;
             }
+            let encrypt = encrypt_check.is_active();
+            let (use_master, generate) = match encrypt_source.selected() {
+                0 => (false, false),
+                1 => (true, false),
+                _ => (true, true),
+            };
+            let mut extra: Vec<String> = Vec::new();
+            if encrypt {
+                extra.push("--encrypt".into());
+                if use_master {
+                    extra.push("--encrypt-master".into());
+                }
+                if generate {
+                    extra.push("--encrypt-generate".into());
+                }
+            }
             let jobs: Vec<(String, Vec<String>)> = names
                 .iter()
-                .map(|n| (format!("install {n}"), vec!["install".into(), n.clone()]))
+                .map(|n| {
+                    let mut args = vec!["install".to_string(), n.clone()];
+                    args.extend(extra.iter().cloned());
+                    (format!("install {n}"), args)
+                })
                 .collect();
-            op::run_jobs(&ctx.window, "Install", jobs, {
-                let ctx = ctx.clone();
-                move |_| ctx.refresh()
-            });
+
+            if !encrypt {
+                op::run_jobs(&ctx.window, "Install", jobs, {
+                    let ctx = ctx.clone();
+                    move |_| ctx.refresh()
+                });
+                return;
+            }
+            encryption::install_encrypted(&ctx, jobs, use_master, generate, names.len());
         });
     }
 
