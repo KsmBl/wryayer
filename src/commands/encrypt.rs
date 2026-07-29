@@ -643,6 +643,36 @@ fn parse_size(spec: &str) -> Result<u64> {
     Ok(bytes as u64)
 }
 
+/// Format one row of the encryption status table.
+///
+/// A locked container has no readable fill: it isn't mounted, and asking the
+/// unmounted mount point would answer for the host filesystem instead. Those
+/// columns are dashed rather than guessed at.
+fn status_row(
+    name: &str,
+    state: &str,
+    size: &str,
+    usage: Option<veracrypt::Usage>,
+    source: &str,
+) -> String {
+    let (used, fill) = match usage {
+        Some(u) => (human_size(u.used), format!("{}%", u.percent_used())),
+        None => ("—".to_string(), "—".to_string()),
+    };
+    format!("{name:<24} {state:<10} {size:>10} {used:>10} {fill:>6}  {source}")
+}
+
+/// What to tell a user whose container is nearly full.
+///
+/// A warning with no remedy is just noise, so it always names the command that
+/// fixes it.
+pub fn grow_hint(app_name: &str) -> String {
+    format!(
+        "The app will start failing to write once it is full. Give it more room with:\n    \
+         wryayer grow {app_name}"
+    )
+}
+
 // ── Status ────────────────────────────────────────────────────────────────────
 
 /// Print every encrypted app and whether it is currently unlocked.
@@ -656,21 +686,39 @@ pub fn status() -> Result<()> {
     if encrypted.is_empty() {
         println!("No apps are stored in encrypted containers.");
     } else {
-        println!("{:<24} {:<10} {:>10}  SOURCE", "APP", "STATE", "SIZE");
+        println!(
+            "{:<24} {:<10} {:>10} {:>10} {:>6}  SOURCE",
+            "APP", "STATE", "SIZE", "USED", "FILL"
+        );
+        let mut crowded: Vec<(&str, u64)> = Vec::new();
         for m in encrypted {
             let name = &m.app.name;
-            let state = if veracrypt::is_mounted(name)? { "unlocked" } else { "locked" };
+            let mounted = veracrypt::is_mounted(name)?;
+            let state = if mounted { "unlocked" } else { "locked" };
             let size = veracrypt::container_path(name)
                 .ok()
                 .and_then(|p| std::fs::metadata(p).ok())
                 .map(|md| human_size(md.len()))
                 .unwrap_or_else(|| "?".into());
+            // Fill is only knowable while the container is mounted — statvfs on
+            // an unmounted mount point would describe the host filesystem.
+            let usage = if mounted { veracrypt::usage(name) } else { None };
+            if let Some(pct) = usage.map(|u| u.percent_used()) {
+                if pct >= veracrypt::FULL_WARN_PERCENT {
+                    crowded.push((name.as_str(), pct));
+                }
+            }
             // Read through the marker, so this stays accurate while locked.
             let source = match password_source(name) {
                 PasswordSource::Master => "master",
                 PasswordSource::Prompt => "prompt",
             };
-            println!("{name:<24} {state:<10} {size:>10}  {source}");
+            println!("{}", status_row(name, state, &size, usage, source));
+        }
+        for (name, pct) in crowded {
+            println!();
+            println!("warning: '{name}' is {pct}% full.");
+            println!("{}", grow_hint(name));
         }
     }
 
@@ -1133,6 +1181,34 @@ mod tests {
                 decrypt_staging_dir("app").unwrap()
             );
         });
+    }
+
+    #[test]
+    fn a_locked_container_reports_no_fill_rather_than_a_wrong_one() {
+        // statvfs on an unmounted mount point describes whatever ~/.wryayer
+        // sits on, which would look like a perfectly plausible answer.
+        let row = status_row("vault", "locked", "763 MB", None, "master");
+        assert!(row.contains('—'), "{row}");
+        assert!(!row.contains('%'), "a locked container cannot have a fill: {row}");
+    }
+
+    #[test]
+    fn a_mounted_container_reports_used_bytes_and_fill() {
+        let usage = veracrypt::Usage {
+            used: 900 * 1024 * 1024,
+            available: 100 * 1024 * 1024,
+            total: 1024 * 1024 * 1024,
+        };
+        let row = status_row("vault", "unlocked", "1.0 GB", Some(usage), "prompt");
+        assert!(row.contains("900 MB"), "{row}");
+        assert!(row.contains("90%"), "{row}");
+    }
+
+    #[test]
+    fn the_fill_warning_names_the_command_that_fixes_it() {
+        // A warning the user cannot act on is just noise.
+        let hint = grow_hint("vault");
+        assert!(hint.contains("wryayer grow vault"), "{hint}");
     }
 
     #[test]
