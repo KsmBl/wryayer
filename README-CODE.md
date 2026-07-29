@@ -564,6 +564,30 @@ table, the TUI details pane (via `EncState::fill`, refreshed on the same
 once-a-second throttle as the mount scan), and `run`, which warns after
 `ensure_unlocked` and before the app can start writing.
 
+### Child output is not safe to draw
+
+`tui::sanitize_log_line` runs on every line entering the operation log, at the
+point `spawn_wryayer` reads it. Log lines end up in a ratatui `Paragraph`, which
+passes their bytes to the terminal untouched — so anything a child emitted *for*
+a terminal acts on the TUI's own screen.
+
+`veracrypt --text --create` is the worst offender: it draws progress by
+rewriting one line with `\r` and emits no newline until it finishes, so
+`BufRead::lines()` yields the entire creation as a single line — 527 characters
+with ten carriage returns, measured. Each one returned the cursor to column 0
+mid-frame. Only the segment after the final `\r` is current, which is what a
+terminal would have been showing, so that is what survives; escape sequences,
+tabs and other control bytes go with it.
+
+Sanitising at the reader rather than at draw time keeps the stored log clean for
+everything that reads it, and leaves the `PROGRESS` / `PROMPT_*` protocol lines
+the receiving end parses by prefix untouched (they are plain ASCII).
+
+One consequence worth knowing: because veracrypt withholds its newline, its
+progress is invisible until creation finishes. Live progress would mean reading
+by byte and splitting on `\r`, which would then flood the log with one line per
+update — a separate trade-off, not made here.
+
 ### The root has to be the root
 
 `manifest::wryayer_root` refuses to hand out a path when `~/.wryayer` has been
