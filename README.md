@@ -54,6 +54,13 @@ under their host.
 
 ![wryayer TUI — Installed tab](docs/screenshots/installed.png)
 
+Apps stored in an [encrypted container](#encrypted-containers) carry a padlock —
+🔒 locked, 🔓 open — and a 🔑 when their password is in the master store, so a
+launch won't stop to ask. The details panel spells both out, and shows how full
+the container is.
+
+![wryayer TUI — an encrypted app's details](docs/screenshots/encrypted-details.png)
+
 **Install tab** — search the official repos and the AUR at once (each result
 tagged `[repo]` or `[aur]`). Press `Space` to mark several packages, then
 `Enter` to install them all in sequence.
@@ -79,7 +86,19 @@ defaults for just that app: network/device toggles, temp mode, identity
 spoofing, RAM limit, **Avahi mode**, and (for wine games) the exe and prefix.
 Changes are saved to that app's own `config.ini`.
 
-![wryayer TUI — per-app config](docs/screenshots/config.png)
+A plain app's config also offers to move it into an encrypted container —
+encryption is not a decision you are stuck with at install time:
+
+![wryayer TUI — offering to encrypt an installed app](docs/screenshots/config-encrypt-offer.png)
+
+Choosing it asks where the container's password should come from:
+
+![wryayer TUI — choosing a password source](docs/screenshots/encrypt-choice.png)
+
+Once an app is encrypted, the same section carries its password source, whether
+to lock the container when the app exits, and the way back out:
+
+![wryayer TUI — an encrypted app's config](docs/screenshots/config-encryption.png)
 
 ### Key bindings
 

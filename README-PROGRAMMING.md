@@ -236,6 +236,30 @@ reentrant** — a helper called by a test must not take a second one.
   `./target/debug/wryayer config <app> <setting> …` then
   `./target/debug/wryayer run <app> -- -c '…'`, and **restore the config after**.
 
+### Refreshing the README screenshots
+
+They are generated, not captured, so they stay consistent and can be redone
+after any UI change:
+
+```sh
+cargo test --lib readme_screenshots -- --ignored --nocapture   # grids → target/
+python3 scripts/render_screenshots.py                          # grids → PNGs
+```
+
+The generator is an `#[ignore]`d test rather than an example or a subcommand
+because `tui::ui` is private — the test module is the only place that can
+already reach the renderer, and none of it ships in the binary. It renders
+against fixtures in a sandboxed `HOME`, never your real apps.
+
+The split into two steps is forced: nothing here draws colour emoji into SVG
+(librsvg turns them into black outlines, invisible on a dark background, and the
+padlocks are half the point), so the Rust side dumps a grid of cells and Pillow
+paints it with a font stack that can.
+
+If you add a screenshot, check what the fixture data *means* — the Install tab's
+second field is a repo tag, not a description, and a picture that implies
+otherwise teaches the wrong thing.
+
 ---
 
 ## 8. Conventions

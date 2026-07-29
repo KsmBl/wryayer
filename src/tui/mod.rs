@@ -5452,3 +5452,276 @@ mod op_log_tests {
         }
     }
 }
+
+/// Regenerates the README's TUI screenshots.
+///
+/// Run explicitly — it writes into the repository:
+///
+/// ```sh
+/// cargo test --lib readme_screenshots -- --ignored --nocapture
+/// python3 scripts/render_screenshots.py
+/// ```
+///
+/// Kept as a test rather than an example or a hidden subcommand because
+/// `tui::ui` is private: this is the only place that can already reach the
+/// renderer, and none of it ships in the binary.
+#[cfg(test)]
+mod readme_screenshots {
+    use super::*;
+
+    /// A width where nothing important is clipped — the encrypt prompt's option
+    /// descriptions run past 100 columns.
+    const COLS: u16 = 120;
+
+    /// Dump `app`'s rendered screen as a JSON grid: one entry per cell with its
+    /// symbol, foreground, background and whether it is bold.
+    ///
+    /// A grid rather than an image because nothing in reach renders colour
+    /// emoji into SVG — librsvg draws them as black outlines, which on a dark
+    /// terminal background is worse than nothing, and the padlocks are half the
+    /// point of these screenshots. `scripts/render_screenshots.py` turns these
+    /// into PNGs with a font stack that can.
+    fn dump_grid(app: &mut App, w: u16, h: u16, name: &str) {
+        use ratatui::backend::TestBackend;
+        use ratatui::style::{Color, Modifier};
+        use ratatui::Terminal;
+
+        fn hex(c: Color) -> Option<String> {
+            Some(match c {
+                Color::Reset => return None,
+                Color::Rgb(r, g, b) => format!("#{r:02x}{g:02x}{b:02x}"),
+                Color::Black => "#1c2128".into(),
+                Color::Red => "#e5534b".into(),
+                Color::Green => "#57ab5a".into(),
+                Color::Yellow => "#c69026".into(),
+                Color::Blue => "#539bf5".into(),
+                Color::Magenta => "#b083f0".into(),
+                Color::Cyan => "#39c5cf".into(),
+                Color::Gray => "#adbac7".into(),
+                Color::DarkGray => "#636e7b".into(),
+                Color::LightRed => "#ff938a".into(),
+                Color::LightGreen => "#6bc46d".into(),
+                Color::LightYellow => "#daaa3f".into(),
+                Color::LightBlue => "#6cb6ff".into(),
+                Color::LightMagenta => "#dcbdfb".into(),
+                Color::LightCyan => "#56d4dd".into(),
+                Color::White => "#cdd9e5".into(),
+                _ => "#cdd9e5".into(),
+            })
+        }
+        fn json_string(s: &str) -> String {
+            let mut out = String::from("\"");
+            for c in s.chars() {
+                match c {
+                    '"' => out.push_str("\\\""),
+                    '\\' => out.push_str("\\\\"),
+                    c if (c as u32) < 0x20 => out.push(' '),
+                    c => out.push(c),
+                }
+            }
+            out.push('"');
+            out
+        }
+
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| crate::tui::ui::draw(f, app)).unwrap();
+        let buf = term.backend().buffer().clone();
+
+        let mut cells = Vec::new();
+        for y in 0..h {
+            for x in 0..w {
+                let cell = &buf[(x, y)];
+                let symbol = cell.symbol();
+                let bg = hex(cell.bg);
+                if symbol.trim().is_empty() && bg.is_none() {
+                    continue;
+                }
+                let mut entry = format!("{{\"x\":{x},\"y\":{y},\"s\":{}", json_string(symbol));
+                if let Some(fg) = hex(cell.fg) {
+                    entry.push_str(&format!(",\"fg\":\"{fg}\""));
+                }
+                if let Some(bg) = bg {
+                    entry.push_str(&format!(",\"bg\":\"{bg}\""));
+                }
+                if cell.modifier.contains(Modifier::BOLD) {
+                    entry.push_str(",\"b\":1");
+                }
+                entry.push('}');
+                cells.push(entry);
+            }
+        }
+
+        std::fs::create_dir_all("target/screenshots").unwrap();
+        let path = format!("target/screenshots/{name}.json");
+        std::fs::write(
+            &path,
+            format!("{{\"w\":{w},\"h\":{h},\"cells\":[{}]}}", cells.join(",")),
+        )
+        .unwrap();
+        println!("wrote {path}");
+    }
+
+    /// A plausible installed tree: a root app with a merged-in alias, plus two
+    /// encrypted apps in different states.
+    fn fixtures() -> Vec<Manifest> {
+        let app = |name: &str, alias_of: Option<&str>, pkg: Option<&str>| Manifest {
+            app: crate::manifest::AppMeta {
+                name: name.into(),
+                main_binary: name.into(),
+                installed_at: "2026-07-28T09:14:00Z".into(),
+                launchers: vec![name.into()],
+                alias_of: alias_of.map(str::to_string),
+                display_name: None,
+                pkg_name: pkg.map(str::to_string),
+                wine_game: None,
+            },
+            packages: vec![
+                crate::manifest::PackageEntry {
+                    name: name.into(),
+                    version: "141.0.3-1".into(),
+                    source: crate::manifest::PackageSource::Official,
+                },
+                crate::manifest::PackageEntry {
+                    name: "gtk3".into(),
+                    version: "1:3.24.51-1".into(),
+                    source: crate::manifest::PackageSource::Official,
+                },
+            ],
+        };
+        vec![
+            app("firefox", None, None),
+            app("fastfetch", Some("firefox"), None),
+            app("signal-desktop", None, None),
+            app("thunderbird", None, None),
+            app("vivaldi", None, None),
+        ]
+    }
+
+    fn encrypted() -> HashMap<String, EncState> {
+        HashMap::from([
+            (
+                "signal-desktop".to_string(),
+                EncState {
+                    locked: true,
+                    master: true,
+                    fill: None,
+                },
+            ),
+            (
+                "thunderbird".to_string(),
+                EncState {
+                    locked: false,
+                    master: false,
+                    fill: Some(crate::veracrypt::Usage {
+                        used: 1_400 * 1024 * 1024,
+                        available: 2_100 * 1024 * 1024,
+                        total: 3_600 * 1024 * 1024,
+                    }),
+                },
+            ),
+        ])
+    }
+
+    fn app_with_fixtures() -> App {
+        let mut app = App::new().unwrap();
+        app.installed = fixtures();
+        app.inst_state.select(Some(2));
+        app.encrypted_apps = encrypted();
+        app.update_available =
+            HashMap::from([("vivaldi".to_string(), "7.6.3797.48-1".to_string())]);
+        app
+    }
+
+    #[test]
+    #[ignore = "writes grids for scripts/render_screenshots.py; run to refresh the README"]
+    fn readme_screenshots() {
+        let home = crate::test_support::test_home();
+
+        // Give thunderbird a container so the settings screen shows what an
+        // encrypted app actually offers, rather than the offer to encrypt it.
+        // Only the marker and the container file matter here: nothing is
+        // mounted, and `is_encrypted` is a file-exists check.
+        let root = home.root();
+        std::fs::create_dir_all(root.join(".containers")).unwrap();
+        std::fs::write(root.join(".containers/thunderbird.hc"), b"stand-in").unwrap();
+        std::fs::write(
+            root.join(".containers/thunderbird.toml"),
+            "name = \"thunderbird\"\nmain_binary = \"thunderbird\"\n\
+             installed_at = \"2026-07-28T09:14:00Z\"\nlaunchers = [\"thunderbird\"]\n\
+             password_source = \"prompt\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("thunderbird")).unwrap();
+
+        // A store, so Settings shows what it looks like once there is one to
+        // reveal, forget or delete — not just the row offering to create it.
+        crate::secrets::init("only-ever-inside-this-sandbox").unwrap();
+
+        // Installed tab: badges in the list, encryption spelled out in details.
+        let mut app = app_with_fixtures();
+        app.tab = Tab::Installed;
+        app.screen = Screen::Main;
+        dump_grid(&mut app, COLS, 30, "installed");
+
+        // The unlocked container that is filling up.
+        let mut app = app_with_fixtures();
+        app.inst_state.select(Some(3));
+        app.detail_focused = true;
+        dump_grid(&mut app, COLS, 30, "encrypted-details");
+
+        // A plain app's settings: the row that offers to encrypt it.
+        let mut app = app_with_fixtures();
+        app.screen = Screen::Config {
+            app_name: "vivaldi".into(),
+            config: crate::config::AppConfig::default(),
+            selected: CFG_ENCRYPT_APP,
+        };
+        dump_grid(&mut app, COLS, 44, "config-encrypt-offer");
+
+        // An encrypted app's settings: password source, lock on exit, and out.
+        let mut app = app_with_fixtures();
+        app.screen = Screen::Config {
+            app_name: "thunderbird".into(),
+            config: crate::config::AppConfig::default(),
+            selected: CFG_PASSWORD_SOURCE,
+        };
+        dump_grid(&mut app, COLS, 44, "config-encryption");
+
+        // The choice offered when encrypting an app that is already installed.
+        let mut app = app_with_fixtures();
+        app.screen = Screen::AskEncrypt {
+            pkg: "vivaldi".into(),
+            title: "Encrypt — vivaldi".into(),
+            args: vec!["encrypt".into(), "vivaldi".into()],
+            selected: 2,
+            kind: EncryptAsk::Convert,
+        };
+        dump_grid(&mut app, COLS, 30, "encrypt-choice");
+
+        // Install tab, regenerated alongside the rest so every picture in the
+        // README shares one look.
+        let mut app = app_with_fixtures();
+        app.tab = Tab::Install;
+        app.screen = Screen::Main;
+        app.search_input = "keepass".into();
+        // The second field is the repo tag the results are labelled with, not a
+        // description — a screenshot showing otherwise would teach the wrong
+        // thing about the list.
+        app.search_results = vec![
+            ("keepassxc".into(), Some("extra".into())),
+            ("keepass".into(), Some("extra".into())),
+            ("keepassxc-browser".into(), Some("aur".into())),
+            ("keepmenu".into(), Some("aur".into())),
+        ];
+        app.selected_pkgs = std::collections::HashSet::from(["keepassxc".to_string()]);
+        app.avail_state.select(Some(0));
+        app.search_list_focused = true;
+        dump_grid(&mut app, COLS, 30, "install");
+
+        // Settings tab, including the master password store.
+        let mut app = app_with_fixtures();
+        app.tab = Tab::Settings;
+        app.screen = Screen::Main;
+        dump_grid(&mut app, COLS, 44, "settings");
+    }
+}
