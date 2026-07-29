@@ -5101,6 +5101,23 @@ mod op_log_tests {
     }
 
     #[test]
+    fn a_container_being_created_is_not_read_as_finished() {
+        use crate::tui::ui::is_progress_line;
+        // "Done: 0.000%" arrives the instant a container creation starts, and
+        // the plain "contains Done" rule painted it with the success colour.
+        assert!(is_progress_line("Done:   0.000%  Speed:            Left:"));
+        assert!(is_progress_line("Done: 100.000%  Speed: 1.7 MiB/s  Left: 0 s"));
+    }
+
+    #[test]
+    fn real_outcomes_are_not_mistaken_for_progress() {
+        use crate::tui::ui::is_progress_line;
+        for line in ["Done", "Update complete", "Updated firefox", "Saved", "Done installing"] {
+            assert!(!is_progress_line(line), "{line:?} is an outcome, not progress");
+        }
+    }
+
+    #[test]
     fn a_veracrypt_progress_line_collapses_to_its_last_update() {
         // Verbatim shape of `veracrypt --text --create` output: no newline
         // until the very end, one \r before every update. Drawn as-is, every
