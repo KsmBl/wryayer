@@ -23,6 +23,7 @@ use gtk4 as gtk;
 use gtk::prelude::*;
 use gtk::glib;
 
+use crate::commands::encrypt::AppEncryption;
 use crate::manifest::{list_all_apps, read_manifest, tree_order, write_manifest, Manifest};
 
 /// A boxed "rebuild the app lists" closure behind shared mutable state so
@@ -162,6 +163,11 @@ fn load_css() {
         button { padding: 5px 12px; }
         list > row { padding: 2px 4px; }
         list > row:selected { border-radius: 4px; }
+        /* Container fill, matching the TUI's amber-then-red escalation.
+           Spelled out rather than relying on GTK's .warning/.error, so the
+           meaning survives a theme that styles those differently. */
+        .fill-warn { color: #d08420; }
+        .fill-critical { color: #cc3333; font-weight: bold; }
     ";
     let provider = gtk::CssProvider::new();
     provider.load_from_data(CSS);
@@ -376,6 +382,10 @@ fn build_app_list_tab(ctx: &Ctx, games: bool) -> (gtk::Box, Rc<dyn Fn()>) {
                 std::collections::HashMap::new();
             let mut any = false;
 
+            // One `veracrypt --list` for the whole rebuild, not one per row.
+            let encryption =
+                crate::commands::encrypt::scan(apps.iter().map(|m| m.app.name.as_str()));
+
             for m in apps.iter().filter(|m| m.app.wine_game.is_some() == games) {
                 any = true;
                 let is_child = m
@@ -384,7 +394,7 @@ fn build_app_list_tab(ctx: &Ctx, games: bool) -> (gtk::Box, Rc<dyn Fn()>) {
                     .as_ref()
                     .map(|t| parent_iters.contains_key(t))
                     .unwrap_or(false);
-                let markup = row_markup(m, is_child);
+                let markup = row_markup(m, is_child, encryption.get(&m.app.name).copied());
                 let parent = m.app.alias_of.as_ref().and_then(|t| parent_iters.get(t)).cloned();
                 let iter = store.append(parent.as_ref());
                 store.set_value(&iter, 0, &markup.to_value());
@@ -425,7 +435,7 @@ fn build_app_list_tab(ctx: &Ctx, games: bool) -> (gtk::Box, Rc<dyn Fn()>) {
 }
 
 /// One tree-row label: bold for a parent, dimmed for a child.
-fn row_markup(m: &Manifest, is_child: bool) -> String {
+fn row_markup(m: &Manifest, is_child: bool, enc: Option<AppEncryption>) -> String {
     let title = match &m.app.display_name {
         Some(d) => format!("{d}  [{}]", m.app.name),
         None => match &m.app.pkg_name {
@@ -434,10 +444,30 @@ fn row_markup(m: &Manifest, is_child: bool) -> String {
         },
     };
     let esc = glib::markup_escape_text(&title);
-    if is_child {
+    let name = if is_child {
         format!("<span alpha='75%'>{esc}</span>")
     } else {
         format!("<b>{esc}</b>")
+    };
+    match enc {
+        Some(state) => format!("{name}  <span alpha='70%'>{}</span>", encryption_badges(state)),
+        None => name,
+    }
+}
+
+/// The list markers for an encrypted app: a padlock for the container's current
+/// state, and a key when wryayer can open it without asking.
+///
+/// Two glyphs rather than one because they answer different questions. The
+/// padlock is transient — it flips every time the app is launched and closed —
+/// while the key reflects a setting, and is what tells the user whether the next
+/// launch will stop for a password. Same vocabulary as the TUI.
+fn encryption_badges(state: AppEncryption) -> String {
+    let lock = if state.locked { "🔒" } else { "🔓" };
+    if state.master {
+        format!("{lock}🔑")
+    } else {
+        lock.to_string()
     }
 }
 
@@ -490,6 +520,8 @@ fn render_details(container: &gtk::Box, name: &str) {
     let size_lbl = detail_line(container, "Size", "computing…");
     dir_bytes_async(name, &size_lbl);
 
+    render_encryption_details(container, name);
+
     // Snapshots.
     let snaps = list_snapshots(name);
     detail_header(container, &format!("Snapshots ({})", snaps.len()));
@@ -505,6 +537,49 @@ fn render_details(container: &gtk::Box, name: &str) {
     detail_header(container, &format!("Packages ({})", m.packages.len()));
     for p in &m.packages {
         detail_item(container, &format!("{}  {}", p.name, p.version));
+    }
+}
+
+/// Encryption lines for an app stored in a container; nothing at all for one
+/// that isn't.
+///
+/// Spelled out rather than left to the list's padlock, because "locked" and
+/// "asks for a password" are separate facts and a badge only has room to hint
+/// at both.
+fn render_encryption_details(container: &gtk::Box, name: &str) {
+    let states = crate::commands::encrypt::scan([name]);
+    let Some(state) = states.get(name).copied() else { return };
+
+    let lock = if state.locked { "🔒 locked" } else { "🔓 unlocked" };
+    let source = if state.master {
+        "🔑 opens from the master store"
+    } else {
+        "asks for a password"
+    };
+    detail_line(container, "Encrypted", &format!("{lock}   {source}"));
+
+    // Only readable while the container is open: statvfs on an unmounted mount
+    // point describes the host filesystem, which is a plausible wrong answer.
+    if let Some(usage) = state.fill {
+        let pct = usage.percent_used();
+        let line = detail_line(
+            container,
+            "Container",
+            &format!(
+                "{} / {} ({pct}%)",
+                format_bytes(usage.used),
+                format_bytes(usage.used + usage.available)
+            ),
+        );
+        if pct >= crate::veracrypt::FULL_WARN_PERCENT {
+            line.add_css_class("fill-critical");
+            detail_item(
+                container,
+                &format!("nearly full — grow it from Settings, or: wryayer grow {name}"),
+            );
+        } else if pct >= 75 {
+            line.add_css_class("fill-warn");
+        }
     }
 }
 
