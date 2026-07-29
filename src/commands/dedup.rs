@@ -1,7 +1,7 @@
 use crate::manifest::{app_dir, list_all_apps};
 use anyhow::Result;
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Read};
 use std::os::unix::fs::MetadataExt;
@@ -76,32 +76,44 @@ pub fn run(verbose: bool) -> Result<()> {
             if group.len() < 2 {
                 continue;
             }
-            // Lowest inode = canonical (oldest on disk, keeps the inode alive longest).
-            group.sort_by_key(|f| f.ino);
-            let canonical = group[0].clone();
+            // Confirm byte-for-byte equality against one reference file before
+            // anything else: DefaultHasher can collide, and a false match would
+            // silently corrupt a file. Doing it here rather than per link also
+            // keeps the cross-filesystem accounting below honest.
+            group.sort_by_key(|f| (f.dev, f.ino));
+            let reference = group[0].clone();
+            group.retain(|f| f.id() == reference.id() || files_equal(&reference.path, &f.path));
+            if group.len() < 2 {
+                continue;
+            }
 
-            for dup in &group[1..] {
-                if dup.id() == canonical.id() {
-                    continue; // already hard-linked
-                }
-                // Verify byte-for-byte equality before linking: DefaultHasher can
-                // collide, and a false match would silently corrupt a file.
-                if !files_equal(&canonical.path, &dup.path) {
-                    continue;
-                }
-                match atomic_hard_link(&canonical.path, &dup.path) {
-                    Ok(()) => {
-                        links_created += 1;
-                        bytes_saved += size;
-                        if verbose {
-                            eprintln!("  linked {}", dup.path.display());
-                        }
+            // A hard link cannot cross a filesystem boundary, and every
+            // encrypted app is its own ext4 volume inside its own container.
+            // Linking is therefore only ever attempted within one filesystem;
+            // trying across them would fail with EXDEV on every single file.
+            for bucket in by_device(group).into_values() {
+                // Lowest inode = canonical (oldest on disk, keeps the inode
+                // alive longest).
+                let canonical = bucket[0].clone();
+
+                for dup in &bucket[1..] {
+                    if dup.id() == canonical.id() {
+                        continue; // already hard-linked
                     }
-                    Err(e) => {
-                        if verbose {
-                            eprintln!("  warning: {}: {e:#}", dup.path.display());
+                    match atomic_hard_link(&canonical.path, &dup.path) {
+                        Ok(()) => {
+                            links_created += 1;
+                            bytes_saved += size;
+                            if verbose {
+                                eprintln!("  linked {}", dup.path.display());
+                            }
                         }
-                        errors += 1;
+                        Err(e) => {
+                            if verbose {
+                                eprintln!("  warning: {}: {e:#}", dup.path.display());
+                            }
+                            errors += 1;
+                        }
                     }
                 }
             }
@@ -119,6 +131,23 @@ pub fn run(verbose: bool) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Split content-identical files into one bucket per filesystem, each sorted so
+/// the lowest inode comes first.
+///
+/// Buckets are the unit hard-linking works on: within one there is a single
+/// canonical inode every other name can point at; between them nothing can be
+/// shared at all.
+fn by_device(files: Vec<FileRef>) -> BTreeMap<u64, Vec<FileRef>> {
+    let mut buckets: BTreeMap<u64, Vec<FileRef>> = BTreeMap::new();
+    for file in files {
+        buckets.entry(file.dev).or_default().push(file);
+    }
+    for bucket in buckets.values_mut() {
+        bucket.sort_by_key(|f| f.ino);
+    }
+    buckets
 }
 
 /// Whether every candidate is already one and the same file on disk, in which
@@ -311,5 +340,42 @@ mod tests {
     fn the_same_inode_on_one_device_is_one_file() {
         let files = vec![file(1, 12, "/a/lib.so"), file(1, 12, "/a/also-lib.so")];
         assert!(all_same_file(&files));
+    }
+
+    #[test]
+    fn files_are_bucketed_per_filesystem() {
+        // Two plain apps on the host filesystem plus two encrypted ones, each
+        // its own volume: only the first pair can ever be linked together.
+        let buckets = by_device(vec![
+            file(1, 30, "/plain-a/lib.so"),
+            file(1, 20, "/plain-b/lib.so"),
+            file(7, 11, "/enc-a/lib.so"),
+            file(9, 11, "/enc-b/lib.so"),
+        ]);
+
+        assert_eq!(buckets.len(), 3, "one bucket per filesystem");
+        assert_eq!(buckets[&1].len(), 2);
+        assert_eq!(buckets[&7].len(), 1);
+        assert_eq!(buckets[&9].len(), 1);
+    }
+
+    #[test]
+    fn the_lowest_inode_leads_each_bucket() {
+        // The canonical file is whichever the bucket lists first, so the sort
+        // is what makes "keep the oldest inode" true.
+        let buckets = by_device(vec![
+            file(1, 50, "/a/lib.so"),
+            file(1, 9, "/b/lib.so"),
+            file(1, 33, "/c/lib.so"),
+        ]);
+        assert_eq!(buckets[&1].iter().map(|f| f.ino).collect::<Vec<_>>(), vec![9, 33, 50]);
+    }
+
+    #[test]
+    fn a_single_file_bucket_has_no_duplicates_to_link() {
+        // The linking loop skips bucket[0] and iterates bucket[1..]; a lone
+        // file must not panic or be linked to itself.
+        let buckets = by_device(vec![file(4, 1, "/only/lib.so")]);
+        assert!(buckets[&4][1..].is_empty());
     }
 }
