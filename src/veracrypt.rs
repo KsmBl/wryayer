@@ -436,7 +436,7 @@ pub fn ensure_room_for(app_name: &str, archive_bytes: u64, password: &str) -> Re
 }
 
 /// Rebuild `app_name`'s container at `new_size`, preserving its contents.
-fn grow(app_name: &str, new_size: u64, password: &str) -> Result<()> {
+pub fn grow(app_name: &str, new_size: u64, password: &str) -> Result<()> {
     let container = container_path(app_name)?;
     let bigger = container.with_extension("hc.growing");
     let mount_point = crate::manifest::app_dir(app_name)?;

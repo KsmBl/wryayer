@@ -196,6 +196,15 @@ enum Commands {
         /// The app name as shown by `wryayer list`
         app_name: String,
     },
+    /// Enlarge an encrypted app's container, keeping its contents
+    Grow {
+        /// The app name as shown by `wryayer list`
+        app_name: String,
+        /// Target size, e.g. 8G or 512M. Without it, the container is re-sized
+        /// the way a fresh one would be for the data it holds.
+        #[arg(long, value_name = "SIZE")]
+        to: Option<String>,
+    },
     /// Show which apps are encrypted and whether they're currently unlocked
     Encryption,
     /// Manage the master password store
@@ -514,6 +523,7 @@ fn main() {
         Commands::Decrypt { app_name } => commands::encrypt::decrypt(&app_name),
         Commands::Unlock { app_name } => commands::encrypt::unlock(&app_name),
         Commands::Lock { app_name } => commands::encrypt::lock(&app_name),
+        Commands::Grow { app_name, to } => commands::encrypt::grow(&app_name, to.as_deref()),
         Commands::Encryption => commands::encrypt::status(),
         Commands::Master { action } => match action {
             MasterAction::Init => commands::encrypt::master_init(),
