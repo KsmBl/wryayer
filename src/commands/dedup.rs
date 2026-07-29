@@ -10,6 +10,27 @@ use std::path::{Path, PathBuf};
 const SKIP_DIRS: &[&str] = &["home", ".tmp", ".snapshots"];
 const SKIP_FILES: &[&str] = &[".manifest.toml", "config.ini", ".instance.pid"];
 
+/// One candidate file, identified the way the kernel identifies files: a
+/// filesystem plus an inode number within it.
+///
+/// The inode alone is not an identity. Inode numbers are only unique per
+/// filesystem, and every encrypted app lives on its own ext4 volume inside a
+/// VeraCrypt container — so two unrelated files in two different apps routinely
+/// share an inode number. Carrying the device alongside keeps "these are
+/// already the same file" from being answered by coincidence.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct FileRef {
+    dev: u64,
+    ino: u64,
+    path: PathBuf,
+}
+
+impl FileRef {
+    fn id(&self) -> (u64, u64) {
+        (self.dev, self.ino)
+    }
+}
+
 pub fn run(verbose: bool) -> Result<()> {
     let apps = list_all_apps()?;
     if apps.len() < 2 {
@@ -19,8 +40,8 @@ pub fn run(verbose: bool) -> Result<()> {
 
     eprintln!("Deduplicating shared files across {} apps...", apps.len());
 
-    // size → list of (inode, path)
-    let mut by_size: HashMap<u64, Vec<(u64, PathBuf)>> = HashMap::new();
+    // size → candidate files of exactly that size
+    let mut by_size: HashMap<u64, Vec<FileRef>> = HashMap::new();
     let mut total_files = 0u64;
 
     for app in &apps {
@@ -38,17 +59,16 @@ pub fn run(verbose: bool) -> Result<()> {
         if entries.len() < 2 {
             continue;
         }
-        // If every entry already shares the same inode, nothing to do.
-        let first_ino = entries[0].0;
-        if entries.iter().all(|(ino, _)| *ino == first_ino) {
+        // If every entry is already the same file, nothing to do.
+        if all_same_file(entries) {
             continue;
         }
 
         // Group by content hash.
-        let mut by_hash: HashMap<u64, Vec<(u64, PathBuf)>> = HashMap::new();
-        for (ino, path) in entries {
-            if let Ok(h) = hash_file(path) {
-                by_hash.entry(h).or_default().push((*ino, path.clone()));
+        let mut by_hash: HashMap<u64, Vec<FileRef>> = HashMap::new();
+        for file in entries {
+            if let Ok(h) = hash_file(&file.path) {
+                by_hash.entry(h).or_default().push(file.clone());
             }
         }
 
@@ -57,29 +77,29 @@ pub fn run(verbose: bool) -> Result<()> {
                 continue;
             }
             // Lowest inode = canonical (oldest on disk, keeps the inode alive longest).
-            group.sort_by_key(|(ino, _)| *ino);
-            let (canonical_ino, ref canonical_path) = group[0];
+            group.sort_by_key(|f| f.ino);
+            let canonical = group[0].clone();
 
-            for (ino, ref dup_path) in &group[1..] {
-                if *ino == canonical_ino {
+            for dup in &group[1..] {
+                if dup.id() == canonical.id() {
                     continue; // already hard-linked
                 }
                 // Verify byte-for-byte equality before linking: DefaultHasher can
                 // collide, and a false match would silently corrupt a file.
-                if !files_equal(canonical_path, dup_path) {
+                if !files_equal(&canonical.path, &dup.path) {
                     continue;
                 }
-                match atomic_hard_link(canonical_path, dup_path) {
+                match atomic_hard_link(&canonical.path, &dup.path) {
                     Ok(()) => {
                         links_created += 1;
                         bytes_saved += size;
                         if verbose {
-                            eprintln!("  linked {}", dup_path.display());
+                            eprintln!("  linked {}", dup.path.display());
                         }
                     }
                     Err(e) => {
                         if verbose {
-                            eprintln!("  warning: {}: {e:#}", dup_path.display());
+                            eprintln!("  warning: {}: {e:#}", dup.path.display());
                         }
                         errors += 1;
                     }
@@ -99,6 +119,15 @@ pub fn run(verbose: bool) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Whether every candidate is already one and the same file on disk, in which
+/// case hashing and linking it has nothing left to do.
+fn all_same_file(files: &[FileRef]) -> bool {
+    match files.first() {
+        Some(first) => files.iter().all(|f| f.id() == first.id()),
+        None => true,
+    }
 }
 
 // ── Disk-usage accounting ─────────────────────────────────────────────────────
@@ -147,7 +176,7 @@ pub fn du_walk(dir: &Path, apparent: &mut u64, actual: &mut u64, seen: &mut Hash
 
 // ── File collection ───────────────────────────────────────────────────────────
 
-fn collect_files(dir: &Path, by_size: &mut HashMap<u64, Vec<(u64, PathBuf)>>, count: &mut u64) {
+fn collect_files(dir: &Path, by_size: &mut HashMap<u64, Vec<FileRef>>, count: &mut u64) {
     let Ok(rd) = std::fs::read_dir(dir) else { return };
     for entry in rd.flatten() {
         // DirEntry::metadata() uses lstat on Unix — does not follow symlinks.
@@ -178,7 +207,10 @@ fn collect_files(dir: &Path, by_size: &mut HashMap<u64, Vec<(u64, PathBuf)>>, co
             continue;
         }
 
-        by_size.entry(size).or_default().push((meta.ino(), path));
+        by_size
+            .entry(size)
+            .or_default()
+            .push(FileRef { dev: meta.dev(), ino: meta.ino(), path });
         *count += 1;
     }
 }
@@ -255,5 +287,29 @@ pub fn format_bytes(n: u64) -> String {
         format!("{:.1} MiB", n as f64 / (K * K) as f64)
     } else {
         format!("{:.2} GiB", n as f64 / (K * K * K) as f64)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn file(dev: u64, ino: u64, path: &str) -> FileRef {
+        FileRef { dev, ino, path: PathBuf::from(path) }
+    }
+
+    #[test]
+    fn identical_inodes_on_different_devices_are_different_files() {
+        // Each encrypted app is its own ext4 volume, so inode 12 in one app has
+        // nothing to do with inode 12 in another. Treating them as one file
+        // would skip a pair that genuinely could be deduplicated.
+        let files = vec![file(1, 12, "/a/lib.so"), file(2, 12, "/b/lib.so")];
+        assert!(!all_same_file(&files));
+    }
+
+    #[test]
+    fn the_same_inode_on_one_device_is_one_file() {
+        let files = vec![file(1, 12, "/a/lib.so"), file(1, 12, "/a/also-lib.so")];
+        assert!(all_same_file(&files));
     }
 }
