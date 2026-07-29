@@ -1,4 +1,5 @@
 pub mod avahi_stub;
+pub mod child_output;
 pub mod commands;
 pub mod config;
 pub mod cpu;
