@@ -179,6 +179,35 @@ pub fn labels(app_name: &str) -> Result<Vec<String>> {
     Ok(out)
 }
 
+/// Bytes that deleting `label` would actually give back.
+///
+/// A snapshot is built from hard links, so most of what it "contains" is the
+/// same data as the live tree and costs nothing extra — deleting it frees
+/// nothing of that. What it does hold exclusively are the files the app has
+/// since replaced: their old inodes have no other name left, so their link
+/// count is 1 and they go when the snapshot goes.
+///
+/// That exclusive figure is the one worth showing next to a delete prompt. The
+/// apparent size would read as gigabytes for a snapshot that costs megabytes,
+/// which is precisely the wrong thing to believe while deciding what to remove.
+pub fn reclaimable_bytes(app_name: &str, label: &str) -> u64 {
+    fn walk(dir: &Path, total: &mut u64) {
+        let Ok(rd) = fs::read_dir(dir) else { return };
+        for entry in rd.flatten() {
+            let Ok(meta) = entry.metadata() else { continue };
+            if meta.is_dir() {
+                walk(&entry.path(), total);
+            } else if meta.is_file() && meta.nlink() == 1 {
+                *total += meta.len();
+            }
+        }
+    }
+    let Ok(root) = snapshots_dir(app_name) else { return 0 };
+    let mut total = 0;
+    walk(&root.join(label), &mut total);
+    total
+}
+
 /// Recursively recreate the tree at `src` under `dst`, hard-linking regular
 /// files and re-creating symlinks. The `app_root_skip` is the live app root
 /// whose `.snapshots` subdirectory must be skipped so snapshots don't recurse

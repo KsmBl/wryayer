@@ -259,9 +259,12 @@ pub enum Screen {
         error: Option<String>,
     },
     /// Snapshot manager: pick a snapshot to roll back to or delete.
+    /// Create, roll back to, or delete an app's snapshots — one screen for the
+    /// whole lifecycle, reached with a single key.
     SnapshotManager {
         app_name: String,
-        snaps: Vec<String>,
+        /// (label, bytes deleting it would free) — see `snapshot::reclaimable_bytes`.
+        snaps: Vec<(String, u64)>,
         selected: usize,
     },
     /// Field-by-field configurator for a user-defined ("custom") CPU. Saving
@@ -1146,7 +1149,32 @@ fn list_nav(selected: &mut usize, len: usize, code: KeyCode) -> bool {
     }
 }
 
-/// Snapshot manager: ↑/↓ to choose, Enter to roll back, Esc to close.
+/// Open the snapshot manager for `app_name`, even with nothing in it yet — the
+/// screen is also where snapshots get created, so an empty list is a starting
+/// point rather than a dead end.
+fn open_snapshot_manager(app: &mut App, app_name: String) {
+    match snapshot_entries(&app_name) {
+        Ok(snaps) => {
+            app.screen = Screen::SnapshotManager { app_name, snaps, selected: 0 };
+            app.needs_clear = true;
+        }
+        Err(e) => app.status = format!("snapshot lookup failed: {e:#}"),
+    }
+}
+
+/// Every snapshot of `app_name`, each with the space deleting it would free.
+fn snapshot_entries(app_name: &str) -> anyhow::Result<Vec<(String, u64)>> {
+    Ok(crate::commands::snapshot::labels(app_name)?
+        .into_iter()
+        .map(|label| {
+            let bytes = crate::commands::snapshot::reclaimable_bytes(app_name, &label);
+            (label, bytes)
+        })
+        .collect())
+}
+
+/// Snapshot manager: ↑/↓ to choose, Enter to roll back, `n` to take a new one,
+/// `d` to delete, Esc to close.
 fn on_snapshot_manager(app: &mut App, code: KeyCode) {
     let Screen::SnapshotManager { app_name, snaps, selected } = &mut app.screen else { return };
     if list_nav(selected, snaps.len(), code) {
@@ -1157,8 +1185,22 @@ fn on_snapshot_manager(app: &mut App, code: KeyCode) {
             app.screen = Screen::Main;
             app.needs_clear = true;
         }
+        KeyCode::Char('n') => {
+            let name = app_name.clone();
+            app.screen = Screen::Confirm {
+                title: format!("Snapshot '{name}'?"),
+                body: vec![
+                    "Creates a hard-linked snapshot (instant, near-zero disk).".into(),
+                    String::new(),
+                    "Press y to confirm, n or Esc to cancel.".into(),
+                ],
+                action: PendingAction::Snapshot(name),
+                danger: false,
+            };
+            app.needs_clear = true;
+        }
         KeyCode::Enter => {
-            if let Some(snap) = snaps.get(*selected).cloned() {
+            if let Some((snap, _)) = snaps.get(*selected).cloned() {
                 let name = app_name.clone();
                 app.screen = Screen::Confirm {
                     title: format!("Rollback '{name}'?"),
@@ -1174,12 +1216,16 @@ fn on_snapshot_manager(app: &mut App, code: KeyCode) {
             }
         }
         KeyCode::Char('d') | KeyCode::Delete => {
-            if let Some(snap) = snaps.get(*selected).cloned() {
+            if let Some((snap, bytes)) = snaps.get(*selected).cloned() {
                 let name = app_name.clone();
                 app.screen = Screen::Confirm {
                     title: "Delete snapshot?".into(),
                     body: vec![
                         format!("Delete snapshot {snap} of '{name}'?"),
+                        format!(
+                            "Frees {} — the rest of it is shared with the live app.",
+                            crate::commands::dedup::format_bytes(bytes)
+                        ),
                         String::new(),
                         "Press y to delete, n or Esc to cancel.".into(),
                     ],
@@ -1456,32 +1502,18 @@ fn on_installed(app: &mut App, code: KeyCode) {
                 };
             }
         }
+        // One key for the whole snapshot lifecycle. `o` still opens it too:
+        // it used to be the rollback key and muscle memory is cheap to honour.
         KeyCode::Char('p') => {
             if let Some(m) = app.selected_installed() {
                 let name = m.app.name.clone();
-                app.screen = Screen::Confirm {
-                    title: format!("Snapshot '{name}'?"),
-                    body: vec![
-                        "Creates a hard-linked snapshot (instant, near-zero disk).".into(),
-                        String::new(),
-                        "Press y to confirm, n or Esc to cancel.".into(),
-                    ],
-                    action: PendingAction::Snapshot(name),
-                    danger: false,
-                };
+                open_snapshot_manager(app, name);
             }
         }
         KeyCode::Char('o') => {
             if let Some(m) = app.selected_installed() {
                 let name = m.app.name.clone();
-                match crate::commands::snapshot::labels(&name) {
-                    Ok(snaps) if !snaps.is_empty() => {
-                        app.screen = Screen::SnapshotManager { app_name: name, snaps, selected: 0 };
-                        app.needs_clear = true;
-                    }
-                    Ok(_) => app.status = format!("No snapshots for {name}"),
-                    Err(e) => app.status = format!("snapshot lookup failed: {e:#}"),
-                }
+                open_snapshot_manager(app, name);
             }
         }
         KeyCode::Char('c') => {
@@ -2781,12 +2813,10 @@ fn execute_action(app: &mut App, action: PendingAction) {
             match crate::commands::snapshot::delete(&name, &snap) {
                 Ok(_) => {
                     app.status = format!("Deleted snapshot {snap}");
-                    let snaps = crate::commands::snapshot::labels(&name).unwrap_or_default();
-                    app.screen = if snaps.is_empty() {
-                        Screen::Main
-                    } else {
-                        Screen::SnapshotManager { app_name: name, snaps, selected: 0 }
-                    };
+                    // Stay in the manager after a delete: removing several
+                    // snapshots in a row is the usual reason to be here.
+                    let snaps = snapshot_entries(&name).unwrap_or_default();
+                    app.screen = Screen::SnapshotManager { app_name: name, snaps, selected: 0 };
                 }
                 Err(e) => {
                     app.status = format!("delete failed: {e:#}");
@@ -5044,6 +5074,54 @@ mod op_log_tests {
         for line in ["Done", "Update complete", "Updated firefox", "Saved", "Done installing"] {
             assert!(!is_progress_line(line), "{line:?} is an outcome, not progress");
         }
+    }
+
+    #[test]
+    fn the_snapshot_manager_offers_the_whole_lifecycle() {
+        let (_home, mut app) = config_screen("demo", 0);
+        app.screen = Screen::SnapshotManager {
+            app_name: "demo".into(),
+            snaps: vec![
+                ("20260728-181136".into(), 412 * 1024 * 1024),
+                ("20260726-094512".into(), 3 * 1024 * 1024),
+            ],
+            selected: 0,
+        };
+        let out = render(&mut app, 100, 30);
+        assert!(out.contains("[n] New"), "no way to create one:\n{out}");
+        assert!(out.contains("Roll back"), "no rollback:\n{out}");
+        assert!(out.contains("[d] Delete"), "no delete:\n{out}");
+        // The reclaimable size is what makes deleting a decision rather than a
+        // guess — it is the whole reason the entries carry a number.
+        assert!(out.contains("frees"), "no reclaimable size:\n{out}");
+        assert!(out.contains("412.0 MiB"), "size missing:\n{out}");
+    }
+
+    #[test]
+    fn an_app_with_no_snapshots_still_opens_the_manager() {
+        // It is where snapshots get created, so an empty list is a starting
+        // point rather than a dead end — it used to refuse to open at all.
+        let (_home, mut app) = config_screen("demo", 0);
+        app.screen = Screen::SnapshotManager {
+            app_name: "demo".into(),
+            snaps: vec![],
+            selected: 0,
+        };
+        let out = render(&mut app, 100, 30);
+        assert!(out.contains("no snapshots yet"), "{out}");
+        assert!(out.contains("[n] New"), "{out}");
+    }
+
+    #[test]
+    fn one_key_covers_snapshots_in_the_hints() {
+        // Two keys where one used to create and the other manage is exactly how
+        // the delete came to be reported as missing.
+        let (_home, mut app) = config_screen("demo", 0);
+        app.screen = Screen::Main;
+        app.tab = Tab::Installed;
+        let out = render(&mut app, 140, 30);
+        assert!(out.contains("[p] Snapshots"), "{out}");
+        assert!(!out.contains("[o] Rollback"), "the old split hint is back:\n{out}");
     }
 
     #[test]

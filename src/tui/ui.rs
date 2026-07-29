@@ -574,8 +574,14 @@ fn draw_cpu_field_help(f: &mut Frame, area: Rect, row: usize) {
     );
 }
 
-fn draw_snapshot_manager(f: &mut Frame, area: Rect, app_name: &str, snaps: &[String], selected: usize) {
-    let needed_h = (snaps.len() as u16) + 4;
+fn draw_snapshot_manager(
+    f: &mut Frame,
+    area: Rect,
+    app_name: &str,
+    snaps: &[(String, u64)],
+    selected: usize,
+) {
+    let needed_h = (snaps.len().max(1) as u16) + 4;
     let h_pct = ((needed_h as f32 / area.height.max(1) as f32) * 100.0).clamp(25.0, 65.0) as u16;
     let inner = popup_frame(f, area, 46, h_pct, &format!("Snapshots — {app_name}"), c_accent());
 
@@ -584,9 +590,29 @@ fn draw_snapshot_manager(f: &mut Frame, area: Rect, app_name: &str, snaps: &[Str
         .constraints([Constraint::Min(0), Constraint::Length(1)])
         .split(inner);
 
-    let items: Vec<ListItem> = snaps.iter().map(|s| {
-        ListItem::new(Line::from(Span::styled(s.clone(), Style::default().fg(c_fg()))))
-    }).collect();
+    let items: Vec<ListItem> = if snaps.is_empty() {
+        vec![ListItem::new(Line::from(Span::styled(
+            "  no snapshots yet — press [n] to take one",
+            Style::default().fg(c_dim()),
+        )))]
+    } else {
+        snaps
+            .iter()
+            .map(|(label, bytes)| {
+                // The reclaimable size, not the apparent one: a snapshot shares
+                // almost everything with the live app, and showing gigabytes
+                // next to something that costs megabytes is the wrong thing to
+                // believe while deciding what to delete.
+                ListItem::new(Line::from(vec![
+                    Span::styled(label.clone(), Style::default().fg(c_fg())),
+                    Span::styled(
+                        format!("   frees {}", format_bytes(*bytes)),
+                        Style::default().fg(c_dim()),
+                    ),
+                ]))
+            })
+            .collect()
+    };
     let mut state = ListState::default();
     state.select(Some(selected));
     let list = List::new(items)
@@ -596,7 +622,7 @@ fn draw_snapshot_manager(f: &mut Frame, area: Rect, app_name: &str, snaps: &[Str
 
     f.render_widget(
         Paragraph::new(Span::styled(
-            " [↑↓] Choose  [Enter] Roll back  [d] Delete  [Esc] Close",
+            " [↑↓] Choose  [n] New  [Enter] Roll back  [d] Delete  [Esc] Close",
             Style::default().fg(c_dim()),
         )),
         chunks[1],
@@ -984,7 +1010,7 @@ fn draw_detail(f: &mut Frame, app: &mut App, area: Rect) {
     lines.push(Line::raw(""));
     if has_launcher {
         lines.push(Line::from(Span::styled(
-            "  [r] Run  [d] Delete  [e] Export  [p] Snapshot  [o] Rollback",
+            "  [r] Run  [d] Delete  [e] Export  [p] Snapshots",
             dim,
         )));
     } else {
@@ -993,7 +1019,7 @@ fn draw_detail(f: &mut Frame, app: &mut App, area: Rect) {
             Span::styled("--bin-names <name>", Style::default().fg(c_fg())),
         ]));
         lines.push(Line::from(Span::styled(
-            "  [d] Delete  [e] Export  [p] Snapshot  [o] Rollback",
+            "  [d] Delete  [e] Export  [p] Snapshots",
             dim,
         )));
     }
@@ -1163,7 +1189,7 @@ fn draw_import(f: &mut Frame, app: &App, area: Rect) {
 fn draw_statusbar(f: &mut Frame, app: &App, area: Rect) {
     let hint = match app.tab {
         Tab::Installed if app.detail_focused => "[↑↓] Scroll  [←/Esc] Back  [q] Quit",
-        Tab::Installed => "[Tab] Switch  [→] Details  [r] Run  [d] Delete  [e] Export  [p] Snapshot  [o] Rollback  [c] Check  [u] Update  [U] Update all  [s] Config  [n] Rename  [?] Help  [q] Quit",
+        Tab::Installed => "[Tab] Switch  [→] Details  [r] Run  [d] Delete  [e] Export  [p] Snapshots  [c] Check  [u] Update  [U] Update all  [s] Config  [n] Rename  [?] Help  [q] Quit",
         Tab::Install   => "[Tab] Switch  Type to search  [↓] Select  [Enter] Install/Uninstall  [q] Quit",
         Tab::Import    => "[Tab] Switch  Type zip path  [Enter] Import  [Esc] Clear  [Shift+Q] Quit",
         Tab::Games     => "[Tab] Switch  [↑↓] Navigate  [Enter/r] Run  [s] Settings  [d] Delete  [i/a] Import  [q] Quit",
@@ -2379,8 +2405,8 @@ fn draw_key_help(f: &mut Frame, area: Rect) {
         ("r / Enter",  "Run the selected app"),
         ("d / Del",    "Delete the selected app"),
         ("e",          "Export app to a zip file"),
-        ("p",          "Create a snapshot"),
-        ("o",          "Roll back to a snapshot"),
+        ("p",          "Snapshots: take one, roll back, or delete"),
+        
         ("c",          "Check for updates (no install)"),
         ("u",          "Update the selected app"),
         ("U",          "Update all apps"),
