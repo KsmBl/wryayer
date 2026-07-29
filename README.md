@@ -109,8 +109,7 @@ to lock the container when the app exits, and the way back out:
 | `r` | Run selected app |
 | `d` / `Delete` | Remove selected app (double-confirm) |
 | `e` | Export selected app to a zip |
-| `p` | Snapshot selected app (hard-linked clone) |
-| `o` | Open the snapshot manager (choose one to roll back to, or delete) |
+| `p` | Snapshots: take one, roll back to one, or delete one (`o` opens it too) |
 | `u` | Update selected app |
 | `U` | Update **all** out-of-date apps |
 | `c` | Check for updates |
@@ -495,6 +494,12 @@ hard link keeps pointing at the old content; the dedup pass at the end of every
 install re-establishes shared-library hard links.)
 
 Snapshots are excluded from `wryayer list` size totals, `wryayer dedup`, and the export zip.
+
+In the TUI, `p` opens one screen for the whole lifecycle — take a snapshot, roll
+back to one, or delete one. Each is listed with the space deleting it would
+actually free, which is far less than it appears to contain: a snapshot shares
+almost everything with the live app, and only holds the files the app has since
+replaced.
 
 ### Encrypt an app
 
