@@ -564,6 +564,31 @@ table, the TUI details pane (via `EncState::fill`, refreshed on the same
 once-a-second throttle as the mount scan), and `run`, which warns after
 `ensure_unlocked` and before the app can start writing.
 
+### The root has to be the root
+
+`manifest::wryayer_root` refuses to hand out a path when `~/.wryayer` has been
+seen on its own filesystem before but isn't on one now. An unmounted mount point
+is an ordinary empty directory: without this check a boot that happened before
+the container was mounted read nothing and wrote everything underneath the mount
+point — installs, and a second `.passwords.vault` created by the "no store yet"
+path in `obtain_password`. Mounting hid the shadow copy; the next boot restored
+it, and the master password stopped working.
+
+Detection is `st_dev(root) != st_dev(root.parent())`, which is stable across
+reboots in a way the device number itself is not (a VeraCrypt volume lands on a
+different `dm-` minor each time). The marker lives in `$XDG_STATE_HOME` because
+its whole job is to be readable when `~/.wryayer` is not, and it holds one bit
+and no app names.
+
+The marker is deliberately one-way. A container that failed to mount looks
+exactly like one the user has stopped using, and only the second is safe to
+adopt silently — so "root is now a plain directory" never clears it.
+`WRYAYER_ALLOW_UNMOUNTED_ROOT=1` does, once.
+
+The verdict is cached in a `OnceLock`: this sits underneath every `app_dir` call,
+including per-app-per-frame lookups in the TUI, and neither the mount table nor
+the marker changes meaningfully within one run.
+
 ### Converting an installed app from the TUI
 
 `EncryptionRows` decides which rows a per-app config screen shows — `Offer` for

@@ -789,6 +789,46 @@ keystream and the unbiased character selection — is written up in
 - **With `prompt`, don't lose the password.** It is not stored anywhere. A
   generated password is printed once, at creation.
 
+### Keeping the whole of `~/.wryayer` in a container
+
+Separate from per-app containers, you can put `~/.wryayer` *itself* on an
+encrypted volume, so every app is protected at rest at once. wryayer supports
+this, with one thing to know about it.
+
+An unmounted mount point is an ordinary empty directory. Before the container is
+mounted — right after a reboot, or if mounting fails — `~/.wryayer` looks exactly
+like a fresh install. wryayer used to take it at face value and write there:
+installs landed *underneath* the mount point, and a prompt announced that no
+master password store existed and offered to make one. Mounting the container
+then hid that second copy, and the next boot brought it back, so the master
+password you knew was rejected by a store you never created.
+
+wryayer now records in `~/.local/state/wryayer/root-is-mounted` that its root has
+been seen on a filesystem of its own, and refuses to run while it isn't:
+
+```
+error: /home/you/.wryayer is not mounted.
+```
+
+Mount the container and carry on. The check costs nothing for anyone whose
+`~/.wryayer` is a plain directory — the marker is only ever written for a root
+that really is its own filesystem. If you deliberately stop using a container,
+clear it once:
+
+```fish
+WRYAYER_ALLOW_UNMOUNTED_ROOT=1 wryayer list
+```
+
+If you were bitten by this before the fix, there may still be a shadow copy
+underneath the mount point. A non-recursive bind mount shows what is hidden
+under it, without unmounting anything:
+
+```fish
+sudo mount --bind -o ro $HOME /mnt
+ls -la /mnt/.wryayer        # anything here is the shadow copy
+sudo umount /mnt
+```
+
 ### Reading the TUI
 
 Encrypted apps carry two markers in the app list:
