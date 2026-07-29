@@ -289,6 +289,12 @@ enum MasterAction {
         /// The app name as shown by `wryayer list`
         app_name: String,
     },
+    /// Delete the store entirely — the way out of one nobody can open
+    Reset {
+        /// Skip the confirmation, and reset even if encrypted apps rely on it
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -549,6 +555,7 @@ fn main() {
                 commands::encrypt::master_show(app_name.as_deref())
             }
             MasterAction::Forget { app_name } => commands::encrypt::master_forget(&app_name),
+            MasterAction::Reset { force } => commands::encrypt::master_reset(force),
         },
         Commands::Genpw { length } => commands::encrypt::generate_password(length),
         Commands::Tui => {

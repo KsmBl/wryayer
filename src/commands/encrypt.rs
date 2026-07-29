@@ -829,6 +829,78 @@ pub fn master_change() -> Result<()> {
     Ok(())
 }
 
+/// Delete the master password store outright.
+///
+/// The way out of a store nobody can open. `master change` needs the current
+/// password and `master init` refuses while a store exists, so without this a
+/// forgotten — or corrupted — store is a dead end with no route back except
+/// deleting the file by hand.
+///
+/// Apps whose containers open from the store are named and the reset refused,
+/// because deleting it strands them: with `password_source = master` the
+/// password is not written down anywhere else, and the container is unopenable
+/// without it. `force` is for when the user knows that and means it.
+pub fn master_reset(force: bool) -> Result<()> {
+    if !crate::secrets::exists() {
+        bail!("there is no master password store to reset");
+    }
+
+    let stranded = apps_relying_on_the_store()?;
+    if !stranded.is_empty() && !force {
+        bail!(
+            "{} would be left unopenable: {}\n\n\
+             Their container passwords live only in this store, and deleting it \
+             deletes the only copy. Print them first with:\n    \
+             wryayer master show\n\n\
+             Then, if you still want to reset:\n    wryayer master reset --force",
+            if stranded.len() == 1 { "an encrypted app" } else { "encrypted apps" },
+            stranded.join(", "),
+        );
+    }
+
+    if !force {
+        println!(
+            "This deletes the master password store at {}.",
+            crate::secrets::store_path()?.display()
+        );
+        if !confirm("Type RESET to confirm: ", "RESET")? {
+            println!("Left it alone.");
+            return Ok(());
+        }
+    }
+
+    crate::secrets::destroy()?;
+    println!("Master password store deleted. Create a new one with:");
+    println!("    wryayer master init");
+    Ok(())
+}
+
+/// Encrypted apps that would have no way in if the store were deleted.
+fn apps_relying_on_the_store() -> Result<Vec<String>> {
+    Ok(crate::manifest::list_all_apps()?
+        .into_iter()
+        .map(|m| m.app.name)
+        .filter(|name| {
+            veracrypt::is_encrypted(name) && password_source(name) == PasswordSource::Master
+        })
+        .collect())
+}
+
+/// Read a line and report whether it is exactly `expected`.
+///
+/// A typed word rather than y/n: this is not undoable, and the extra couple of
+/// seconds are the point.
+fn confirm(prompt: &str, expected: &str) -> Result<bool> {
+    use std::io::Write;
+    print!("{prompt}");
+    std::io::stdout().flush().ok();
+    let mut answer = String::new();
+    std::io::stdin()
+        .read_line(&mut answer)
+        .context("failed to read confirmation from the terminal")?;
+    Ok(answer.trim() == expected)
+}
+
 /// Forget this boot's cached key, so the master password is needed again.
 pub fn master_lock() -> Result<()> {
     crate::secrets::lock()?;
@@ -1238,6 +1310,75 @@ mod tests {
                 staging_dir("app").unwrap(),
                 decrypt_staging_dir("app").unwrap()
             );
+        });
+    }
+
+    #[test]
+    fn resetting_refuses_while_apps_still_depend_on_the_store() {
+        with_temp_home(|root| {
+            // An encrypted app set to `master` keeps its only copy of its
+            // container password in the store. Deleting it would make the
+            // container permanently unopenable, so this has to be refused
+            // rather than merely warned about.
+            std::fs::create_dir_all(root.join(".containers")).unwrap();
+            std::fs::write(root.join(".containers/vault.hc"), b"not really a container").unwrap();
+            std::fs::write(
+                root.join(".containers/vault.toml"),
+                "name = \"vault\"\nmain_binary = \"vault\"\ninstalled_at = \"now\"\n\
+                 launchers = [\"vault\"]\npassword_source = \"master\"\n",
+            )
+            .unwrap();
+            std::fs::create_dir_all(root.join("vault")).unwrap();
+
+            let stranded = apps_relying_on_the_store().unwrap();
+            assert_eq!(stranded, vec!["vault".to_string()]);
+        });
+    }
+
+    #[test]
+    fn a_prompt_source_app_does_not_block_a_reset() {
+        with_temp_home(|root| {
+            // Its password was never in the store, so deleting the store costs
+            // it nothing.
+            std::fs::create_dir_all(root.join(".containers")).unwrap();
+            std::fs::write(root.join(".containers/vault.hc"), b"x").unwrap();
+            std::fs::write(
+                root.join(".containers/vault.toml"),
+                "name = \"vault\"\nmain_binary = \"vault\"\ninstalled_at = \"now\"\n\
+                 launchers = [\"vault\"]\npassword_source = \"prompt\"\n",
+            )
+            .unwrap();
+            std::fs::create_dir_all(root.join("vault")).unwrap();
+
+            assert!(apps_relying_on_the_store().unwrap().is_empty());
+        });
+    }
+
+    #[test]
+    fn resetting_without_a_store_says_so_instead_of_succeeding_silently() {
+        with_temp_home(|_| {
+            let err = master_reset(true).unwrap_err().to_string();
+            assert!(err.contains("no master password store"), "{err}");
+        });
+    }
+
+    #[test]
+    fn a_forced_reset_deletes_the_store_and_the_cached_key() {
+        with_temp_home(|_| {
+            crate::secrets::init("whatever-it-was").unwrap();
+            assert!(crate::secrets::exists());
+            assert!(crate::secrets::is_unlocked(), "init caches this boot's key");
+
+            master_reset(true).unwrap();
+
+            assert!(!crate::secrets::exists(), "the store survived the reset");
+            assert!(
+                !crate::secrets::is_unlocked(),
+                "a cached key outliving its store would open nothing and confuse everything"
+            );
+            // And the way back in is open again.
+            crate::secrets::init("a-fresh-one").unwrap();
+            assert!(crate::secrets::open("a-fresh-one").is_ok());
         });
     }
 

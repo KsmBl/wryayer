@@ -391,6 +391,21 @@ pub fn change_master(old_password: &str, new_password: &str) -> Result<()> {
     Ok(())
 }
 
+/// Delete the store and this boot's cached key.
+///
+/// Deliberately does *not* need the master password: the case this exists for
+/// is not knowing it. That is no weakening — anyone who can run this can
+/// already `rm` the file — but it does mean the caller is responsible for
+/// warning about what the store still holds.
+pub fn destroy() -> Result<()> {
+    let path = store_path()?;
+    if path.exists() {
+        std::fs::remove_file(&path)
+            .with_context(|| format!("failed to remove {}", path.display()))?;
+    }
+    lock()
+}
+
 /// Forget this boot's cached key, so the master password is required again.
 pub fn lock() -> Result<()> {
     let path = cache_path()?;
