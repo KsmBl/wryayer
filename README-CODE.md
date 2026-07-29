@@ -564,6 +564,28 @@ table, the TUI details pane (via `EncState::fill`, refreshed on the same
 once-a-second throttle as the mount scan), and `run`, which warns after
 `ensure_unlocked` and before the app can start writing.
 
+### Converting an installed app from the TUI
+
+`EncryptionRows` decides which rows a per-app config screen shows — `Offer` for
+a plain app, `Manage` for an encrypted one, `Hidden` for an alias or when
+veracrypt isn't installed. It replaced a bare `is_encrypted: bool` throughout
+`config_sections` / `config_nav_order` / `config_nav_step`, so the renderer and
+↑/↓ navigation cannot disagree about which rows exist.
+
+The choice popup (`Screen::AskEncrypt`) is shared with the install-time prompt
+and keyed on `EncryptAsk`. The two paths need separate choice tables because
+`install` spells the options `--encrypt-master` / `--encrypt-generate` while
+`encrypt` spells them `--master` / `--generate`; index 0 is the back-out row in
+both, which is what `on_ask_encrypt` keys its cancel path on.
+
+`encrypt` and `decrypt` take the same hidden `--encrypt-secrets-stdin` as
+`install`, because the TUI owns the terminal — a child that prompted would be
+painted over by the progress bar. `resolve_password_with` uses a supplied master
+password to *open* the store rather than as the answer, which caches this boot's
+key so nothing later in the operation drops to a prompt either.
+`open_container_stages` is the shared "what still needs asking to mount an
+existing container" rule, used by merge installs and by decryption.
+
 ### Guardrails
 
 `require_unlocked` fails `update`, `repair`, `snapshot`, `rollback` and `export`
