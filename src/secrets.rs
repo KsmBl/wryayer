@@ -494,30 +494,14 @@ mod tests {
     use super::*;
 
     /// Point HOME and XDG_RUNTIME_DIR at a scratch dir so the tests never touch
-    /// the real store. Serialised because both are process-global.
+    /// the real store.
+    ///
+    /// Serialised on the crate-wide lock, not a private one: this module used
+    /// to hold its own, which let another module restore the real HOME between
+    /// the set_var here and the write inside `f` — and that is exactly how a
+    /// real user's password store came to be overwritten with a fixture.
     fn with_temp_env<T>(f: impl FnOnce() -> T) -> T {
-        use std::sync::Mutex;
-        static LOCK: Mutex<()> = Mutex::new(());
-        let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
-        let tmp = tempfile::tempdir().unwrap();
-        let old_home = std::env::var_os("HOME");
-        let old_rt = std::env::var_os("XDG_RUNTIME_DIR");
-        std::env::set_var("HOME", tmp.path());
-        std::env::set_var("XDG_RUNTIME_DIR", tmp.path().join("run"));
-        std::fs::create_dir_all(tmp.path().join(".wryayer")).unwrap();
-
-        let out = f();
-
-        match old_home {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
-        match old_rt {
-            Some(v) => std::env::set_var("XDG_RUNTIME_DIR", v),
-            None => std::env::remove_var("XDG_RUNTIME_DIR"),
-        }
-        out
+        crate::test_support::with_temp_home(|_| f())
     }
 
     #[test]

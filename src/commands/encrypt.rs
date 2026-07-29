@@ -1115,24 +1115,10 @@ mod tests {
     use super::*;
 
     /// Run `f` with HOME pointed at a fresh scratch dir, so the recovery tests
-    /// operate on a throwaway ~/.wryayer. Serialised because HOME is global.
+    /// operate on a throwaway ~/.wryayer. Uses the crate-wide environment lock;
+    /// see `crate::test_support` for why a per-module one is not enough.
     fn with_temp_home<T>(f: impl FnOnce(&Path) -> T) -> T {
-        use std::sync::Mutex;
-        static LOCK: Mutex<()> = Mutex::new(());
-        let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
-        let tmp = tempfile::tempdir().unwrap();
-        let old_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", tmp.path());
-        std::fs::create_dir_all(tmp.path().join(".wryayer")).unwrap();
-
-        let out = f(&tmp.path().join(".wryayer"));
-
-        match old_home {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
-        out
+        crate::test_support::with_temp_home(f)
     }
 
     #[test]
