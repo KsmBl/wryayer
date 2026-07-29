@@ -482,6 +482,66 @@ fn run_with_secrets(ctx: &Ctx, title: &str, args: Vec<String>, needs: Needs) {
     );
 }
 
+/// Run a batch of installs that create containers, collecting the secrets once.
+///
+/// `count` is how many packages are in the batch, only so the dialog can warn
+/// about the one case where sharing matters: a typed container password is used
+/// for every container in the batch, so one password would open all of them.
+/// Generated passwords are produced per app by the child and never shared.
+pub fn install_encrypted(
+    ctx: &Ctx,
+    jobs: Vec<(String, Vec<String>)>,
+    use_master: bool,
+    generate: bool,
+    count: usize,
+) {
+    let needs = Needs::for_new_container(use_master, generate);
+    if needs.container_new && count > 1 {
+        let ctx2 = ctx.clone();
+        super::confirm(
+            ctx,
+            "One password for all of them?",
+            &format!(
+                "{count} packages are selected and you chose to type the container \
+                 password yourself, so the same password will open every one of \
+                 their containers.\n\n\
+                 Generating passwords into the master store gives each its own.",
+            ),
+            false,
+            move || run_install_jobs(&ctx2, jobs.clone(), needs),
+        );
+        return;
+    }
+    run_install_jobs(ctx, jobs, needs);
+}
+
+fn run_install_jobs(ctx: &Ctx, jobs: Vec<(String, Vec<String>)>, needs: Needs) {
+    let ctx2 = ctx.clone();
+    collect(
+        ctx,
+        "Install — encrypted",
+        needs,
+        Rc::new(move |secrets: Secrets| {
+            let jobs = jobs
+                .iter()
+                .map(|(label, args)| {
+                    let mut args = args.clone();
+                    args.push("--encrypt-secrets-stdin".into());
+                    (label.clone(), args)
+                })
+                .collect();
+            let ctx3 = ctx2.clone();
+            op::run_jobs_with_stdin(
+                &ctx2.window,
+                "Install",
+                jobs,
+                secrets.payload(),
+                move |_| ctx3.refresh(),
+            );
+        }),
+    );
+}
+
 // ── The master password store ─────────────────────────────────────────────────
 
 /// Create the store, or change its password when one exists.
@@ -749,6 +809,23 @@ mod tests {
         let _home = crate::test_support::test_home();
         let needs = Needs::for_new_container(false, false);
         assert!(!needs.master_new && !needs.master_existing);
+    }
+
+    #[test]
+    fn a_batch_with_generated_passwords_needs_no_shared_secret() {
+        let _home = crate::test_support::test_home();
+        // Each child generates its own, so nothing is shared and there is
+        // nothing to warn about.
+        assert!(!Needs::for_new_container(true, true).container_new);
+    }
+
+    #[test]
+    fn a_batch_with_a_typed_password_is_the_case_worth_warning_about() {
+        let _home = crate::test_support::test_home();
+        // One typed password would open every container in the batch, which is
+        // what install_encrypted checks before going ahead.
+        assert!(Needs::for_new_container(true, false).container_new);
+        assert!(Needs::for_new_container(false, false).container_new);
     }
 
     #[test]
