@@ -8,12 +8,12 @@ use gtk4 as gtk;
 use gtk::prelude::*;
 use gtk::glib;
 
-use super::Ctx;
+use super::{encryption, Ctx};
 use crate::cpu::CPU_PROFILES;
 use crate::config::{
     format_ram_limit, parse_ram_limit, random_hostname, random_username, read_config,
     read_global_config, write_config, write_global_config, AppConfig, AvahiMode, Layout,
-    LocalDelete, TempMode, Theme,
+    LocalDelete, PasswordSource, TempMode, Theme,
 };
 
 /// The Settings tab (global defaults).
@@ -114,6 +114,39 @@ pub fn open(ctx: &Ctx, app_name: &str) {
 }
 
 // ── Form construction ──────────────────────────────────────────────────────────
+
+/// A full-width button wired to an encryption action for `app_name`.
+///
+/// These act immediately rather than on Save: they rewrite the very tree
+/// `config.ini` lives in, so batching them with the other settings would mean
+/// saving into a directory that is about to be replaced.
+fn action_button(
+    form: &gtk::Box,
+    ctx: &Ctx,
+    label: &str,
+    app_name: &str,
+    action: fn(&Ctx, &str),
+) {
+    let button = gtk::Button::with_label(label);
+    button.set_halign(gtk::Align::Start);
+    button.set_margin_top(4);
+    form.append(&button);
+
+    let ctx = ctx.clone();
+    let app_name = app_name.to_string();
+    button.connect_clicked(move |_| action(&ctx, &app_name));
+}
+
+/// A full-width button wired to a store-wide action.
+fn global_button(form: &gtk::Box, ctx: &Ctx, label: &str, action: fn(&Ctx)) {
+    let button = gtk::Button::with_label(label);
+    button.set_halign(gtk::Align::Start);
+    button.set_margin_top(4);
+    form.append(&button);
+
+    let ctx = ctx.clone();
+    button.connect_clicked(move |_| action(&ctx));
+}
 
 fn header(form: &gtk::Box, text: &str) {
     // A divider line above each section, so the groups read as separated bands.
@@ -275,6 +308,8 @@ fn open_cpu_configurator(parent: &impl IsA<gtk::Window>, initial: crate::cpu::Cu
 /// Build the form widgets into `form` and return a closure that reconstructs an
 /// `AppConfig` from them (carrying over anything not shown from the original).
 fn build_form(form: &gtk::Box, cfg: AppConfig, is_global: bool, app_name: Option<&str>, ctx: &Ctx) -> Rc<dyn Fn() -> AppConfig> {
+    // Only present for an app in an unlocked container.
+    let mut encryption_widgets: Option<(gtk::DropDown, gtk::CheckButton)> = None;
     // Sections mirror the TUI: Hardware (CPU/RAM), Privacy (access), Environment
     // (identity/temp/OS). See `tui::SANDBOX_SECTIONS` for the canonical grouping.
     header(form, "Hardware settings");
@@ -463,6 +498,72 @@ fn build_form(form: &gtk::Box, cfg: AppConfig, is_global: bool, app_name: Option
             });
         }
 
+        // ── Encryption ────────────────────────────────────────────────────
+        // A plain app gets the one action that offers it; one already in a
+        // container gets its settings and the way back out. An alias gets
+        // neither: its files live in the target's tree, so sealing its own
+        // directory would protect nothing.
+        let name = app_name.unwrap_or("");
+        let is_alias = crate::manifest::read_manifest(name)
+            .map(|m| m.app.alias_of.is_some())
+            .unwrap_or(false);
+        let states = crate::commands::encrypt::scan([name]);
+        let enc_state = states.get(name).copied();
+
+        if let Some(state) = enc_state {
+            header(form, "Encryption");
+            if state.locked {
+                // config.ini lives inside the container, so while it is locked
+                // there is nothing to read and nowhere safe to write.
+                let l = gtk::Label::new(Some(
+                    "This app's container is locked, so its settings are sealed \
+                     inside it. Unlock it to change them.",
+                ));
+                l.set_xalign(0.0);
+                l.set_wrap(true);
+                form.append(&l);
+                action_button(form, ctx, "Unlock container", name, |ctx, n| {
+                    encryption::unlock_container(ctx, n)
+                });
+            } else {
+                let source = dropdown(
+                    form,
+                    "Container password",
+                    &["Ask at every launch", "From the master store"],
+                    match cfg.password_source {
+                        PasswordSource::Prompt => 0,
+                        PasswordSource::Master => 1,
+                    },
+                );
+                let lock_on_exit =
+                    check(form, "Lock the container when the app exits", cfg.lock_on_exit);
+                encryption_widgets = Some((source, lock_on_exit));
+
+                action_button(form, ctx, "Lock container now", name, |ctx, n| {
+                    encryption::lock_container(ctx, n)
+                });
+                action_button(form, ctx, "Grow container…", name, |ctx, n| {
+                    encryption::grow_container(ctx, n)
+                });
+                action_button(form, ctx, "Remove encryption…", name, |ctx, n| {
+                    encryption::decrypt_app(ctx, n)
+                });
+            }
+        } else if !is_alias && crate::veracrypt::available() {
+            header(form, "Encryption");
+            let l = gtk::Label::new(Some(
+                "This app is stored in a plain directory. Moving it into a \
+                 VeraCrypt container keeps its whole tree — filenames included — \
+                 unreadable while locked.",
+            ));
+            l.set_xalign(0.0);
+            l.set_wrap(true);
+            form.append(&l);
+            action_button(form, ctx, "Encrypt this app…", name, |ctx, n| {
+                encryption::encrypt_app(ctx, n)
+            });
+        }
+
         header(form, "Bound apps");
         let hint = gtk::Label::new(Some(
             "Ticked apps become launchers inside this app's sandbox — e.g. tick \
@@ -499,6 +600,34 @@ fn build_form(form: &gtk::Box, cfg: AppConfig, is_global: bool, app_name: Option
         let confirm_install = check(form, "Confirm before installing", cfg.confirm_install);
         let ask_shortcut = check(form, "Ask about the shortcut each time", cfg.ask_shortcut);
         let clean_cache = check(form, "Clean cache after each install", cfg.clean_cache);
+
+        // The master password store is global by nature — one store covers
+        // every encrypted app — so it belongs here rather than in a per-app
+        // dialog. Only offered when VeraCrypt is present: without it no app can
+        // be encrypted and the store would have nothing to protect.
+        if crate::veracrypt::available() {
+            header(form, "Encryption");
+            let state = gtk::Label::new(Some(&format!(
+                "Master password store: {}",
+                encryption::store_summary()
+            )));
+            state.set_xalign(0.0);
+            form.append(&state);
+
+            let store_exists = crate::secrets::exists();
+            global_button(
+                form,
+                ctx,
+                if store_exists { "Change master password…" } else { "Set a master password…" },
+                encryption::master_password,
+            );
+            // Only meaningful once there is a store to reveal, forget or drop.
+            if store_exists {
+                global_button(form, ctx, "Show stored passwords…", encryption::show_stored_passwords);
+                global_button(form, ctx, "Forget it for this boot", encryption::forget_master);
+                global_button(form, ctx, "Delete the store…", encryption::reset_store);
+            }
+        }
 
         header(form, "TUI appearance");
         let theme = dropdown(form, "Theme", &["Default", "Amber", "Matrix"],
@@ -561,6 +690,14 @@ fn build_form(form: &gtk::Box, cfg: AppConfig, is_global: bool, app_name: Option
                 .filter(|(_, cb)| cb.is_active())
                 .map(|(n, _)| n.clone())
                 .collect();
+        }
+
+        if let Some((source, lock_on_exit)) = &encryption_widgets {
+            c.password_source = match source.selected() {
+                1 => PasswordSource::Master,
+                _ => PasswordSource::Prompt,
+            };
+            c.lock_on_exit = lock_on_exit.is_active();
         }
 
         if let Some((cs, ci, as_, cc, theme, layout)) = &global_widgets {

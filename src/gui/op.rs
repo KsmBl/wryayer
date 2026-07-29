@@ -23,13 +23,18 @@ pub enum OpMsg {
 
 /// Spawn `wryayer <args>` and stream its stdout+stderr, line by line, over the
 /// returned channel. Terminates with `OpMsg::Done(success)`.
-pub fn spawn(args: Vec<String>) -> Receiver<OpMsg> {
+///
+/// `stdin_data` is written to the child and its stdin then closed — that is how
+/// an encrypting operation receives its passwords, rather than through argv
+/// (world-readable via `/proc`) or the environment (inherited by every further
+/// child, veracrypt included).
+fn spawn(args: Vec<String>, stdin_data: Option<String>) -> Receiver<OpMsg> {
     let (tx, rx) = mpsc::channel();
     let exe = std::env::current_exe().unwrap_or_else(|_| "wryayer".into());
     thread::spawn(move || {
         let mut child = match Command::new(&exe)
             .args(&args)
-            .stdin(Stdio::null())
+            .stdin(if stdin_data.is_some() { Stdio::piped() } else { Stdio::null() })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -42,17 +47,25 @@ pub fn spawn(args: Vec<String>) -> Receiver<OpMsg> {
             }
         };
 
+        // Closing stdin is what tells the child's reader to stop waiting.
+        if let Some(data) = stdin_data {
+            if let Some(mut stdin) = child.stdin.take() {
+                use std::io::Write;
+                let _ = stdin.write_all(data.as_bytes());
+            }
+        }
+
         let stderr = child.stderr.take().unwrap();
         let tx2 = tx.clone();
         thread::spawn(move || {
             for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                let _ = tx2.send(OpMsg::Line(line));
+                let _ = tx2.send(OpMsg::Line(crate::child_output::sanitize_line(&line)));
             }
         });
 
         if let Some(stdout) = child.stdout.take() {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                let _ = tx.send(OpMsg::Line(line));
+                let _ = tx.send(OpMsg::Line(crate::child_output::sanitize_line(&line)));
             }
         }
 
@@ -62,13 +75,41 @@ pub fn spawn(args: Vec<String>) -> Receiver<OpMsg> {
     rx
 }
 
+/// One queued job: a separator label, the arguments, and anything to feed the
+/// child on stdin.
+struct Job {
+    label: String,
+    args: Vec<String>,
+    stdin: Option<String>,
+}
+
 /// Open a console window and run a single `wryayer <args>` job, then call
 /// `on_done(success)`.
 pub fn run_operation<F>(parent: &gtk::ApplicationWindow, title: &str, args: Vec<String>, on_done: F)
 where
     F: Fn(bool) + 'static,
 {
-    run_jobs(parent, title, vec![(String::new(), args)], on_done);
+    run_queue(parent, title, vec![Job { label: String::new(), args, stdin: None }], on_done);
+}
+
+/// As [`run_operation`], but hands the child `stdin_data` — the collected
+/// sudo/master/container passwords for an encrypting operation, which has no
+/// terminal to prompt on.
+pub fn run_operation_with_stdin<F>(
+    parent: &gtk::ApplicationWindow,
+    title: &str,
+    args: Vec<String>,
+    stdin_data: String,
+    on_done: F,
+) where
+    F: Fn(bool) + 'static,
+{
+    run_queue(
+        parent,
+        title,
+        vec![Job { label: String::new(), args, stdin: Some(stdin_data) }],
+        on_done,
+    );
 }
 
 /// Open a console window and run each job in `jobs` sequentially, streaming all
@@ -78,6 +119,21 @@ pub fn run_jobs<F>(
     parent: &gtk::ApplicationWindow,
     title: &str,
     jobs: Vec<(String, Vec<String>)>,
+    on_done: F,
+) where
+    F: Fn(bool) + 'static,
+{
+    let jobs = jobs
+        .into_iter()
+        .map(|(label, args)| Job { label, args, stdin: None })
+        .collect();
+    run_queue(parent, title, jobs, on_done);
+}
+
+fn run_queue<F>(
+    parent: &gtk::ApplicationWindow,
+    title: &str,
+    jobs: Vec<Job>,
     on_done: F,
 ) where
     F: Fn(bool) + 'static,
@@ -146,11 +202,11 @@ pub fn run_jobs<F>(
         let rx_cell = rx_cell.clone();
         let append = append.clone();
         move || -> bool {
-            if let Some((label, args)) = jobs.borrow_mut().pop_front() {
-                if multi && !label.is_empty() {
-                    append(&format!("── {label} ──"));
+            if let Some(job) = jobs.borrow_mut().pop_front() {
+                if multi && !job.label.is_empty() {
+                    append(&format!("── {} ──", job.label));
                 }
-                *rx_cell.borrow_mut() = Some(spawn(args));
+                *rx_cell.borrow_mut() = Some(spawn(job.args, job.stdin));
                 true
             } else {
                 false

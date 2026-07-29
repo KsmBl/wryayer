@@ -8,6 +8,7 @@
 //! removes or mutates an app's files.
 
 mod config;
+mod encryption;
 mod install;
 mod op;
 
@@ -23,6 +24,7 @@ use gtk4 as gtk;
 use gtk::prelude::*;
 use gtk::glib;
 
+use crate::commands::encrypt::AppEncryption;
 use crate::manifest::{list_all_apps, read_manifest, tree_order, write_manifest, Manifest};
 
 /// A boxed "rebuild the app lists" closure behind shared mutable state so
@@ -66,6 +68,11 @@ pub fn run() -> Result<()> {
 
 fn build_ui(app: &gtk::Application) {
     load_css();
+
+    // Checked before anything else draws: everything below resolves its paths
+    // through the root, so if it is unusable the whole window would otherwise
+    // come up looking like a fresh, empty install.
+    let root_problem = crate::manifest::wryayer_root().err().map(|e| format!("{e:#}"));
 
     let window = gtk::ApplicationWindow::builder()
         .application(app)
@@ -134,6 +141,46 @@ fn build_ui(app: &gtk::Application) {
     ctx.refresh();
 
     window.present();
+
+    if let Some(problem) = root_problem {
+        ctx.status("wryayer cannot use ~/.wryayer — see the dialog.");
+        report_root_problem(&window, &problem);
+    }
+}
+
+/// Put an unusable root in front of the user, in full.
+///
+/// The message explains what to do about it and is several paragraphs long, so
+/// it gets a window rather than the one-line status bar.
+fn report_root_problem(window: &gtk::ApplicationWindow, problem: &str) {
+    let win = gtk::Window::builder()
+        .title("wryayer cannot use ~/.wryayer")
+        .transient_for(window)
+        .modal(true)
+        .default_width(560)
+        .build();
+
+    let outer = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    outer.set_margin_top(12);
+    outer.set_margin_bottom(12);
+    outer.set_margin_start(12);
+    outer.set_margin_end(12);
+
+    let label = gtk::Label::new(Some(problem));
+    label.set_xalign(0.0);
+    label.set_wrap(true);
+    label.set_selectable(true); // the message contains a command to copy
+    outer.append(&label);
+
+    let close = gtk::Button::with_label("Close");
+    close.set_halign(gtk::Align::End);
+    outer.append(&close);
+
+    win.set_child(Some(&outer));
+    win.present();
+
+    let win2 = win.clone();
+    close.connect_clicked(move |_| win2.close());
 }
 
 fn add_tab(notebook: &gtk::Notebook, child: &impl IsA<gtk::Widget>, label: &str) {
@@ -162,6 +209,11 @@ fn load_css() {
         button { padding: 5px 12px; }
         list > row { padding: 2px 4px; }
         list > row:selected { border-radius: 4px; }
+        /* Container fill, matching the TUI's amber-then-red escalation.
+           Spelled out rather than relying on GTK's .warning/.error, so the
+           meaning survives a theme that styles those differently. */
+        .fill-warn { color: #d08420; }
+        .fill-critical { color: #cc3333; font-weight: bold; }
     ";
     let provider = gtk::CssProvider::new();
     provider.load_from_data(CSS);
@@ -371,10 +423,27 @@ fn build_app_list_tab(ctx: &Ctx, games: bool) -> (gtk::Box, Rc<dyn Fn()>) {
 
             // tree_order keeps each `--into` child directly after its parent, so
             // by the time a child is seen its parent iter already exists.
-            let apps = list_all_apps().map(tree_order).unwrap_or_default();
+            // An unusable root — the usual cause being ~/.wryayer living in a
+            // container that has not been mounted yet — must say so. Swallowed,
+            // it reads as "no apps installed", which is both wrong and alarming.
+            let apps = match list_all_apps().map(tree_order) {
+                Ok(apps) => apps,
+                Err(e) => {
+                    let iter = store.append(None);
+                    let msg = glib::markup_escape_text(&format!("{e:#}"));
+                    let first = msg.lines().next().unwrap_or("wryayer cannot read its apps");
+                    store.set_value(&iter, 0, &format!("<i>{first}</i>").to_value());
+                    store.set_value(&iter, 1, &String::new().to_value());
+                    return;
+                }
+            };
             let mut parent_iters: std::collections::HashMap<String, gtk::TreeIter> =
                 std::collections::HashMap::new();
             let mut any = false;
+
+            // One `veracrypt --list` for the whole rebuild, not one per row.
+            let encryption =
+                crate::commands::encrypt::scan(apps.iter().map(|m| m.app.name.as_str()));
 
             for m in apps.iter().filter(|m| m.app.wine_game.is_some() == games) {
                 any = true;
@@ -384,7 +453,7 @@ fn build_app_list_tab(ctx: &Ctx, games: bool) -> (gtk::Box, Rc<dyn Fn()>) {
                     .as_ref()
                     .map(|t| parent_iters.contains_key(t))
                     .unwrap_or(false);
-                let markup = row_markup(m, is_child);
+                let markup = row_markup(m, is_child, encryption.get(&m.app.name).copied());
                 let parent = m.app.alias_of.as_ref().and_then(|t| parent_iters.get(t)).cloned();
                 let iter = store.append(parent.as_ref());
                 store.set_value(&iter, 0, &markup.to_value());
@@ -425,7 +494,7 @@ fn build_app_list_tab(ctx: &Ctx, games: bool) -> (gtk::Box, Rc<dyn Fn()>) {
 }
 
 /// One tree-row label: bold for a parent, dimmed for a child.
-fn row_markup(m: &Manifest, is_child: bool) -> String {
+fn row_markup(m: &Manifest, is_child: bool, enc: Option<AppEncryption>) -> String {
     let title = match &m.app.display_name {
         Some(d) => format!("{d}  [{}]", m.app.name),
         None => match &m.app.pkg_name {
@@ -434,10 +503,30 @@ fn row_markup(m: &Manifest, is_child: bool) -> String {
         },
     };
     let esc = glib::markup_escape_text(&title);
-    if is_child {
+    let name = if is_child {
         format!("<span alpha='75%'>{esc}</span>")
     } else {
         format!("<b>{esc}</b>")
+    };
+    match enc {
+        Some(state) => format!("{name}  <span alpha='70%'>{}</span>", encryption_badges(state)),
+        None => name,
+    }
+}
+
+/// The list markers for an encrypted app: a padlock for the container's current
+/// state, and a key when wryayer can open it without asking.
+///
+/// Two glyphs rather than one because they answer different questions. The
+/// padlock is transient — it flips every time the app is launched and closed —
+/// while the key reflects a setting, and is what tells the user whether the next
+/// launch will stop for a password. Same vocabulary as the TUI.
+fn encryption_badges(state: AppEncryption) -> String {
+    let lock = if state.locked { "🔒" } else { "🔓" };
+    if state.master {
+        format!("{lock}🔑")
+    } else {
+        lock.to_string()
     }
 }
 
@@ -490,6 +579,8 @@ fn render_details(container: &gtk::Box, name: &str) {
     let size_lbl = detail_line(container, "Size", "computing…");
     dir_bytes_async(name, &size_lbl);
 
+    render_encryption_details(container, name);
+
     // Snapshots.
     let snaps = list_snapshots(name);
     detail_header(container, &format!("Snapshots ({})", snaps.len()));
@@ -505,6 +596,49 @@ fn render_details(container: &gtk::Box, name: &str) {
     detail_header(container, &format!("Packages ({})", m.packages.len()));
     for p in &m.packages {
         detail_item(container, &format!("{}  {}", p.name, p.version));
+    }
+}
+
+/// Encryption lines for an app stored in a container; nothing at all for one
+/// that isn't.
+///
+/// Spelled out rather than left to the list's padlock, because "locked" and
+/// "asks for a password" are separate facts and a badge only has room to hint
+/// at both.
+fn render_encryption_details(container: &gtk::Box, name: &str) {
+    let states = crate::commands::encrypt::scan([name]);
+    let Some(state) = states.get(name).copied() else { return };
+
+    let lock = if state.locked { "🔒 locked" } else { "🔓 unlocked" };
+    let source = if state.master {
+        "🔑 opens from the master store"
+    } else {
+        "asks for a password"
+    };
+    detail_line(container, "Encrypted", &format!("{lock}   {source}"));
+
+    // Only readable while the container is open: statvfs on an unmounted mount
+    // point describes the host filesystem, which is a plausible wrong answer.
+    if let Some(usage) = state.fill {
+        let pct = usage.percent_used();
+        let line = detail_line(
+            container,
+            "Container",
+            &format!(
+                "{} / {} ({pct}%)",
+                format_bytes(usage.used),
+                format_bytes(usage.used + usage.available)
+            ),
+        );
+        if pct >= crate::veracrypt::FULL_WARN_PERCENT {
+            line.add_css_class("fill-critical");
+            detail_item(
+                container,
+                &format!("nearly full — grow it from Settings, or: wryayer grow {name}"),
+            );
+        } else if pct >= 75 {
+            line.add_css_class("fill-warn");
+        }
     }
 }
 
@@ -1090,4 +1224,44 @@ where
         });
     }
     win.present();
+}
+
+#[cfg(test)]
+mod badge_tests {
+    use super::*;
+
+    fn state(locked: bool, master: bool) -> AppEncryption {
+        AppEncryption { locked, master, fill: None }
+    }
+
+    #[test]
+    fn the_badges_match_the_vocabulary_the_tui_uses() {
+        // Two front-ends teaching two different symbol sets would be worse than
+        // either teaching none.
+        assert_eq!(encryption_badges(state(true, false)), "🔒");
+        assert_eq!(encryption_badges(state(false, false)), "🔓");
+        assert_eq!(encryption_badges(state(true, true)), "🔒🔑");
+        assert_eq!(encryption_badges(state(false, true)), "🔓🔑");
+    }
+
+    #[test]
+    fn a_plain_app_gets_no_badge_at_all() {
+        let m = Manifest {
+            app: crate::manifest::AppMeta {
+                name: "plain".into(),
+                main_binary: "plain".into(),
+                installed_at: "2026-01-01".into(),
+                launchers: vec![],
+                alias_of: None,
+                display_name: None,
+                pkg_name: None,
+                wine_game: None,
+            },
+            packages: vec![],
+        };
+        let markup = row_markup(&m, false, None);
+        assert!(!markup.contains('🔒'), "{markup}");
+        assert!(!markup.contains('🔓'), "{markup}");
+        assert!(markup.contains("plain"), "{markup}");
+    }
 }
