@@ -49,7 +49,10 @@ src/
 │   └── konami.rs      ← easter-egg FSM
 └── gui/               ← optional GTK4 front-end (feature = "gui")
     ├── mod.rs         ← window, tabs, install/run/console flows
-    └── config.rs      ← per-app + global settings forms
+    ├── config.rs      ← per-app + global settings forms
+    ├── encryption.rs  ← container dialogs; collects secrets for the child
+    ├── install.rs     ← search-and-tick install flow
+    └── op.rs          ← subprocess console, shared job queue
 
 csrc/                  ← C helpers compiled by build.rs, embedded via include_bytes!
 ├── cpuid_spoof.c      ← LD_PRELOAD shim: intercept CPUID + sched_get/setaffinity
@@ -612,6 +615,22 @@ adopt silently — so "root is now a plain directory" never clears it.
 The verdict is cached in a `OnceLock`: this sits underneath every `app_dir` call,
 including per-app-per-frame lookups in the TUI, and neither the mount table nor
 the marker changes meaningfully within one run.
+
+### Two front-ends, one set of rules
+
+Everything the front-ends need to *know* about containers lives in
+`commands::encrypt`, not in either of them: `AppEncryption` and `scan` (locked /
+master-backed / how full, from a single `veracrypt --list` snapshot however many
+apps there are), `password_source`, `apps_relying_on_the_store`. The TUI's
+`EncState` is a re-export. `child_output::sanitize_line` is shared the same way —
+the TUI would have its layout wrecked by a stray carriage return and the GUI would
+render mojibake, but the fix is identical.
+
+What differs is only presentation. The TUI walks its password prompts one screen
+at a time because it has one screen; the GUI shows the same set as a single form
+(`gui::encryption::Needs` decides which fields appear, by the same rules as
+`tui::build_secret_stages`). Both end at the same place: `--encrypt-secrets-stdin`
+on the child, because neither has a terminal a child could prompt on.
 
 ### Converting an installed app from the TUI
 

@@ -152,6 +152,13 @@ wryayer gui
   the CLI uses.
 - **Live console** — installs, updates and removals stream their output into a page
   you can close when done.
+- **Encryption** — the same markers as the TUI in the app list (🔒 / 🔓 / 🔑), the
+  container's fill level in the details panel, and buttons in an app's settings to
+  encrypt it, lock, unlock, grow or decrypt it. The Settings tab manages the master
+  password store: set or change it, reveal stored passwords, forget this boot's key,
+  or delete the store. Passwords are collected in one dialog before the operation
+  starts — with only the fields still needed, so an authenticated sudo and an
+  unlocked store mean no prompt at all.
 
 The GUI is an **opt-in build feature** so the plain CLI/TUI doesn't require the GTK
 development libraries:
