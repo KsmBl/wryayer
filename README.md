@@ -498,6 +498,10 @@ wryayer dedup           # silent
 wryayer dedup --verbose # print every file linked
 ```
 
+Apps stored in encrypted containers each sit on their own filesystem, and a hard
+link cannot cross one. `dedup` skips those pairs instead of failing on them, and
+reports how much space the container boundaries keep duplicated.
+
 ### Clean the download cache
 
 `~/.cache/wryayer` holds downloaded packages, AUR build dirs, and resolved
@@ -907,7 +911,7 @@ The config is stored as a human-readable INI file at `~/.wryayer/<app>/config.in
 
 **Partial D-Bus session isolation.** With `portal_filter` on, the sandbox's session bus is routed through a filter proxy that hides the host desktop portal (so file pickers stay confined to shared dirs) while still forwarding Notifications, secrets, MPRIS, etc. Other session services remain reachable, and with `portal_filter off` the app talks to the host session bus directly.
 
-**Hard links require same filesystem.** Deduplication only works when all `~/.wryayer/<app>/` directories are on the same filesystem. If you mount `~/.wryayer` on a separate partition from another app, `dedup` will silently skip cross-device hard-links.
+**Hard links require same filesystem.** Deduplication only works between apps on the same filesystem. Every encrypted app is its own ext4 volume inside its own container, so an encrypted app never shares files with any other app — even one holding byte-identical libraries. `dedup` detects this and reports the space it cannot reclaim ("… stays duplicated across container boundaries") rather than counting it as a failure. The same applies if you mount `~/.wryayer/<app>/` on a separate partition.
 
 **Downloaded packages are signature-verified before extraction.** Because wryayer fetches packages itself rather than letting the package manager install them, it authenticates each archive before unpacking it into a sandbox root: Arch `.pkg.tar.zst` files are checked against the pacman keyring (`gpg`), Fedora `.rpm` files against the rpm keyring (`rpmkeys`), and Debian `.deb` files rely on apt's authenticated acquire (a package apt reports as unauthenticated is rejected). Verification requires the relevant keyring to be present; set `WRYAYER_SKIP_SIG_VERIFY=1` to bypass it for a private or unsigned repository.
 
