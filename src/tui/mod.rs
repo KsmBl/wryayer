@@ -4826,6 +4826,44 @@ mod op_log_tests {
         assert!(show_log_of(&app), "'t' should open the log when done");
     }
 
+    #[test]
+    fn a_locked_container_shows_a_closed_padlock() {
+        assert_eq!(
+            crate::tui::ui::encryption_glyphs(EncState { locked: true, master: false }),
+            ("🔒", None)
+        );
+    }
+
+    #[test]
+    fn an_open_container_shows_an_open_padlock() {
+        assert_eq!(
+            crate::tui::ui::encryption_glyphs(EncState { locked: false, master: false }),
+            ("🔓", None)
+        );
+    }
+
+    #[test]
+    fn a_master_backed_container_is_marked_whatever_its_lock_state() {
+        // The key answers "will the next launch stop to ask me for a password",
+        // which is true whether the container happens to be open right now.
+        for locked in [true, false] {
+            let (_, key) = crate::tui::ui::encryption_glyphs(EncState { locked, master: true });
+            assert_eq!(key, Some("🔑"), "locked = {locked}");
+        }
+    }
+
+    #[test]
+    fn the_key_help_explains_the_list_markers() {
+        // The padlocks are guessable, the key beside them is not — so it has to
+        // be written down somewhere the user can reach without leaving the TUI.
+        let mut app = App::new().unwrap();
+        app.screen = Screen::KeyHelp;
+        let out = render(&mut app, 100, 40);
+        assert!(out.contains("🔑"), "the key marker is missing from ? help:\n{out}");
+        assert!(out.contains("password stored"), "the key is unexplained:\n{out}");
+        assert!(out.contains("🔒"), "the padlock is missing:\n{out}");
+    }
+
     /// Render the whole TUI to an off-screen buffer and return it as text.
     fn render(app: &mut App, w: u16, h: u16) -> String {
         use ratatui::backend::TestBackend;
