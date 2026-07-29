@@ -191,10 +191,38 @@ Gotchas:
 ## 7. Testing
 
 ```sh
-cargo test --all-features                     # unit + integration
-cargo test --all-features -- --test-threads=1 # serial: avoids races on shared
-                                              # ~/.wryayer state (some tests touch it)
+cargo test --all-features   # unit + integration; safe to run in parallel
 ```
+
+**No test may touch your real `~/.wryayer`.** This is enforced, not merely
+requested: under `cfg(test)`, `manifest::wryayer_root` panics for any root
+outside the temp directory. If you see
+
+```
+test resolved the real wryayer root at /home/you/.wryayer — HOME is not sandboxed.
+```
+
+your test needs a sandbox, not a workaround.
+
+Take one with `crate::test_support::test_home()` and **hold the guard for the
+whole test body**, not just the fixture setup — anything that later resolves a
+path reads `HOME` again:
+
+```rust
+let _home = crate::test_support::test_home();
+let mut app = App::new().unwrap();
+handle_key(&mut app, KeyCode::Enter).unwrap();   // still sandboxed
+```
+
+`with_temp_home(|root| …)` is the closure form, for when everything finishes
+inside the call.
+
+That guard holds one crate-wide lock. Per-module locks were tried and are not
+enough: `HOME` is process-global and `cargo test` runs modules' tests as threads
+in one binary, so two independent locks let one module restore the real `HOME`
+between another's `set_var` and the write that followed. That is how a real
+user's `.passwords.vault` got overwritten with a fixture. The lock is **not
+reentrant** — a helper called by a test must not take a second one.
 
 - **Unit tests** live inline (`#[cfg(test)] mod tests`) — e.g. `cpu.rs` has
   round-trip tests for presets and custom CPUs.

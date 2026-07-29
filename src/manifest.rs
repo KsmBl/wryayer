@@ -66,10 +66,30 @@ pub enum PackageSource {
 pub fn wryayer_root() -> Result<PathBuf> {
     let home = std::env::var("HOME").context("HOME env var not set")?;
     let root = PathBuf::from(&home).join(".wryayer");
+    #[cfg(test)]
+    assert_sandboxed(&root);
     if let Some(problem) = root_problem(&home, &root) {
         anyhow::bail!("{problem}");
     }
     Ok(root)
+}
+
+/// Under test, refuse to resolve anything but a throwaway root.
+///
+/// `HOME` is process-global and the tests move it around; a gap in that
+/// choreography once meant a test wrote its fixture over a real
+/// `~/.wryayer/.passwords.vault`, and the only symptom was the user's master
+/// password no longer working days later. Failing the test on the spot is the
+/// only outcome that cannot be missed — see [`crate::test_support`].
+#[cfg(test)]
+fn assert_sandboxed(root: &Path) {
+    let tmp = std::env::temp_dir();
+    assert!(
+        root.starts_with(&tmp),
+        "test resolved the real wryayer root at {} — HOME is not sandboxed.\n\
+         Wrap the test in crate::test_support::with_temp_home.",
+        root.display(),
+    );
 }
 
 // ── Is the root actually the root? ────────────────────────────────────────────
@@ -365,6 +385,10 @@ mod root_fs_tests {
 
     #[test]
     fn the_marker_lives_outside_the_root_it_describes() {
+        // Reads XDG_STATE_HOME, which other tests move about — see test_support.
+        let _guard = crate::test_support::env_lock();
+        let saved = std::env::var_os("XDG_STATE_HOME");
+        std::env::remove_var("XDG_STATE_HOME");
         // Kept inside ~/.wryayer it would be sealed in the very container whose
         // absence it exists to detect.
         let marker = root_fs_marker("/home/someone");
@@ -373,11 +397,16 @@ mod root_fs_tests {
             "marker must not live in the root: {}",
             marker.display()
         );
-        assert!(marker.starts_with("/home/someone/.local/state"), "{}", marker.display());
+        let outcome = marker.starts_with("/home/someone/.local/state");
+        if let Some(v) = saved {
+            std::env::set_var("XDG_STATE_HOME", v);
+        }
+        assert!(outcome, "{}", marker.display());
     }
 
     #[test]
     fn the_marker_honours_xdg_state_home() {
+        let _guard = crate::test_support::env_lock();
         let old = std::env::var_os("XDG_STATE_HOME");
         std::env::set_var("XDG_STATE_HOME", "/somewhere/state");
         let marker = root_fs_marker("/home/someone");
@@ -413,5 +442,32 @@ mod root_fs_tests {
         assert!(msg.contains("is not mounted"), "{msg}");
         assert!(msg.contains("veracrypt --mount"), "{msg}");
         assert!(msg.contains("WRYAYER_ALLOW_UNMOUNTED_ROOT=1"), "{msg}");
+    }
+}
+
+#[cfg(test)]
+mod sandbox_tests {
+    /// The guard that would have caught the bug that overwrote a real store.
+    ///
+    /// A test that forgets its sandbox — or loses it to another thread's HOME
+    /// juggling — must fail here, not write into the developer's home.
+    #[test]
+    fn resolving_a_root_outside_the_sandbox_fails_the_test() {
+        let _guard = crate::test_support::env_lock();
+        let saved = std::env::var_os("HOME");
+        std::env::set_var("HOME", "/home/definitely-not-a-temp-dir");
+
+        let outcome = std::panic::catch_unwind(|| super::wryayer_root().map(|_| ()));
+
+        match saved {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        let panic = outcome.expect_err("an unsandboxed root must panic, not be handed out");
+        let msg = panic
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .unwrap_or("");
+        assert!(msg.contains("HOME is not sandboxed"), "unhelpful panic: {msg}");
     }
 }

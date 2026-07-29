@@ -5079,6 +5079,7 @@ mod op_log_tests {
 
     #[test]
     fn t_toggles_the_log_while_an_operation_runs() {
+        let _home = crate::test_support::test_home();
         let mut app = App::new().unwrap();
         let (screen, _tx) = op_screen(500, false);
         app.screen = screen;
@@ -5092,6 +5093,7 @@ mod op_log_tests {
 
     #[test]
     fn t_toggles_the_log_after_an_operation_finishes() {
+        let _home = crate::test_support::test_home();
         let mut app = App::new().unwrap();
         let (screen, _tx) = op_screen(500, true);
         app.screen = screen;
@@ -5302,6 +5304,7 @@ mod op_log_tests {
 
     /// Render the app list with one encrypted app in the given state.
     fn render_with_encrypted(state: EncState) -> String {
+        let _home = crate::test_support::test_home();
         let mut app = App::new().unwrap();
         app.screen = Screen::Main;
         app.tab = Tab::Installed;
@@ -5366,6 +5369,7 @@ mod op_log_tests {
 
     #[test]
     fn a_plain_app_has_no_encryption_line() {
+        let _home = crate::test_support::test_home();
         let mut app = App::new().unwrap();
         app.screen = Screen::Main;
         app.tab = Tab::Installed;
@@ -5377,7 +5381,11 @@ mod op_log_tests {
     }
 
     /// The config popup for `name`, with the encryption rows forced on.
-    fn config_screen(name: &str, selected: usize) -> App {
+    ///
+    /// Returns the sandbox alongside the `App`: the test keeps driving it with
+    /// keystrokes, and every one of those resolves paths from HOME again.
+    fn config_screen(name: &str, selected: usize) -> (crate::test_support::TestHome, App) {
+        let home = crate::test_support::test_home();
         let mut app = App::new().unwrap();
         app.installed = vec![stub_manifest(name)];
         app.inst_state.select(Some(0));
@@ -5386,12 +5394,12 @@ mod op_log_tests {
             config: crate::config::AppConfig::default(),
             selected,
         };
-        app
+        (home, app)
     }
 
     #[test]
     fn enter_on_the_encrypt_row_opens_the_password_source_choice() {
-        let mut app = config_screen("plainapp", CFG_ENCRYPT_APP);
+        let (_home, mut app) = config_screen("plainapp", CFG_ENCRYPT_APP);
         handle_key(&mut app, KeyCode::Enter).unwrap();
 
         let Screen::AskEncrypt { kind, args, selected, .. } = &app.screen else {
@@ -5404,7 +5412,7 @@ mod op_log_tests {
 
     #[test]
     fn backing_out_of_the_encrypt_choice_runs_nothing() {
-        let mut app = config_screen("plainapp", CFG_ENCRYPT_APP);
+        let (_home, mut app) = config_screen("plainapp", CFG_ENCRYPT_APP);
         handle_key(&mut app, KeyCode::Enter).unwrap();
         // Move to the "leave it as it is" row and take it.
         while !matches!(&app.screen, Screen::AskEncrypt { selected: 0, .. }) {
@@ -5420,7 +5428,7 @@ mod op_log_tests {
 
     #[test]
     fn enter_on_the_decrypt_row_asks_for_confirmation_first() {
-        let mut app = config_screen("vaultapp", CFG_DECRYPT_APP);
+        let (_home, mut app) = config_screen("vaultapp", CFG_DECRYPT_APP);
         handle_key(&mut app, KeyCode::Enter).unwrap();
 
         let Screen::Confirm { action, .. } = &app.screen else {
@@ -5434,14 +5442,14 @@ mod op_log_tests {
         // Left cycles a setting's value. On an action row there is no value —
         // and starting a multi-gigabyte copy from a stray arrow key would be a
         // nasty surprise.
-        let mut app = config_screen("plainapp", CFG_ENCRYPT_APP);
+        let (_home, mut app) = config_screen("plainapp", CFG_ENCRYPT_APP);
         handle_key(&mut app, KeyCode::Left).unwrap();
         assert!(matches!(app.screen, Screen::Config { .. }), "Left should stay put");
     }
 
     #[test]
     fn the_encrypt_choice_screen_renders_its_options() {
-        let mut app = config_screen("plainapp", CFG_ENCRYPT_APP);
+        let (_home, mut app) = config_screen("plainapp", CFG_ENCRYPT_APP);
         handle_key(&mut app, KeyCode::Enter).unwrap();
         let out = render(&mut app, 100, 30);
         assert!(out.contains("plainapp"), "{out}");
@@ -5453,6 +5461,7 @@ mod op_log_tests {
     fn the_key_help_explains_the_list_markers() {
         // The padlocks are guessable, the key beside them is not — so it has to
         // be written down somewhere the user can reach without leaving the TUI.
+        let _home = crate::test_support::test_home();
         let mut app = App::new().unwrap();
         app.screen = Screen::KeyHelp;
         let out = render(&mut app, 100, 40);
@@ -5481,6 +5490,7 @@ mod op_log_tests {
     #[test]
     fn the_log_view_actually_shows_log_lines() {
         // Regression: pressing 't' during an install showed an empty log.
+        let _home = crate::test_support::test_home();
         let mut app = App::new().unwrap();
         let (screen, _tx) = op_screen(500, false);
         app.screen = screen;
@@ -5498,6 +5508,7 @@ mod op_log_tests {
     fn the_log_view_follows_new_output() {
         // With progress lines streaming in, a fixed offset strands the view on
         // stale output. Following must always show the newest window.
+        let _home = crate::test_support::test_home();
         let mut app = App::new().unwrap();
         let (screen, _tx) = op_screen(20, false);
         app.screen = screen;
@@ -5522,6 +5533,7 @@ mod op_log_tests {
     fn opening_the_log_scrolls_to_content_that_exists() {
         // Regression: log_scroll must leave the visible window inside the log,
         // or the view renders blank even though lines are present.
+        let _home = crate::test_support::test_home();
         let mut app = App::new().unwrap();
         let (screen, _tx) = op_screen(500, false);
         app.screen = screen;

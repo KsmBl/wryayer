@@ -488,6 +488,7 @@ wryayer decrypt firefox                  # back to a plain directory
 wryayer master init                      # create the master password store
 wryayer master show                      # print stored container passwords
 wryayer master lock                      # forget it until re-entered
+wryayer master reset                     # delete the store and start over
 wryayer genpw                            # a password, without storing it
 ```
 
@@ -727,7 +728,16 @@ wryayer master show firefox      # print just this one
 wryayer master forget firefox
 wryayer master change            # change the master password
 wryayer master lock              # require the master password again now
+wryayer master reset             # delete the store (see below)
 ```
+
+**If the store will not open.** `master change` needs the current password and
+`master init` refuses while a store exists, so a forgotten or damaged store used
+to be a dead end. `wryayer master reset` deletes it and lets you start again. It
+refuses while any encrypted app is set to `password_source = master` — the store
+holds the only copy of those container passwords, and deleting it makes those
+containers permanently unopenable. Print them with `wryayer master show` first,
+or pass `--force` if you mean it.
 
 The store is at `~/.wryayer/.passwords.vault`: **Argon2id** stretches the master
 password into a 256-bit key, and **AES-256-GCM** encrypts the payload. GCM is
