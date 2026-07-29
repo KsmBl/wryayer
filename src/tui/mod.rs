@@ -2966,7 +2966,9 @@ pub const CFG_MASTER_FORGET: usize = 28;
 pub const CFG_ENCRYPT_APP: usize = 29;
 /// Move an encrypted app back out into a plain directory (per-app, action).
 pub const CFG_DECRYPT_APP: usize = 30;
-pub const CFG_LEN: usize = 31;
+/// Explains why an alias has no encryption of its own (per-app, inert).
+pub const CFG_ENCRYPT_ALIAS: usize = 31;
+pub const CFG_LEN: usize = 32;
 
 /// Which encryption rows a per-app config screen offers.
 ///
@@ -2974,12 +2976,17 @@ pub const CFG_LEN: usize = 31;
 /// encrypted" want different rows, and some apps want neither.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EncryptionRows {
-    /// No section at all.
+    /// No section at all — nothing could be encrypted even in principle.
     Hidden,
     /// A plain app that could be moved into a container.
     Offer,
     /// Already in a container: its settings, plus the way back out.
     Manage,
+    /// An alias, whose files are in another app's tree. It cannot be encrypted
+    /// on its own, and saying so is the whole point: an absent section reads as
+    /// a missing feature, and this is the case people hit first, because a
+    /// merged-in tool is exactly the kind of small app you try it on.
+    Alias,
 }
 
 impl EncryptionRows {
@@ -2989,11 +2996,14 @@ impl EncryptionRows {
         if crate::veracrypt::is_encrypted(app_name) {
             return Self::Manage;
         }
+        if !crate::veracrypt::available() {
+            return Self::Hidden;
+        }
         // An alias owns no filesystem tree — its files live in the target's.
         // Encrypting it would seal an almost empty directory and leave the real
         // files exactly where they were.
-        if is_alias || !crate::veracrypt::available() {
-            return Self::Hidden;
+        if is_alias {
+            return Self::Alias;
         }
         Self::Offer
     }
@@ -3003,6 +3013,7 @@ impl EncryptionRows {
             Self::Hidden => vec![],
             Self::Offer => vec![CFG_ENCRYPT_APP],
             Self::Manage => vec![CFG_PASSWORD_SOURCE, CFG_LOCK_ON_EXIT, CFG_DECRYPT_APP],
+            Self::Alias => vec![CFG_ENCRYPT_ALIAS],
         }
     }
 }
@@ -3173,6 +3184,9 @@ fn on_config(app: &mut App, code: KeyCode) {
                 open_bound_apps(app, name);
                 return;
             }
+            if *selected == CFG_ENCRYPT_ALIAS {
+                return; // nothing to do here; `?` explains why
+            }
             if *selected == CFG_ENCRYPT_APP || *selected == CFG_DECRYPT_APP {
                 let name = app_name.clone();
                 let encrypt = *selected == CFG_ENCRYPT_APP;
@@ -3195,7 +3209,8 @@ fn on_config(app: &mut App, code: KeyCode) {
             let is_game_row = has_wg && (sel == CFG_GAME_EXE || sel == CFG_GAME_PREFIX);
             // Action rows have nothing to cycle through — Left must not
             // silently start an encryption.
-            let is_action = sel == CFG_ENCRYPT_APP || sel == CFG_DECRYPT_APP;
+            let is_action =
+                sel == CFG_ENCRYPT_APP || sel == CFG_DECRYPT_APP || sel == CFG_ENCRYPT_ALIAS;
             if sel != save_idx && sel != CFG_SHARES && sel != CFG_BOUND && !is_game_row && !is_action {
                 cycle_setting(config, sel, -1);
             }
@@ -3219,6 +3234,9 @@ fn on_config(app: &mut App, code: KeyCode) {
                 let name = app_name.clone();
                 open_bound_apps(app, name);
                 return;
+            }
+            if *selected == CFG_ENCRYPT_ALIAS {
+                return; // nothing to do here; `?` explains why
             }
             if *selected == CFG_ENCRYPT_APP || *selected == CFG_DECRYPT_APP {
                 let name = app_name.clone();
@@ -3366,6 +3384,7 @@ pub fn setting_title(idx: usize) -> &'static str {
         CFG_LOCK_ON_EXIT => "Lock on exit",
         CFG_ENCRYPT_APP => "Encrypt this app",
         CFG_DECRYPT_APP => "Remove encryption",
+        CFG_ENCRYPT_ALIAS => "Encryption (alias)",
         _ => "Option",
     }
 }
@@ -3402,6 +3421,7 @@ pub fn setting_description(idx: usize) -> &'static str {
         CFG_MASTER_FORGET => "Forget the master key cached for this boot.\n\nThe store itself is untouched; only the cached key in $XDG_RUNTIME_DIR is dropped, so the next app needing a stored password asks for the master password again. Same as 'wryayer master lock'.",
         CFG_PASSWORD_SOURCE => "Where this app's VeraCrypt container password comes from.\n\n• prompt — you type it before every launch, and the container is unmounted again when the app exits. Nothing is stored on disk.\n• master — it is read from the master password store, which you unlock once per boot. The container then stays mounted until you lock it.",
         CFG_ENCRYPT_APP => "Move this app into its own VeraCrypt container.\n\nThe whole tree — binaries, config, browser profile — is copied into an encrypted volume mounted over the app's normal directory. While it is locked nothing in there is readable, filenames included.\n\nThe container is sized from what the app currently occupies, plus headroom. Copying a large app takes a while; the plaintext original is kept until the copy is verified, so an interruption leaves the app exactly as it was.\n\nPress Enter to choose where the password comes from and start.",
+        CFG_ENCRYPT_ALIAS => "This app is an alias: it was installed with --into, so its binaries live inside another app's tree and its own directory holds little more than a manifest.\n\nEncrypting it would seal that near-empty directory and leave the real files exactly where they are. Encrypt the app that owns the tree instead — open its settings from the Installed list, or run 'wryayer encrypt <target>'.\n\nOnce that app is encrypted, this alias is inside the container too.",
         CFG_DECRYPT_APP => "Move this app back out into a plain directory.\n\nThe container's contents are copied out, the container is deleted, and any password stored for it is forgotten. The app keeps working exactly as before — it is simply no longer encrypted at rest.\n\nPress Enter to confirm.",
         _ => "No description available.",
     }
@@ -5053,10 +5073,41 @@ mod op_log_tests {
     }
 
     #[test]
-    fn an_alias_is_never_offered_encryption() {
-        // An alias owns no tree — encrypting it would seal a near-empty
-        // directory and leave the real files in the open.
-        assert_eq!(EncryptionRows::for_app("no-such-app", true), EncryptionRows::Hidden);
+    fn an_alias_is_told_why_rather_than_shown_nothing() {
+        // It owns no tree, so it cannot be encrypted — but an absent section
+        // reads as a missing feature, and an alias is exactly the kind of small
+        // merged-in tool people try encryption on first.
+        assert_eq!(EncryptionRows::for_app("no-such-app", true), EncryptionRows::Alias);
+        assert_eq!(EncryptionRows::Alias.rows(), vec![CFG_ENCRYPT_ALIAS]);
+        assert!(!EncryptionRows::Alias.rows().contains(&CFG_ENCRYPT_APP));
+    }
+
+    #[test]
+    fn the_alias_row_points_at_the_app_that_can_be_encrypted() {
+        let help = setting_description(CFG_ENCRYPT_ALIAS);
+        assert!(help.contains("wryayer encrypt"), "{help}");
+        assert!(help.contains("alias"), "{help}");
+    }
+
+    #[test]
+    fn every_encryption_layout_reaches_save() {
+        // Each variant adds a different number of rows; a stale Save index
+        // would make Enter on Save cycle a setting instead.
+        for rows in [
+            EncryptionRows::Hidden,
+            EncryptionRows::Offer,
+            EncryptionRows::Manage,
+            EncryptionRows::Alias,
+        ] {
+            let save = app_cfg_save_idx(false, rows);
+            let mut at = 0;
+            let mut seen_save = false;
+            for _ in 0..save + 2 {
+                at = config_nav_step(false, false, rows, save, at, 1);
+                seen_save |= at == save;
+            }
+            assert!(seen_save, "Save unreachable for {rows:?}");
+        }
     }
 
     #[test]

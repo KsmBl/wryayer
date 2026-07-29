@@ -2051,7 +2051,7 @@ fn draw_config(
     // addresses rows by CFG index and silently drops any that sit past the end,
     // which is how the Encryption rows came to have a section header and no
     // rows under it.
-    while rows.len() <= super::CFG_DECRYPT_APP {
+    while rows.len() <= super::CFG_ENCRYPT_ALIAS {
         rows.push(("", String::new()));
     }
     rows[CFG_SPOOF_UPTIME] = ("Spoof upt. ", uptime_val);
@@ -2068,6 +2068,15 @@ fn draw_config(
     // Action rows: their "value" is what pressing Enter does, not a setting.
     rows[super::CFG_ENCRYPT_APP] = ("Encryption ", "encrypt  →".to_string());
     rows[super::CFG_DECRYPT_APP] = ("Encryption ", "remove   →".to_string());
+    // An alias has no encryption of its own; name the app that does, so the
+    // section is an answer rather than an absence.
+    rows[super::CFG_ENCRYPT_ALIAS] = (
+        "Encryption ",
+        match crate::manifest::read_manifest(app_name).ok().and_then(|m| m.app.alias_of) {
+            Some(target) => format!("in {target}"),
+            None => "n/a".to_string(),
+        },
+    );
 
     let has_wg = wine_game.is_some();
     let save_idx = app_cfg_save_idx(has_wg, encryption);
