@@ -480,7 +480,9 @@ wryayer encrypt firefox --master --generate
 
 wryayer unlock firefox                   # mount it
 wryayer lock firefox                     # unmount it
-wryayer encryption                       # what's encrypted, what's unlocked
+wryayer encryption                       # what's encrypted, what's unlocked, how full
+wryayer grow firefox                     # give a full container more room
+wryayer grow firefox --to 16G
 wryayer decrypt firefox                  # back to a plain directory
 
 wryayer master init                      # create the master password store
@@ -622,7 +624,8 @@ wryayer encrypt firefox --master --generate   # generated password, kept in the 
 
 wryayer unlock firefox      # mount it
 wryayer lock firefox        # unmount it
-wryayer encryption          # what's encrypted, and what's currently unlocked
+wryayer encryption          # what's encrypted, what's unlocked, and how full
+wryayer grow firefox        # rebuild its container with more room
 wryayer decrypt firefox     # move it back to a plain directory
 ```
 
@@ -638,6 +641,26 @@ where headroom is half the tree clamped to 512 MiB…2 GiB, plus ext4 overhead. 
 50 MiB utility gets 768 MiB; a 10 GiB game gets 12.5 GiB. Small apps get
 generous room to grow because it costs little; large apps get proportionally
 less because doubling 10 GiB is expensive.
+
+**Running out of room.** A long-lived app eventually fills its container anyway —
+a browser accumulating a profile and a cache is the usual culprit. wryayer tells
+you before the app does:
+
+- `wryayer encryption` lists used bytes and fill percentage per container, and
+  flags anything at 90% or more.
+- The TUI details pane shows the same, green → amber → red.
+- `wryayer run` prints a warning at launch if the container is at 90% or more.
+
+```fish
+wryayer grow firefox            # re-size the way a fresh container would be
+wryayer grow firefox --to 16G   # or pick the size yourself
+```
+
+VeraCrypt volumes cannot be resized in place, so growing creates a larger
+container, copies the contents across and swaps the files. It is slow for a big
+volume, but safe: the original is deleted only once the copy is verified, so an
+interruption leaves the app intact. The container must be unlocked, and the whole
+new size has to fit on the host filesystem alongside the old one.
 
 ### Installing more into an encrypted app
 
@@ -960,6 +983,7 @@ The config is stored as a human-readable INI file at `~/.wryayer/<app>/config.in
 - [x] **Lock on exit** — an encrypted app's container is unmounted the moment the app closes, so its files stop being readable (`lock-on-exit off` opts out)
 - [x] **Multi-source password generator** — `wryayer genpw` mixes `/dev/urandom`, `/dev/random`, hardware temperature sensors, mouse position, RAM/scheduler/interrupt counters and the nanosecond clock through SHA-512; ~207 bits, unbiased character selection
 - [x] **Automatic container growth** — installing into an encrypted app grows its container when it would run out of room, including for packages the soname-repair pass pulls in afterwards
+- [x] **Fill warnings** — `wryayer encryption`, the TUI details pane and every launch report how full a container is and warn past 90%; `wryayer grow` enlarges one on demand
 - [ ] **Wayland isolation** — bind a private Wayland socket so apps can't impersonate each other
 - [x] **D-Bus portal filtering** — file pickers run in-sandbox and only show shared dirs, via an `xdg-dbus-proxy` filter that hides the host portal (`portal_filter`)
 - [x] **Package signing verification** — every downloaded package is authenticated before extraction (Arch `.pkg.tar.zst` via the pacman keyring, Fedora `.rpm` via the rpm keyring, Debian `.deb` via apt's signed repo metadata)

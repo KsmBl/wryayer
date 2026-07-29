@@ -540,6 +540,30 @@ Growth is create-bigger, copy, swap — VeraCrypt cannot resize in place. The
 original container is only replaced once the new one holds a complete copy, so
 an interruption leaves the app exactly as it was.
 
+`commands::encrypt::grow` exposes the same operation directly, for the case
+where nothing is being installed and the app has simply outgrown its volume.
+Without `--to` it re-applies `recommended_size` to the data currently held,
+floored at half again the current size — otherwise re-sizing a half-full
+container would "grow" it to roughly what it already is.
+
+### Reporting how full a container is
+
+`veracrypt::usage` wraps `statvfs` into `used` / `available` / `total`, and
+`Usage::percent_used` divides by `used + available` rather than `total`. The
+difference is ext4's root reserve: dividing by the nominal size reports a
+container the app can no longer write to as ~95% full, which is worst-case wrong
+precisely when the user needs to act. It rounds up for the same reason.
+
+`usage` deliberately does *not* check `is_mounted` first — that costs a fork, and
+`SpaceGuard` calls `free_space` (built on `usage`) before every package extract.
+Callers know their own mount state; `statvfs` on an unmounted mount point
+silently describes whatever `~/.wryayer` sits on.
+
+Three places surface it, all sharing `FULL_WARN_PERCENT`: the `encryption` status
+table, the TUI details pane (via `EncState::fill`, refreshed on the same
+once-a-second throttle as the mount scan), and `run`, which warns after
+`ensure_unlocked` and before the app can start writing.
+
 ### Guardrails
 
 `require_unlocked` fails `update`, `repair`, `snapshot`, `rollback` and `export`
