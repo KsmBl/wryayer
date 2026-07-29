@@ -1217,11 +1217,24 @@ fn log_line_color(l: &str) -> Color {
         c_red()
     } else if l.starts_with("warning") || l.contains("Warning") || l.starts_with('!') {
         c_yellow()
+    } else if is_progress_line(l) {
+        // Progress is not success. veracrypt reports "Done: 0.000%" from the
+        // first moment of a container creation, and a green line saying Done
+        // reads as finished when nothing has happened yet.
+        c_dim()
     } else if l.contains("Done") || l.contains("complete") || l.contains("Updated") || l.contains("Saved") {
         c_green()
     } else {
         c_fg()
     }
+}
+
+/// Whether a line is a running progress report rather than an outcome.
+///
+/// `veracrypt --create` writes "Done: 42.000%  Speed: …  Left: …", which the
+/// plain "contains Done" rule below would paint as a completed step.
+pub fn is_progress_line(l: &str) -> bool {
+    l.trim_start().starts_with("Done:") && l.contains('%')
 }
 
 #[allow(clippy::too_many_arguments)] // draws one operation screen from its many independent pieces of state
