@@ -513,10 +513,10 @@ pub struct App {
     /// If Some, the event loop will suspend the TUI, exec `wryayer run <app>`
     /// with inherited stdio so the user actually interacts with the app,
     /// then resume. Set by pressing `r`/Enter on an installed app.
-    /// Apps stored in a VeraCrypt container, mapped to whether that container
-    /// is currently locked. Refreshed on the same throttle as running
-    /// instances — see `refresh_running_instances`.
-    pub locked_apps: HashMap<String, bool>,
+    /// Apps stored in a VeraCrypt container, mapped to how that container
+    /// currently stands. Refreshed on the same throttle as running instances —
+    /// see `refresh_running_instances`.
+    pub encrypted_apps: HashMap<String, EncState>,
     pub run_request: Option<String>,
     /// If Some, the event loop will suspend the TUI, open an editor on the
     /// given path, save config to "custom" after, then resume.
@@ -583,7 +583,7 @@ impl App {
             log_follow: true,
             needs_clear: false,
             input_cursor: 0,
-            locked_apps: HashMap::new(),
+            encrypted_apps: HashMap::new(),
             run_request: None,
             editor_request: None,
             konami_mode: false,
@@ -637,7 +637,7 @@ impl App {
             // Piggy-backed on the same throttle: listing mounted volumes forks
             // `veracrypt --list`, which must never run per-frame from the
             // renderer. Cached here and read by draw_installed.
-            self.locked_apps = scan_locked_apps(&self.installed);
+            self.encrypted_apps = scan_encrypted_apps(&self.installed);
             self.last_instance_scan = Instant::now();
         }
     }
@@ -922,12 +922,23 @@ fn run_app_inline(
     Ok(())
 }
 
-/// Map every encrypted app to whether its container is currently locked.
+/// How an encrypted app's container currently stands, as far as the list needs
+/// to know.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EncState {
+    /// The container is not mounted: the app's files are sealed away.
+    pub locked: bool,
+    /// Its password is in the master store, so unlocking needs no typing once
+    /// the store itself has been opened for this boot.
+    pub master: bool,
+}
+
+/// Map every encrypted app to the state of its container.
 ///
 /// Takes one `veracrypt --list` snapshot and matches mount points against it,
 /// rather than asking per app, so the cost is a single fork regardless of how
 /// many apps are installed.
-fn scan_locked_apps(installed: &[Manifest]) -> HashMap<String, bool> {
+fn scan_encrypted_apps(installed: &[Manifest]) -> HashMap<String, EncState> {
     let mut out = HashMap::new();
     let encrypted: Vec<&str> = installed
         .iter()
@@ -946,7 +957,12 @@ fn scan_locked_apps(installed: &[Manifest]) -> HashMap<String, bool> {
         let is_mounted = mounted
             .iter()
             .any(|v| v.mount_point.as_deref() == Some(dir.as_str()));
-        out.insert(name.to_string(), !is_mounted);
+        // Read through the marker (which lives outside the mount point), so the
+        // source is known even while the container is locked — exactly when the
+        // config.ini holding the same value is unreachable.
+        let master = crate::commands::encrypt::password_source(name)
+            == crate::config::PasswordSource::Master;
+        out.insert(name.to_string(), EncState { locked: !is_mounted, master });
     }
     out
 }
@@ -4808,6 +4824,99 @@ mod op_log_tests {
 
         handle_key(&mut app, KeyCode::Char('t')).unwrap();
         assert!(show_log_of(&app), "'t' should open the log when done");
+    }
+
+    #[test]
+    fn a_locked_container_shows_a_closed_padlock() {
+        assert_eq!(
+            crate::tui::ui::encryption_glyphs(EncState { locked: true, master: false }),
+            ("🔒", None)
+        );
+    }
+
+    #[test]
+    fn an_open_container_shows_an_open_padlock() {
+        assert_eq!(
+            crate::tui::ui::encryption_glyphs(EncState { locked: false, master: false }),
+            ("🔓", None)
+        );
+    }
+
+    #[test]
+    fn a_master_backed_container_is_marked_whatever_its_lock_state() {
+        // The key answers "will the next launch stop to ask me for a password",
+        // which is true whether the container happens to be open right now.
+        for locked in [true, false] {
+            let (_, key) = crate::tui::ui::encryption_glyphs(EncState { locked, master: true });
+            assert_eq!(key, Some("🔑"), "locked = {locked}");
+        }
+    }
+
+    /// A minimal installed app the list and detail pane can render.
+    fn stub_manifest(name: &str) -> Manifest {
+        Manifest {
+            app: crate::manifest::AppMeta {
+                name: name.to_string(),
+                main_binary: name.to_string(),
+                installed_at: "2026-01-01T00:00:00Z".into(),
+                launchers: vec![name.to_string()],
+                alias_of: None,
+                display_name: None,
+                pkg_name: None,
+                wine_game: None,
+            },
+            packages: vec![],
+        }
+    }
+
+    /// Render the app list with one encrypted app in the given state.
+    fn render_with_encrypted(state: EncState) -> String {
+        let mut app = App::new().unwrap();
+        app.screen = Screen::Main;
+        app.tab = Tab::Installed;
+        app.installed = vec![stub_manifest("vault")];
+        app.inst_state.select(Some(0));
+        app.encrypted_apps = HashMap::from([("vault".to_string(), state)]);
+        render(&mut app, 110, 30)
+    }
+
+    #[test]
+    fn the_details_pane_spells_out_a_prompting_container() {
+        let out = render_with_encrypted(EncState { locked: true, master: false });
+        assert!(out.contains("Encrypted:"), "no encryption line:\n{out}");
+        assert!(out.contains("locked"), "lock state missing:\n{out}");
+        assert!(out.contains("asks for a password"), "source missing:\n{out}");
+    }
+
+    #[test]
+    fn the_details_pane_spells_out_a_master_backed_container() {
+        let out = render_with_encrypted(EncState { locked: false, master: true });
+        assert!(out.contains("unlocked"), "lock state missing:\n{out}");
+        assert!(out.contains("master store"), "source missing:\n{out}");
+    }
+
+    #[test]
+    fn a_plain_app_has_no_encryption_line() {
+        let mut app = App::new().unwrap();
+        app.screen = Screen::Main;
+        app.tab = Tab::Installed;
+        app.installed = vec![stub_manifest("plain")];
+        app.inst_state.select(Some(0));
+        app.encrypted_apps = HashMap::new();
+        let out = render(&mut app, 110, 30);
+        assert!(!out.contains("Encrypted:"), "encryption line shown for a plain app:\n{out}");
+    }
+
+    #[test]
+    fn the_key_help_explains_the_list_markers() {
+        // The padlocks are guessable, the key beside them is not — so it has to
+        // be written down somewhere the user can reach without leaving the TUI.
+        let mut app = App::new().unwrap();
+        app.screen = Screen::KeyHelp;
+        let out = render(&mut app, 100, 40);
+        assert!(out.contains("🔑"), "the key marker is missing from ? help:\n{out}");
+        assert!(out.contains("password stored"), "the key is unexplained:\n{out}");
+        assert!(out.contains("🔒"), "the padlock is missing:\n{out}");
     }
 
     /// Render the whole TUI to an off-screen buffer and return it as text.

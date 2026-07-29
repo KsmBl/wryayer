@@ -759,6 +759,22 @@ keystream and the unbiased character selection — is written up in
 - **With `prompt`, don't lose the password.** It is not stored anywhere. A
   generated password is printed once, at creation.
 
+### Reading the TUI
+
+Encrypted apps carry two markers in the app list:
+
+| Marker | Meaning |
+|---|---|
+| 🔒 | Encrypted, container currently locked — its files are sealed |
+| 🔓 | Encrypted, container currently open |
+| 🔑 | Its password is in the master store, so launching won't stop to ask |
+
+The padlock changes every time the app is launched and closed; the key reflects
+the `password_source` setting, and is the one that tells you whether pressing
+Enter will interrupt you. The details pane on the right says the same in words,
+and `?` lists every marker.
+
+
 ### Open links in another app (bound apps)
 
 Sandboxes are isolated, so a chat app has no browser — click a link in a

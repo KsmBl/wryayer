@@ -10,7 +10,7 @@ use crate::commands::dedup::format_bytes;
 use crate::config::{AppConfig, AvahiMode, LocalDelete, TempMode};
 
 use super::{
-    App, Screen, Tab, CFG_SAVE, CFG_SHARES, CFG_GAME_EXE, CFG_GAME_PREFIX,
+    App, EncState, Screen, Tab, CFG_SAVE, CFG_SHARES, CFG_GAME_EXE, CFG_GAME_PREFIX,
     CFG_RAM_LIMIT, CFG_SPOOF_CPUINFO, CFG_SPOOF_UPTIME, CFG_USB,
     app_cfg_save_idx, setting_description, setting_options, setting_current, setting_title,
     HOSTNAME_SAMPLE, MACHINE_ID_SAMPLE, USERNAME_SAMPLE,
@@ -709,13 +709,16 @@ fn draw_installed(f: &mut Frame, app: &mut App, area: Rect) {
         }
         // Encrypted apps carry a padlock: filled while locked (files sealed
         // away), outlined while unlocked (container currently mounted).
-        if let Some(&locked) = app.locked_apps.get(&m.app.name) {
-            let (glyph, colour) = if locked {
-                ("🔒", if list_active { c_accent() } else { c_dim() })
-            } else {
-                ("🔓", c_dim())
+        if let Some(&state) = app.encrypted_apps.get(&m.app.name) {
+            let (lock, key) = encryption_glyphs(state);
+            let colour = match state.locked {
+                true if list_active => c_accent(),
+                _ => c_dim(),
             };
-            spans.push(Span::styled(format!(" {glyph}"), Style::default().fg(colour)));
+            spans.push(Span::styled(format!(" {lock}"), Style::default().fg(colour)));
+            if let Some(key) = key {
+                spans.push(Span::styled(key, Style::default().fg(c_dim())));
+            }
         }
         ListItem::new(Line::from(spans))
     }).collect();
@@ -762,6 +765,17 @@ fn parse_meminfo(content: &str) -> Option<(u64, u64)> {
     }
     let (t, f) = (total?, free?);
     Some((t.saturating_sub(f) / 1024, t / 1024)) // kB -> MiB
+}
+
+/// The list markers for an encrypted app: a padlock for the container's current
+/// state, and a key when wryayer can open it on its own.
+///
+/// Two glyphs rather than one because they answer different questions. The
+/// padlock is transient — it flips every time the app is launched and closed —
+/// while the key reflects a setting, and is what tells the user whether the
+/// next launch will stop to ask for a password.
+pub fn encryption_glyphs(state: EncState) -> (&'static str, Option<&'static str>) {
+    (if state.locked { "🔒" } else { "🔓" }, state.master.then_some("🔑"))
 }
 
 fn draw_detail(f: &mut Frame, app: &mut App, area: Rect) {
@@ -848,6 +862,27 @@ fn draw_detail(f: &mut Frame, app: &mut App, area: Rect) {
                 Span::styled(format!("{used} / {total} MiB ({pct}%)"), Style::default().fg(color)),
             ]));
         }
+    }
+
+    // Encryption, for apps that have it. Spelled out rather than left to the
+    // list's padlock, because "locked" and "asks for a password" are separate
+    // facts and the badge only has room to hint at both.
+    if let Some(&state) = app.encrypted_apps.get(&m.app.name) {
+        let (lock, key) = encryption_glyphs(state);
+        let (word, colour) =
+            if state.locked { ("locked", c_accent()) } else { ("unlocked", c_green()) };
+        let mut spans = vec![
+            Span::styled("  Encrypted:  ", dim),
+            Span::styled(format!("{lock} {word}"), Style::default().fg(colour)),
+        ];
+        spans.push(Span::styled(
+            match key {
+                Some(k) => format!("  {k} opens from the master store"),
+                None => "  asks for a password".to_string(),
+            },
+            dim,
+        ));
+        lines.push(Line::from(spans));
     }
 
     if let Some(new_ver) = app.update_available.get(&m.app.name) {
@@ -2294,8 +2329,17 @@ fn draw_key_help(f: &mut Frame, area: Rect) {
         ("q / Esc",    "Quit"),
     ];
 
+    // The list's own vocabulary. The padlocks are guessable; the key beside
+    // them is not, and it is the marker that says whether the next launch will
+    // stop to ask for a password. Kept to two dense lines so the popup still
+    // fits a 24-row terminal.
+    const MARKERS: &[&[(&str, &str)]] = &[
+        &[("●", "update available"), ("(n)", "instances running")],
+        &[("🔒", "locked"), ("🔓", "open"), ("🔑", "password stored")],
+    ];
+
     let max_key = KEYS.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
-    let lines: Vec<Line> = KEYS
+    let mut lines: Vec<Line> = KEYS
         .iter()
         .map(|(k, v)| {
             Line::from(vec![
@@ -2307,6 +2351,16 @@ fn draw_key_help(f: &mut Frame, area: Rect) {
             ])
         })
         .collect();
+
+    lines.push(Line::from(""));
+    for group in MARKERS {
+        let mut spans = vec![Span::raw("  ")];
+        for (glyph, meaning) in *group {
+            spans.push(Span::styled(*glyph, Style::default().fg(c_accent())));
+            spans.push(Span::styled(format!(" {meaning}   "), Style::default().fg(c_dim())));
+        }
+        lines.push(Line::from(spans));
+    }
 
     let needed_h = (lines.len() as u16) + 4;
     let popup = {
