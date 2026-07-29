@@ -709,8 +709,8 @@ fn draw_installed(f: &mut Frame, app: &mut App, area: Rect) {
         }
         // Encrypted apps carry a padlock: filled while locked (files sealed
         // away), outlined while unlocked (container currently mounted).
-        if let Some(&locked) = app.locked_apps.get(&m.app.name) {
-            let (glyph, colour) = if locked {
+        if let Some(&state) = app.encrypted_apps.get(&m.app.name) {
+            let (glyph, colour) = if state.locked {
                 ("🔒", if list_active { c_accent() } else { c_dim() })
             } else {
                 ("🔓", c_dim())

@@ -513,10 +513,10 @@ pub struct App {
     /// If Some, the event loop will suspend the TUI, exec `wryayer run <app>`
     /// with inherited stdio so the user actually interacts with the app,
     /// then resume. Set by pressing `r`/Enter on an installed app.
-    /// Apps stored in a VeraCrypt container, mapped to whether that container
-    /// is currently locked. Refreshed on the same throttle as running
-    /// instances — see `refresh_running_instances`.
-    pub locked_apps: HashMap<String, bool>,
+    /// Apps stored in a VeraCrypt container, mapped to how that container
+    /// currently stands. Refreshed on the same throttle as running instances —
+    /// see `refresh_running_instances`.
+    pub encrypted_apps: HashMap<String, EncState>,
     pub run_request: Option<String>,
     /// If Some, the event loop will suspend the TUI, open an editor on the
     /// given path, save config to "custom" after, then resume.
@@ -583,7 +583,7 @@ impl App {
             log_follow: true,
             needs_clear: false,
             input_cursor: 0,
-            locked_apps: HashMap::new(),
+            encrypted_apps: HashMap::new(),
             run_request: None,
             editor_request: None,
             konami_mode: false,
@@ -637,7 +637,7 @@ impl App {
             // Piggy-backed on the same throttle: listing mounted volumes forks
             // `veracrypt --list`, which must never run per-frame from the
             // renderer. Cached here and read by draw_installed.
-            self.locked_apps = scan_locked_apps(&self.installed);
+            self.encrypted_apps = scan_encrypted_apps(&self.installed);
             self.last_instance_scan = Instant::now();
         }
     }
@@ -922,12 +922,23 @@ fn run_app_inline(
     Ok(())
 }
 
-/// Map every encrypted app to whether its container is currently locked.
+/// How an encrypted app's container currently stands, as far as the list needs
+/// to know.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EncState {
+    /// The container is not mounted: the app's files are sealed away.
+    pub locked: bool,
+    /// Its password is in the master store, so unlocking needs no typing once
+    /// the store itself has been opened for this boot.
+    pub master: bool,
+}
+
+/// Map every encrypted app to the state of its container.
 ///
 /// Takes one `veracrypt --list` snapshot and matches mount points against it,
 /// rather than asking per app, so the cost is a single fork regardless of how
 /// many apps are installed.
-fn scan_locked_apps(installed: &[Manifest]) -> HashMap<String, bool> {
+fn scan_encrypted_apps(installed: &[Manifest]) -> HashMap<String, EncState> {
     let mut out = HashMap::new();
     let encrypted: Vec<&str> = installed
         .iter()
@@ -946,7 +957,12 @@ fn scan_locked_apps(installed: &[Manifest]) -> HashMap<String, bool> {
         let is_mounted = mounted
             .iter()
             .any(|v| v.mount_point.as_deref() == Some(dir.as_str()));
-        out.insert(name.to_string(), !is_mounted);
+        // Read through the marker (which lives outside the mount point), so the
+        // source is known even while the container is locked — exactly when the
+        // config.ini holding the same value is unreachable.
+        let master = crate::commands::encrypt::password_source(name)
+            == crate::config::PasswordSource::Master;
+        out.insert(name.to_string(), EncState { locked: !is_mounted, master });
     }
     out
 }
