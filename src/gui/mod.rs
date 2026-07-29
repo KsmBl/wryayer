@@ -8,6 +8,7 @@
 //! removes or mutates an app's files.
 
 mod config;
+mod encryption;
 mod install;
 mod op;
 

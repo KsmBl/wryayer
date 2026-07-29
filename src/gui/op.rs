@@ -92,6 +92,26 @@ where
     run_queue(parent, title, vec![Job { label: String::new(), args, stdin: None }], on_done);
 }
 
+/// As [`run_operation`], but hands the child `stdin_data` — the collected
+/// sudo/master/container passwords for an encrypting operation, which has no
+/// terminal to prompt on.
+pub fn run_operation_with_stdin<F>(
+    parent: &gtk::ApplicationWindow,
+    title: &str,
+    args: Vec<String>,
+    stdin_data: String,
+    on_done: F,
+) where
+    F: Fn(bool) + 'static,
+{
+    run_queue(
+        parent,
+        title,
+        vec![Job { label: String::new(), args, stdin: Some(stdin_data) }],
+        on_done,
+    );
+}
+
 /// Open a console window and run each job in `jobs` sequentially, streaming all
 /// their output into the same view. Each job is `(label, args)`; a non-empty
 /// label is printed as a separator header. `on_done(all_ok)` fires when done.

@@ -922,7 +922,7 @@ pub fn master_reset(force: bool) -> Result<()> {
 }
 
 /// Encrypted apps that would have no way in if the store were deleted.
-fn apps_relying_on_the_store() -> Result<Vec<String>> {
+pub fn apps_relying_on_the_store() -> Result<Vec<String>> {
     Ok(crate::manifest::list_all_apps()?
         .into_iter()
         .map(|m| m.app.name)
