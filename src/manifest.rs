@@ -65,7 +65,130 @@ pub enum PackageSource {
 
 pub fn wryayer_root() -> Result<PathBuf> {
     let home = std::env::var("HOME").context("HOME env var not set")?;
-    Ok(PathBuf::from(home).join(".wryayer"))
+    let root = PathBuf::from(&home).join(".wryayer");
+    if let Some(problem) = root_problem(&home, &root) {
+        anyhow::bail!("{problem}");
+    }
+    Ok(root)
+}
+
+// ── Is the root actually the root? ────────────────────────────────────────────
+//
+// `~/.wryayer` can be a mount point — an encrypted container holding every app,
+// which is how wryayer is meant to be used when the whole install should be
+// protected at rest. An unmounted mount point is an ordinary empty directory,
+// indistinguishable from a fresh install, and everything below it still works:
+// installs land underneath the mount point, a second master password store gets
+// created there, and all of it disappears the moment the container is mounted.
+// Worse, the shadow copy comes back on the next boot, so the master password
+// the user knows is rejected by a store they never made.
+//
+// So: remember that the root was once a filesystem of its own, and refuse to
+// touch it when it isn't one any more.
+
+/// Name of the marker recording "this root lives on its own filesystem".
+///
+/// Kept in the XDG state directory rather than in `~/.wryayer`, because its
+/// entire job is to be readable when `~/.wryayer` is not the right directory.
+/// It records one bit and no app names, so it reveals nothing that
+/// `~/.wryayer` existing doesn't already reveal.
+fn root_fs_marker(home: &str) -> PathBuf {
+    let state = std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(home).join(".local/state"));
+    state.join("wryayer").join("root-is-mounted")
+}
+
+/// Whether `path` is the root of its own filesystem, i.e. something is mounted
+/// there. `None` when it can't be determined.
+fn is_own_filesystem(path: &Path) -> Option<bool> {
+    use std::os::unix::fs::MetadataExt;
+    let here = std::fs::metadata(path).ok()?.dev();
+    let parent = std::fs::metadata(path.parent()?).ok()?.dev();
+    Some(here != parent)
+}
+
+/// The verdict for a root, given what it looks like now and what it looked like
+/// before. Split out from the filesystem so the rule itself can be tested.
+///
+/// The marker is one-way on purpose: once a root has been seen mounted, an
+/// unmounted one is always an error rather than a new normal. Silently adopting
+/// "well, it's a plain directory today" is exactly the behaviour that loses
+/// data, and a container that fails to mount looks identical to one the user
+/// has stopped using.
+fn root_is_missing_its_filesystem(separate_now: Option<bool>, seen_mounted: bool) -> bool {
+    matches!(separate_now, Some(false)) && seen_mounted
+}
+
+/// Check the root, and return the error text if it must not be used.
+///
+/// Cached for the process: this sits under every path lookup, and neither the
+/// mount table nor the marker changes meaningfully mid-run.
+fn root_problem(home: &str, root: &Path) -> Option<String> {
+    use std::sync::OnceLock;
+    static VERDICT: OnceLock<Option<String>> = OnceLock::new();
+    VERDICT
+        .get_or_init(|| {
+            let marker = root_fs_marker(home);
+
+            // The escape hatch, for someone who really has stopped using a
+            // container. Clears the marker so it is a one-time thing.
+            if std::env::var_os("WRYAYER_ALLOW_UNMOUNTED_ROOT").is_some() {
+                let _ = std::fs::remove_file(&marker);
+                return None;
+            }
+            // Nothing set up yet — there is no state to shadow.
+            if !root.exists() {
+                return None;
+            }
+
+            let separate_now = is_own_filesystem(root);
+            if root_is_missing_its_filesystem(separate_now, marker.exists()) {
+                return Some(unmounted_root_error(root));
+            }
+            if separate_now == Some(true) {
+                remember_root_is_mounted(&marker);
+            }
+            None
+        })
+        .clone()
+}
+
+/// Record that the root was seen on its own filesystem. Best-effort: failing to
+/// write the marker must never stop wryayer from working.
+fn remember_root_is_mounted(marker: &Path) {
+    if marker.exists() {
+        return;
+    }
+    if let Some(parent) = marker.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(
+        marker,
+        "# wryayer saw ~/.wryayer on its own filesystem (a mounted container).\n\
+         # While this file exists, wryayer refuses to run with it unmounted,\n\
+         # so nothing is written underneath the mount point.\n\
+         # Delete it, or set WRYAYER_ALLOW_UNMOUNTED_ROOT=1 once, to stop that.\n",
+    );
+}
+
+fn unmounted_root_error(root: &Path) -> String {
+    format!(
+        "{} is not mounted.\n\n\
+         wryayer has seen this directory on its own filesystem before — you keep your \
+         apps in an encrypted container. Right now it is an ordinary directory on the \
+         same filesystem as your home, which means the container has not been mounted \
+         yet.\n\n\
+         Continuing would write underneath the mount point: installs, and a second \
+         master password store with a different password, all of which vanish the \
+         moment the container is mounted and come back the next time it is not. \
+         Mount it first, for example:\n    \
+         veracrypt --mount <container> {}\n\n\
+         If you have deliberately stopped using a container, run once with:\n    \
+         WRYAYER_ALLOW_UNMOUNTED_ROOT=1 wryayer <command>",
+        root.display(),
+        root.display(),
+    )
 }
 
 pub fn app_dir(app_name: &str) -> Result<PathBuf> {
@@ -208,4 +331,87 @@ pub fn tree_order(apps: Vec<Manifest>) -> Vec<Manifest> {
 
 pub fn now_rfc3339() -> String {
     Utc::now().to_rfc3339()
+}
+
+#[cfg(test)]
+mod root_fs_tests {
+    use super::*;
+
+    #[test]
+    fn a_root_that_lost_its_filesystem_is_refused() {
+        // The whole bug: the container isn't mounted, so ~/.wryayer is a plain
+        // directory again and everything written there is a shadow copy.
+        assert!(root_is_missing_its_filesystem(Some(false), true));
+    }
+
+    #[test]
+    fn a_mounted_root_is_fine() {
+        assert!(!root_is_missing_its_filesystem(Some(true), true));
+    }
+
+    #[test]
+    fn a_plain_directory_setup_is_left_alone() {
+        // Never seen mounted: this user simply doesn't encrypt their root, and
+        // must not start getting errors.
+        assert!(!root_is_missing_its_filesystem(Some(false), false));
+    }
+
+    #[test]
+    fn an_unreadable_root_is_not_treated_as_unmounted() {
+        // Refusing to run because a stat failed would turn an unrelated
+        // permissions problem into "your container is missing".
+        assert!(!root_is_missing_its_filesystem(None, true));
+    }
+
+    #[test]
+    fn the_marker_lives_outside_the_root_it_describes() {
+        // Kept inside ~/.wryayer it would be sealed in the very container whose
+        // absence it exists to detect.
+        let marker = root_fs_marker("/home/someone");
+        assert!(
+            !marker.starts_with("/home/someone/.wryayer"),
+            "marker must not live in the root: {}",
+            marker.display()
+        );
+        assert!(marker.starts_with("/home/someone/.local/state"), "{}", marker.display());
+    }
+
+    #[test]
+    fn the_marker_honours_xdg_state_home() {
+        let old = std::env::var_os("XDG_STATE_HOME");
+        std::env::set_var("XDG_STATE_HOME", "/somewhere/state");
+        let marker = root_fs_marker("/home/someone");
+        match old {
+            Some(v) => std::env::set_var("XDG_STATE_HOME", v),
+            None => std::env::remove_var("XDG_STATE_HOME"),
+        }
+        assert!(marker.starts_with("/somewhere/state"), "{}", marker.display());
+    }
+
+    #[test]
+    fn writing_the_marker_is_idempotent_and_self_describing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let marker = tmp.path().join("state/wryayer/root-is-mounted");
+        remember_root_is_mounted(&marker);
+        let first = std::fs::read_to_string(&marker).unwrap();
+        remember_root_is_mounted(&marker);
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), first);
+        // Someone finding this file must be able to tell what it does.
+        assert!(first.contains("WRYAYER_ALLOW_UNMOUNTED_ROOT"), "{first}");
+    }
+
+    #[test]
+    fn a_separate_mount_is_recognised_as_its_own_filesystem() {
+        // /proc is always a mount of its own; / never is a mount within itself.
+        assert_eq!(is_own_filesystem(Path::new("/proc")), Some(true));
+        assert_eq!(is_own_filesystem(Path::new("/etc")), Some(false));
+    }
+
+    #[test]
+    fn the_error_says_what_to_do_about_it() {
+        let msg = unmounted_root_error(Path::new("/home/u/.wryayer"));
+        assert!(msg.contains("is not mounted"), "{msg}");
+        assert!(msg.contains("veracrypt --mount"), "{msg}");
+        assert!(msg.contains("WRYAYER_ALLOW_UNMOUNTED_ROOT=1"), "{msg}");
+    }
 }
