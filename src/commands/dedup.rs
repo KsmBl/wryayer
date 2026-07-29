@@ -54,6 +54,8 @@ pub fn run(verbose: bool) -> Result<()> {
     let mut links_created = 0u64;
     let mut bytes_saved = 0u64;
     let mut errors = 0u32;
+    let mut unshared_files = 0u64;
+    let mut unshared_bytes = 0u64;
 
     for (size, entries) in &by_size {
         if entries.len() < 2 {
@@ -91,7 +93,17 @@ pub fn run(verbose: bool) -> Result<()> {
             // encrypted app is its own ext4 volume inside its own container.
             // Linking is therefore only ever attempted within one filesystem;
             // trying across them would fail with EXDEV on every single file.
-            for bucket in by_device(group).into_values() {
+            let buckets = by_device(group);
+            // Every filesystem past the first keeps its own full copy of the
+            // content. That is space dedup can see but can never reclaim, so
+            // it is reported apart from the savings rather than hidden.
+            if buckets.len() > 1 {
+                let extra = buckets.len() as u64 - 1;
+                unshared_files += extra;
+                unshared_bytes += size * extra;
+            }
+
+            for bucket in buckets.into_values() {
                 // Lowest inode = canonical (oldest on disk, keeps the inode
                 // alive longest).
                 let canonical = bucket[0].clone();
@@ -120,17 +132,42 @@ pub fn run(verbose: bool) -> Result<()> {
         }
     }
 
-    if links_created == 0 && errors == 0 {
-        eprintln!("  No duplicate files found.");
-    } else {
-        eprintln!(
-            "  {} files hard-linked, {} recovered{}",
-            links_created,
-            format_bytes(bytes_saved),
-            if errors > 0 { format!(" ({errors} skipped)") } else { String::new() },
-        );
+    for line in summary_lines(links_created, bytes_saved, errors, unshared_files, unshared_bytes) {
+        eprintln!("  {line}");
     }
     Ok(())
+}
+
+/// The closing report, as the lines to print (without indentation).
+fn summary_lines(
+    links: u64,
+    saved: u64,
+    errors: u32,
+    unshared_files: u64,
+    unshared_bytes: u64,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    if links > 0 || errors > 0 {
+        out.push(format!(
+            "{} files hard-linked, {} recovered{}",
+            links,
+            format_bytes(saved),
+            if errors > 0 { format!(" ({errors} skipped)") } else { String::new() },
+        ));
+    }
+    if unshared_bytes > 0 {
+        // Not an error and not something the user can act on by re-running:
+        // it is the standing cost of keeping apps in separate containers.
+        out.push(format!(
+            "{} in {unshared_files} files stays duplicated across container \
+             boundaries — hard links cannot span filesystems",
+            format_bytes(unshared_bytes),
+        ));
+    }
+    if out.is_empty() {
+        out.push("No duplicate files found.".to_string());
+    }
+    out
 }
 
 /// Split content-identical files into one bucket per filesystem, each sorted so
@@ -369,6 +406,39 @@ mod tests {
             file(1, 33, "/c/lib.so"),
         ]);
         assert_eq!(buckets[&1].iter().map(|f| f.ino).collect::<Vec<_>>(), vec![9, 33, 50]);
+    }
+
+    #[test]
+    fn nothing_found_is_still_reported() {
+        assert_eq!(summary_lines(0, 0, 0, 0, 0), vec!["No duplicate files found."]);
+    }
+
+    #[test]
+    fn cross_container_duplicates_are_not_reported_as_nothing_found() {
+        // The whole point: an encrypted app duplicating a plain one used to
+        // read as "No duplicate files found", which is the opposite of true.
+        let lines = summary_lines(0, 0, 0, 3, 6 * 1024 * 1024);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("6.0 MiB"), "{}", lines[0]);
+        assert!(lines[0].contains("3 files"), "{}", lines[0]);
+        assert!(!lines[0].contains("No duplicate"));
+    }
+
+    #[test]
+    fn savings_and_unshareable_space_are_reported_separately() {
+        let lines = summary_lines(4, 1024, 0, 2, 2048);
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].starts_with("4 files hard-linked"), "{}", lines[0]);
+        assert!(lines[1].contains("container boundaries"), "{}", lines[1]);
+    }
+
+    #[test]
+    fn genuine_failures_still_show_a_skipped_count() {
+        // EXDEV no longer lands here, so a non-zero count now means something
+        // actually went wrong and is worth surfacing.
+        let lines = summary_lines(1, 512, 2, 0, 0);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("(2 skipped)"), "{}", lines[0]);
     }
 
     #[test]
