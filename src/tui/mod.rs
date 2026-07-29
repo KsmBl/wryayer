@@ -4852,6 +4852,61 @@ mod op_log_tests {
         }
     }
 
+    /// A minimal installed app the list and detail pane can render.
+    fn stub_manifest(name: &str) -> Manifest {
+        Manifest {
+            app: crate::manifest::AppMeta {
+                name: name.to_string(),
+                main_binary: name.to_string(),
+                installed_at: "2026-01-01T00:00:00Z".into(),
+                launchers: vec![name.to_string()],
+                alias_of: None,
+                display_name: None,
+                pkg_name: None,
+                wine_game: None,
+            },
+            packages: vec![],
+        }
+    }
+
+    /// Render the app list with one encrypted app in the given state.
+    fn render_with_encrypted(state: EncState) -> String {
+        let mut app = App::new().unwrap();
+        app.screen = Screen::Main;
+        app.tab = Tab::Installed;
+        app.installed = vec![stub_manifest("vault")];
+        app.inst_state.select(Some(0));
+        app.encrypted_apps = HashMap::from([("vault".to_string(), state)]);
+        render(&mut app, 110, 30)
+    }
+
+    #[test]
+    fn the_details_pane_spells_out_a_prompting_container() {
+        let out = render_with_encrypted(EncState { locked: true, master: false });
+        assert!(out.contains("Encrypted:"), "no encryption line:\n{out}");
+        assert!(out.contains("locked"), "lock state missing:\n{out}");
+        assert!(out.contains("asks for a password"), "source missing:\n{out}");
+    }
+
+    #[test]
+    fn the_details_pane_spells_out_a_master_backed_container() {
+        let out = render_with_encrypted(EncState { locked: false, master: true });
+        assert!(out.contains("unlocked"), "lock state missing:\n{out}");
+        assert!(out.contains("master store"), "source missing:\n{out}");
+    }
+
+    #[test]
+    fn a_plain_app_has_no_encryption_line() {
+        let mut app = App::new().unwrap();
+        app.screen = Screen::Main;
+        app.tab = Tab::Installed;
+        app.installed = vec![stub_manifest("plain")];
+        app.inst_state.select(Some(0));
+        app.encrypted_apps = HashMap::new();
+        let out = render(&mut app, 110, 30);
+        assert!(!out.contains("Encrypted:"), "encryption line shown for a plain app:\n{out}");
+    }
+
     #[test]
     fn the_key_help_explains_the_list_markers() {
         // The padlocks are guessable, the key beside them is not — so it has to

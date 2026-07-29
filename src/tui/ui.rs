@@ -864,6 +864,27 @@ fn draw_detail(f: &mut Frame, app: &mut App, area: Rect) {
         }
     }
 
+    // Encryption, for apps that have it. Spelled out rather than left to the
+    // list's padlock, because "locked" and "asks for a password" are separate
+    // facts and the badge only has room to hint at both.
+    if let Some(&state) = app.encrypted_apps.get(&m.app.name) {
+        let (lock, key) = encryption_glyphs(state);
+        let (word, colour) =
+            if state.locked { ("locked", c_accent()) } else { ("unlocked", c_green()) };
+        let mut spans = vec![
+            Span::styled("  Encrypted:  ", dim),
+            Span::styled(format!("{lock} {word}"), Style::default().fg(colour)),
+        ];
+        spans.push(Span::styled(
+            match key {
+                Some(k) => format!("  {k} opens from the master store"),
+                None => "  asks for a password".to_string(),
+            },
+            dim,
+        ));
+        lines.push(Line::from(spans));
+    }
+
     if let Some(new_ver) = app.update_available.get(&m.app.name) {
         lines.push(Line::raw(""));
         lines.push(Line::from(vec![
