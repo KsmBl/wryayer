@@ -684,3 +684,76 @@ pub fn store_summary() -> String {
         "set · locked".to_string()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_payload_is_the_key_value_form_the_child_parses() {
+        let s = Secrets {
+            sudo: "s".into(),
+            master: "m".into(),
+            container: "c".into(),
+        };
+        assert_eq!(s.payload(), "sudo=s\nmaster=m\ncontainer=c\n");
+    }
+
+    #[test]
+    fn empty_answers_are_omitted_rather_than_sent_blank() {
+        // The child splits on the first '=' and takes the rest verbatim, so a
+        // "master=" line would set the master password to the empty string
+        // instead of leaving it unset.
+        let s = Secrets { container: "only-this".into(), ..Default::default() };
+        assert_eq!(s.payload(), "container=only-this\n");
+    }
+
+    #[test]
+    fn a_password_containing_an_equals_sign_survives() {
+        // split_once('=') takes the first separator, so everything after it —
+        // including further '=' — is the value.
+        let s = Secrets { container: "a=b=c".into(), ..Default::default() };
+        assert_eq!(s.payload(), "container=a=b=c\n");
+        let payload = s.payload();
+        let (key, value) = payload.trim_end().split_once('=').unwrap();
+        assert_eq!((key, value), ("container", "a=b=c"));
+    }
+
+    #[test]
+    fn nothing_to_ask_is_recognised() {
+        assert!(Needs::default().nothing());
+        assert!(!Needs { sudo: true, ..Default::default() }.nothing());
+        assert!(!Needs { container_existing: true, ..Default::default() }.nothing());
+    }
+
+    #[test]
+    fn a_generated_password_is_never_asked_for() {
+        let _home = crate::test_support::test_home();
+        // Nothing to type and nothing to confirm — that is the whole point of
+        // generating it.
+        assert!(!Needs::for_new_container(true, true).container_new);
+        assert!(Needs::for_new_container(true, false).container_new);
+    }
+
+    #[test]
+    fn a_first_container_has_to_create_the_master_store() {
+        let _home = crate::test_support::test_home();
+        // Fresh sandbox: no store yet, so it must be created rather than opened.
+        let needs = Needs::for_new_container(true, true);
+        assert!(needs.master_new);
+        assert!(!needs.master_existing);
+    }
+
+    #[test]
+    fn a_prompt_source_container_never_touches_the_master_store() {
+        let _home = crate::test_support::test_home();
+        let needs = Needs::for_new_container(false, false);
+        assert!(!needs.master_new && !needs.master_existing);
+    }
+
+    #[test]
+    fn opening_a_container_asks_for_its_password_when_the_store_has_none() {
+        let _home = crate::test_support::test_home();
+        assert!(Needs::for_existing_container("vault").container_existing);
+    }
+}

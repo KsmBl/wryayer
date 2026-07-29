@@ -69,6 +69,11 @@ pub fn run() -> Result<()> {
 fn build_ui(app: &gtk::Application) {
     load_css();
 
+    // Checked before anything else draws: everything below resolves its paths
+    // through the root, so if it is unusable the whole window would otherwise
+    // come up looking like a fresh, empty install.
+    let root_problem = crate::manifest::wryayer_root().err().map(|e| format!("{e:#}"));
+
     let window = gtk::ApplicationWindow::builder()
         .application(app)
         .title("wryayer")
@@ -136,6 +141,46 @@ fn build_ui(app: &gtk::Application) {
     ctx.refresh();
 
     window.present();
+
+    if let Some(problem) = root_problem {
+        ctx.status("wryayer cannot use ~/.wryayer — see the dialog.");
+        report_root_problem(&window, &problem);
+    }
+}
+
+/// Put an unusable root in front of the user, in full.
+///
+/// The message explains what to do about it and is several paragraphs long, so
+/// it gets a window rather than the one-line status bar.
+fn report_root_problem(window: &gtk::ApplicationWindow, problem: &str) {
+    let win = gtk::Window::builder()
+        .title("wryayer cannot use ~/.wryayer")
+        .transient_for(window)
+        .modal(true)
+        .default_width(560)
+        .build();
+
+    let outer = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    outer.set_margin_top(12);
+    outer.set_margin_bottom(12);
+    outer.set_margin_start(12);
+    outer.set_margin_end(12);
+
+    let label = gtk::Label::new(Some(problem));
+    label.set_xalign(0.0);
+    label.set_wrap(true);
+    label.set_selectable(true); // the message contains a command to copy
+    outer.append(&label);
+
+    let close = gtk::Button::with_label("Close");
+    close.set_halign(gtk::Align::End);
+    outer.append(&close);
+
+    win.set_child(Some(&outer));
+    win.present();
+
+    let win2 = win.clone();
+    close.connect_clicked(move |_| win2.close());
 }
 
 fn add_tab(notebook: &gtk::Notebook, child: &impl IsA<gtk::Widget>, label: &str) {
@@ -378,7 +423,20 @@ fn build_app_list_tab(ctx: &Ctx, games: bool) -> (gtk::Box, Rc<dyn Fn()>) {
 
             // tree_order keeps each `--into` child directly after its parent, so
             // by the time a child is seen its parent iter already exists.
-            let apps = list_all_apps().map(tree_order).unwrap_or_default();
+            // An unusable root — the usual cause being ~/.wryayer living in a
+            // container that has not been mounted yet — must say so. Swallowed,
+            // it reads as "no apps installed", which is both wrong and alarming.
+            let apps = match list_all_apps().map(tree_order) {
+                Ok(apps) => apps,
+                Err(e) => {
+                    let iter = store.append(None);
+                    let msg = glib::markup_escape_text(&format!("{e:#}"));
+                    let first = msg.lines().next().unwrap_or("wryayer cannot read its apps");
+                    store.set_value(&iter, 0, &format!("<i>{first}</i>").to_value());
+                    store.set_value(&iter, 1, &String::new().to_value());
+                    return;
+                }
+            };
             let mut parent_iters: std::collections::HashMap<String, gtk::TreeIter> =
                 std::collections::HashMap::new();
             let mut any = false;
@@ -1166,4 +1224,44 @@ where
         });
     }
     win.present();
+}
+
+#[cfg(test)]
+mod badge_tests {
+    use super::*;
+
+    fn state(locked: bool, master: bool) -> AppEncryption {
+        AppEncryption { locked, master, fill: None }
+    }
+
+    #[test]
+    fn the_badges_match_the_vocabulary_the_tui_uses() {
+        // Two front-ends teaching two different symbol sets would be worse than
+        // either teaching none.
+        assert_eq!(encryption_badges(state(true, false)), "🔒");
+        assert_eq!(encryption_badges(state(false, false)), "🔓");
+        assert_eq!(encryption_badges(state(true, true)), "🔒🔑");
+        assert_eq!(encryption_badges(state(false, true)), "🔓🔑");
+    }
+
+    #[test]
+    fn a_plain_app_gets_no_badge_at_all() {
+        let m = Manifest {
+            app: crate::manifest::AppMeta {
+                name: "plain".into(),
+                main_binary: "plain".into(),
+                installed_at: "2026-01-01".into(),
+                launchers: vec![],
+                alias_of: None,
+                display_name: None,
+                pkg_name: None,
+                wine_game: None,
+            },
+            packages: vec![],
+        };
+        let markup = row_markup(&m, false, None);
+        assert!(!markup.contains('🔒'), "{markup}");
+        assert!(!markup.contains('🔓'), "{markup}");
+        assert!(markup.contains("plain"), "{markup}");
+    }
 }
