@@ -629,6 +629,13 @@ wryayer grow firefox        # rebuild its container with more room
 wryayer decrypt firefox     # move it back to a plain directory
 ```
 
+All of it is reachable from the TUI too: open an app's settings with `s` and
+look under **Encryption**. A plain app offers one row that moves it into a
+container; an encrypted one shows its password source, lock-on-exit, and the row
+that takes it back out. An alias shows neither — its files live in the target
+app's tree, so sealing its own directory would protect nothing. Encrypt that app
+instead.
+
 The container is a completely ordinary VeraCrypt volume at
 `~/.wryayer/.containers/<app>.hc` — you can open it with the VeraCrypt GUI on
 any machine. It uses AES-256 with SHA-512 header derivation and an ext4
@@ -984,6 +991,7 @@ The config is stored as a human-readable INI file at `~/.wryayer/<app>/config.in
 - [x] **Multi-source password generator** — `wryayer genpw` mixes `/dev/urandom`, `/dev/random`, hardware temperature sensors, mouse position, RAM/scheduler/interrupt counters and the nanosecond clock through SHA-512; ~207 bits, unbiased character selection
 - [x] **Automatic container growth** — installing into an encrypted app grows its container when it would run out of room, including for packages the soname-repair pass pulls in afterwards
 - [x] **Fill warnings** — `wryayer encryption`, the TUI details pane and every launch report how full a container is and warn past 90%; `wryayer grow` enlarges one on demand
+- [x] **Encrypt after the fact** — move an installed app into a container, or back out of one, from its TUI settings as well as the command line
 - [ ] **Wayland isolation** — bind a private Wayland socket so apps can't impersonate each other
 - [x] **D-Bus portal filtering** — file pickers run in-sandbox and only show shared dirs, via an `xdg-dbus-proxy` filter that hides the host portal (`portal_filter`)
 - [x] **Package signing verification** — every downloaded package is authenticated before extraction (Arch `.pkg.tar.zst` via the pacman keyring, Fedora `.rpm` via the rpm keyring, Debian `.deb` via apt's signed repo metadata)

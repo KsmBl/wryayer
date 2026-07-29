@@ -207,7 +207,11 @@ pub enum Screen {
         title: String,
         /// Install args accumulated so far, including the shortcut answer.
         args: Vec<String>,
-        selected: usize, // see ENCRYPT_CHOICES
+        selected: usize, // indexes kind.choices()
+        /// Whether this is an install being routed into a container, or an
+        /// already-installed app being converted. The two offer different
+        /// choices and pass different flags.
+        kind: EncryptAsk,
     },
     /// Reveal the container passwords held in the master store.
     ///
@@ -429,6 +433,8 @@ pub enum PendingAction {
     Snapshot(String),
     Rollback(String, String),
     DeleteSnapshot(String, String),
+    /// Move an app back out of its VeraCrypt container.
+    ConfirmedDecrypt(String),
 }
 
 // ── Tabs ──────────────────────────────────────────────────────────────────────
@@ -640,6 +646,19 @@ impl App {
             self.encrypted_apps = scan_encrypted_apps(&self.installed);
             self.last_instance_scan = Instant::now();
         }
+    }
+
+    /// Which encryption rows `app_name`'s config screen should offer.
+    ///
+    /// Reads `alias_of` from the already-loaded manifest list rather than off
+    /// disk: this runs on every frame the config popup is open.
+    pub fn encryption_rows_for(&self, app_name: &str) -> EncryptionRows {
+        let is_alias = self
+            .installed
+            .iter()
+            .find(|m| m.app.name == app_name)
+            .is_some_and(|m| m.app.alias_of.is_some());
+        EncryptionRows::for_app(app_name, is_alias)
     }
 
     pub fn selected_installed(&self) -> Option<&Manifest> {
@@ -2105,6 +2124,42 @@ pub const ENCRYPT_CHOICES: &[(&str, &str, &[&str])] = &[
     ),
 ];
 
+/// Where an app is asked to go into a container: at install time, or after the
+/// fact from its settings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EncryptAsk {
+    /// An install that hasn't happened yet — `--encrypt*` flags on `install`.
+    Install,
+    /// An app already on disk — flags on `encrypt`.
+    Convert,
+}
+
+/// Converting an installed app. Index 0 backs out, mirroring
+/// [`ENCRYPT_CHOICES`]; the rest are flags for `wryayer encrypt <app>`.
+pub const CONVERT_CHOICES: &[(&str, &str, &[&str])] = &[
+    ("Leave it as it is", "no container, nothing moves", &[]),
+    ("Encrypt", "type the container password at every launch", &[]),
+    (
+        "Encrypt + master password",
+        "kept in the master store, unlocked once per boot",
+        &["--master"],
+    ),
+    (
+        "Encrypt + generated password",
+        "generate a password into the master store",
+        &["--master", "--generate"],
+    ),
+];
+
+impl EncryptAsk {
+    pub fn choices(self) -> &'static [(&'static str, &'static str, &'static [&'static str])] {
+        match self {
+            Self::Install => ENCRYPT_CHOICES,
+            Self::Convert => CONVERT_CHOICES,
+        }
+    }
+}
+
 /// The `--into` target in an install argument list, resolved to the app that
 /// actually owns the filesystem tree (following one alias hop).
 fn merge_target_root(args: &[String]) -> Option<String> {
@@ -2133,29 +2188,72 @@ fn ask_encrypt(app: &mut App, pkg: String, title: String, args: Vec<String>) {
             return;
         }
     }
-    app.screen = Screen::AskEncrypt { pkg, title, args, selected: 0 };
+    app.screen = Screen::AskEncrypt { pkg, title, args, selected: 0, kind: EncryptAsk::Install };
     app.needs_clear = true;
+}
+
+/// Ask how to encrypt an app that is already installed, from its settings.
+fn ask_encrypt_app(app: &mut App, app_name: String) {
+    app.screen = Screen::AskEncrypt {
+        title: format!("Encrypt — {app_name}"),
+        args: vec!["encrypt".into(), app_name.clone()],
+        pkg: app_name,
+        selected: 1,
+        kind: EncryptAsk::Convert,
+    };
+    app.needs_clear = true;
+}
+
+/// Confirm before moving an app back out of its container.
+///
+/// Confirmed rather than done on the spot because it copies the whole tree and
+/// throws the container away: not destructive to the app, but not something to
+/// start by brushing past a row either.
+fn ask_decrypt_app(app: &mut App, app_name: String) {
+    app.screen = Screen::Confirm {
+        title: format!("Remove encryption from '{app_name}'?"),
+        body: vec![
+            "Its files are copied out of the container, and the container".into(),
+            "is deleted along with any password stored for it.".into(),
+            String::new(),
+            "The app keeps working — it is just no longer encrypted at rest.".into(),
+            String::new(),
+            "Press y to confirm, n or Esc to cancel.".into(),
+        ],
+        action: PendingAction::ConfirmedDecrypt(app_name),
+        danger: false,
+    };
+    app.needs_clear = true;
+}
+
+/// The passwords still needed to *open* an existing container.
+///
+/// Shared by every operation that has to mount one it did not create: merge
+/// installs, and removing encryption. Anything already satisfied is skipped, so
+/// a master-backed container with sudo still cached asks for nothing.
+fn open_container_stages(app_name: &str) -> Vec<SecretStage> {
+    let mut stages = Vec::new();
+    if !crate::veracrypt::sudo_is_primed() {
+        stages.push(SecretStage::Sudo);
+    }
+    let known = crate::secrets::open_cached()
+        .ok()
+        .flatten()
+        .is_some_and(|s| s.get(app_name).is_some());
+    if !known {
+        stages.push(SecretStage::ContainerExisting);
+    }
+    stages
 }
 
 /// Start an install into an already-encrypted app: no encryption question, just
 /// whatever is needed to open that app's container.
 fn begin_merge_into_encrypted(app: &mut App, title: String, args: Vec<String>, root: &str) {
-    let mut stages = Vec::new();
-    if !crate::veracrypt::sudo_is_primed() {
-        stages.push(SecretStage::Sudo);
-    }
     // The master store may already know this container's password, in which
     // case the install can open it without asking anything.
-    let known = crate::secrets::open_cached()
-        .ok()
-        .flatten()
-        .is_some_and(|s| s.get(root).is_some());
-    if !known {
-        stages.push(SecretStage::ContainerExisting);
-    }
-
+    let stages = open_container_stages(root);
     if stages.is_empty() {
-        launch_encrypted_install(app, title, args, "", "", "");
+        launch_encrypted_op(app, title, args, "", "", "");
         return;
     }
     app.screen = Screen::EncryptSecrets {
@@ -2458,12 +2556,13 @@ fn build_secret_stages(use_master: bool, generate: bool) -> Vec<SecretStage> {
     stages
 }
 
-/// Start an encrypted install: collect whatever passwords are still needed,
-/// then run it as a normal operation with its log in the TUI.
-fn begin_encrypted_install(app: &mut App, title: String, args: Vec<String>, use_master: bool, generate: bool) {
+/// Start an operation that creates a container — an encrypted install, or
+/// moving an installed app into one. Collects whatever passwords are still
+/// needed, then runs it as a normal operation with its log in the TUI.
+fn begin_encrypted_op(app: &mut App, title: String, args: Vec<String>, use_master: bool, generate: bool) {
     let stages = build_secret_stages(use_master, generate);
     if stages.is_empty() {
-        launch_encrypted_install(app, title, args, "", "", "");
+        launch_encrypted_op(app, title, args, "", "", "");
         return;
     }
     app.screen = Screen::EncryptSecrets {
@@ -2511,8 +2610,9 @@ fn launch_op_with_sudo(app: &mut App, title: String, args: Vec<String>) {
     app.needs_clear = true;
 }
 
-/// Launch the install, handing the collected passwords to the child on stdin.
-fn launch_encrypted_install(
+/// Launch the operation, handing the collected passwords to the child on
+/// stdin. `install`, `encrypt` and `decrypt` all read them the same way.
+fn launch_encrypted_op(
     app: &mut App,
     title: String,
     mut args: Vec<String>,
@@ -2632,7 +2732,7 @@ fn on_encrypt_secrets(app: &mut App, code: KeyCode) {
     if let Screen::EncryptSecrets { title, args, pass_to_child, sudo, master, container, .. } = screen
     {
         if pass_to_child {
-            launch_encrypted_install(app, title, args, &sudo, &master, &container);
+            launch_encrypted_op(app, title, args, &sudo, &master, &container);
         } else {
             // sudo is primed now; the operation needs nothing else.
             launch_op(app, title, args, None, true);
@@ -2737,6 +2837,32 @@ fn execute_action(app: &mut App, action: PendingAction) {
                 }
             }
             app.needs_clear = true;
+        }
+        PendingAction::ConfirmedDecrypt(name) => {
+            // Opening the container needs sudo, and its password unless the
+            // master store already holds it.
+            let title = format!("Remove encryption — {name}");
+            let args = vec!["decrypt".into(), name.clone()];
+            let stages = open_container_stages(&name);
+            if stages.is_empty() {
+                launch_encrypted_op(app, title, args, "", "", "");
+            } else {
+                app.screen = Screen::EncryptSecrets {
+                    title,
+                    args,
+                    pass_to_child: true,
+                    stages,
+                    idx: 0,
+                    value: String::new(),
+                    first_entry: String::new(),
+                    sudo: String::new(),
+                    master: String::new(),
+                    container: String::new(),
+                    error: None,
+                };
+                app.input_cursor = 0;
+                app.needs_clear = true;
+            }
         }
     }
 }
@@ -2879,15 +3005,58 @@ pub const CFG_LOCK_ON_EXIT: usize = 26;
 pub const CFG_MASTER_SHOW: usize = 27;
 /// Forget the cached master key so it must be typed again (global, action).
 pub const CFG_MASTER_FORGET: usize = 28;
-pub const CFG_LEN: usize = 29;
+/// Move a plain app into a new container (per-app, action).
+pub const CFG_ENCRYPT_APP: usize = 29;
+/// Move an encrypted app back out into a plain directory (per-app, action).
+pub const CFG_DECRYPT_APP: usize = 30;
+pub const CFG_LEN: usize = 31;
+
+/// Which encryption rows a per-app config screen offers.
+///
+/// Three cases rather than a bool, because "already encrypted" and "could be
+/// encrypted" want different rows, and some apps want neither.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EncryptionRows {
+    /// No section at all.
+    Hidden,
+    /// A plain app that could be moved into a container.
+    Offer,
+    /// Already in a container: its settings, plus the way back out.
+    Manage,
+}
+
+impl EncryptionRows {
+    /// Decide from the app itself. `is_alias` comes from the caller because it
+    /// already has the manifest in hand and this runs on every frame.
+    pub fn for_app(app_name: &str, is_alias: bool) -> Self {
+        if crate::veracrypt::is_encrypted(app_name) {
+            return Self::Manage;
+        }
+        // An alias owns no filesystem tree — its files live in the target's.
+        // Encrypting it would seal an almost empty directory and leave the real
+        // files exactly where they were.
+        if is_alias || !crate::veracrypt::available() {
+            return Self::Hidden;
+        }
+        Self::Offer
+    }
+
+    fn rows(self) -> Vec<usize> {
+        match self {
+            Self::Hidden => vec![],
+            Self::Offer => vec![CFG_ENCRYPT_APP],
+            Self::Manage => vec![CFG_PASSWORD_SOURCE, CFG_LOCK_ON_EXIT, CFG_DECRYPT_APP],
+        }
+    }
+}
 
 /// Index of the Save button in the per-app Config screen. Shifts down as
 /// optional row groups (wine game, encryption) appear.
-pub fn app_cfg_save_idx(has_wine_game: bool, is_encrypted: bool) -> usize {
+pub fn app_cfg_save_idx(has_wine_game: bool, encryption: EncryptionRows) -> usize {
     // The Save button is drawn right after the last selectable row, so its
     // position is simply the number of navigable rows. Deriving it from
     // config_nav_order keeps it correct as rows are added or removed.
-    config_nav_order(false, has_wine_game, is_encrypted).len()
+    config_nav_order(false, has_wine_game, encryption).len()
 }
 
 /// The sandbox config rows grouped into labelled sections, in display order.
@@ -2918,15 +3087,19 @@ pub const SANDBOX_SECTIONS: &[(&str, &[usize])] = &[
 pub fn config_sections(
     is_global: bool,
     has_wine_game: bool,
-    is_encrypted: bool,
+    encryption: EncryptionRows,
 ) -> Vec<(&'static str, Vec<usize>)> {
     let mut out: Vec<(&'static str, Vec<usize>)> =
         SANDBOX_SECTIONS.iter().map(|(t, idxs)| (*t, idxs.to_vec())).collect();
-    // Only meaningful for an app stored in a VeraCrypt container, so the
-    // section is absent entirely for every other app rather than shown as an
-    // inert row.
-    if !is_global && is_encrypted {
-        out.push(("Encryption", vec![CFG_PASSWORD_SOURCE, CFG_LOCK_ON_EXIT]));
+    // A plain app gets the one row that offers encryption; an encrypted one
+    // gets its settings and the way back out. Apps that can be neither — an
+    // alias, or any app when veracrypt isn't installed — get no section rather
+    // than a row that can only report failure.
+    if !is_global {
+        let rows = encryption.rows();
+        if !rows.is_empty() {
+            out.push(("Encryption", rows));
+        }
     }
     if is_global {
         out.push((
@@ -2962,8 +3135,12 @@ pub fn config_sections(
 
 /// The selectable row indices in display order (Save excluded), used to step
 /// ↑/↓ through the screen in the same order it is drawn.
-pub fn config_nav_order(is_global: bool, has_wine_game: bool, is_encrypted: bool) -> Vec<usize> {
-    config_sections(is_global, has_wine_game, is_encrypted)
+pub fn config_nav_order(
+    is_global: bool,
+    has_wine_game: bool,
+    encryption: EncryptionRows,
+) -> Vec<usize> {
+    config_sections(is_global, has_wine_game, encryption)
         .into_iter()
         .flat_map(|(_, idxs)| idxs)
         .collect()
@@ -2974,12 +3151,12 @@ pub fn config_nav_order(is_global: bool, has_wine_game: bool, is_encrypted: bool
 pub fn config_nav_step(
     is_global: bool,
     has_wine_game: bool,
-    is_encrypted: bool,
+    encryption: EncryptionRows,
     save_idx: usize,
     selected: usize,
     dir: i32,
 ) -> usize {
-    let mut order = config_nav_order(is_global, has_wine_game, is_encrypted);
+    let mut order = config_nav_order(is_global, has_wine_game, encryption);
     order.push(save_idx);
     let pos = order.iter().position(|&i| i == selected).unwrap_or(0);
     let len = order.len();
@@ -2999,8 +3176,8 @@ fn on_config(app: &mut App, code: KeyCode) {
     // count is known without dropping the borrow.
     let has_wg = app.editing_wine_game.is_some();
     let is_enc = match &app.screen {
-        Screen::Config { app_name, .. } => crate::veracrypt::is_encrypted(app_name),
-        _ => false,
+        Screen::Config { app_name, .. } => app.encryption_rows_for(app_name),
+        _ => EncryptionRows::Hidden,
     };
     let save_idx = app_cfg_save_idx(has_wg, is_enc);
 
@@ -3039,6 +3216,16 @@ fn on_config(app: &mut App, code: KeyCode) {
                 open_bound_apps(app, name);
                 return;
             }
+            if *selected == CFG_ENCRYPT_APP || *selected == CFG_DECRYPT_APP {
+                let name = app_name.clone();
+                let encrypt = *selected == CFG_ENCRYPT_APP;
+                // Both leave the config screen: they rewrite the very tree
+                // config.ini lives in, so unsaved edits here could not survive
+                // the move anyway.
+                app.editing_wine_game = None;
+                if encrypt { ask_encrypt_app(app, name) } else { ask_decrypt_app(app, name) }
+                return;
+            }
             if has_wg && (*selected == CFG_GAME_EXE || *selected == CFG_GAME_PREFIX) {
                 open_game_field_input(app);
                 return;
@@ -3049,7 +3236,10 @@ fn on_config(app: &mut App, code: KeyCode) {
             // Inverse of Right — cycle backward. Special rows are no-ops.
             let sel = *selected;
             let is_game_row = has_wg && (sel == CFG_GAME_EXE || sel == CFG_GAME_PREFIX);
-            if sel != save_idx && sel != CFG_SHARES && sel != CFG_BOUND && !is_game_row {
+            // Action rows have nothing to cycle through — Left must not
+            // silently start an encryption.
+            let is_action = sel == CFG_ENCRYPT_APP || sel == CFG_DECRYPT_APP;
+            if sel != save_idx && sel != CFG_SHARES && sel != CFG_BOUND && !is_game_row && !is_action {
                 cycle_setting(config, sel, -1);
             }
         }
@@ -3071,6 +3261,16 @@ fn on_config(app: &mut App, code: KeyCode) {
             if *selected == CFG_BOUND {
                 let name = app_name.clone();
                 open_bound_apps(app, name);
+                return;
+            }
+            if *selected == CFG_ENCRYPT_APP || *selected == CFG_DECRYPT_APP {
+                let name = app_name.clone();
+                let encrypt = *selected == CFG_ENCRYPT_APP;
+                // Both leave the config screen: they rewrite the very tree
+                // config.ini lives in, so unsaved edits here could not survive
+                // the move anyway.
+                app.editing_wine_game = None;
+                if encrypt { ask_encrypt_app(app, name) } else { ask_decrypt_app(app, name) }
                 return;
             }
             if has_wg && (*selected == CFG_GAME_EXE || *selected == CFG_GAME_PREFIX) {
@@ -3207,6 +3407,8 @@ pub fn setting_title(idx: usize) -> &'static str {
         CFG_MASTER_SHOW => "Stored passwords",
         CFG_MASTER_FORGET => "Forget master password",
         CFG_LOCK_ON_EXIT => "Lock on exit",
+        CFG_ENCRYPT_APP => "Encrypt this app",
+        CFG_DECRYPT_APP => "Remove encryption",
         _ => "Option",
     }
 }
@@ -3242,6 +3444,8 @@ pub fn setting_description(idx: usize) -> &'static str {
         CFG_MASTER_SHOW => "Show the container passwords held in the master store.\n\nThe only way to read a password that was generated rather than typed — those are never printed when they're created. Needs the master password if the store isn't already unlocked this boot.",
         CFG_MASTER_FORGET => "Forget the master key cached for this boot.\n\nThe store itself is untouched; only the cached key in $XDG_RUNTIME_DIR is dropped, so the next app needing a stored password asks for the master password again. Same as 'wryayer master lock'.",
         CFG_PASSWORD_SOURCE => "Where this app's VeraCrypt container password comes from.\n\n• prompt — you type it before every launch, and the container is unmounted again when the app exits. Nothing is stored on disk.\n• master — it is read from the master password store, which you unlock once per boot. The container then stays mounted until you lock it.",
+        CFG_ENCRYPT_APP => "Move this app into its own VeraCrypt container.\n\nThe whole tree — binaries, config, browser profile — is copied into an encrypted volume mounted over the app's normal directory. While it is locked nothing in there is readable, filenames included.\n\nThe container is sized from what the app currently occupies, plus headroom. Copying a large app takes a while; the plaintext original is kept until the copy is verified, so an interruption leaves the app exactly as it was.\n\nPress Enter to choose where the password comes from and start.",
+        CFG_DECRYPT_APP => "Move this app back out into a plain directory.\n\nThe container's contents are copied out, the container is deleted, and any password stored for it is forgotten. The app keeps working exactly as before — it is simply no longer encrypted at rest.\n\nPress Enter to confirm.",
         _ => "No description available.",
     }
 }
@@ -3916,10 +4120,12 @@ fn handle_master_action(app: &mut App, idx: usize) -> bool {
 fn on_settings_tab(app: &mut App, code: KeyCode) {
     match code {
         KeyCode::Up | KeyCode::Char('k') => {
-            app.global_selected = config_nav_step(true, false, false, CFG_SAVE, app.global_selected, -1);
+            app.global_selected =
+                config_nav_step(true, false, EncryptionRows::Hidden, CFG_SAVE, app.global_selected, -1);
         }
         KeyCode::Down | KeyCode::Char('j') => {
-            app.global_selected = config_nav_step(true, false, false, CFG_SAVE, app.global_selected, 1);
+            app.global_selected =
+                config_nav_step(true, false, EncryptionRows::Hidden, CFG_SAVE, app.global_selected, 1);
         }
         KeyCode::Right | KeyCode::Char(' ') => {
             if app.global_selected == CFG_SAVE {
@@ -4347,28 +4553,41 @@ fn on_ask_shortcut(app: &mut App, code: KeyCode) {
 // ── Container confirmation ────────────────────────────────────────────────────
 
 fn on_ask_encrypt(app: &mut App, code: KeyCode) {
-    let Screen::AskEncrypt { selected, .. } = &mut app.screen else { return };
-    if list_nav(selected, ENCRYPT_CHOICES.len(), code) {
+    let Screen::AskEncrypt { selected, kind, .. } = &mut app.screen else { return };
+    let kind = *kind;
+    if list_nav(selected, kind.choices().len(), code) {
         return;
     }
     match code {
         KeyCode::Esc | KeyCode::Char('q') => {
-            app.install_queue.clear();
+            // Only an install has a queue behind it; a conversion is one app.
+            if kind == EncryptAsk::Install {
+                app.install_queue.clear();
+            }
             app.screen = Screen::Main;
             app.needs_clear = true;
         }
         KeyCode::Enter | KeyCode::Char(' ') => {
             let screen = std::mem::replace(&mut app.screen, Screen::Main);
             if let Screen::AskEncrypt { title, mut args, selected, .. } = screen {
-                let extra = ENCRYPT_CHOICES[selected].2;
-                args.extend(extra.iter().map(|s| s.to_string()));
-                if extra.is_empty() {
-                    launch_op(app, title, args, None, true);
-                } else {
-                    let use_master = extra.contains(&"--encrypt-master");
-                    let generate = extra.contains(&"--encrypt-generate");
-                    begin_encrypted_install(app, title, args, use_master, generate);
+                // Index 0 is the "don't" option in both tables. For an install
+                // that still means running it, unencrypted; for a conversion
+                // there is nothing left to do.
+                if selected == 0 {
+                    if kind == EncryptAsk::Install {
+                        launch_op(app, title, args, None, true);
+                    } else {
+                        app.needs_clear = true;
+                    }
+                    return;
                 }
+                let extra = kind.choices()[selected].2;
+                args.extend(extra.iter().map(|s| s.to_string()));
+                let use_master =
+                    extra.contains(&"--encrypt-master") || extra.contains(&"--master");
+                let generate =
+                    extra.contains(&"--encrypt-generate") || extra.contains(&"--generate");
+                begin_encrypted_op(app, title, args, use_master, generate);
             }
         }
         _ => {}
@@ -4832,6 +5051,83 @@ mod op_log_tests {
     }
 
     #[test]
+    fn a_plain_app_is_offered_encryption() {
+        let rows = config_nav_order(false, false, EncryptionRows::Offer);
+        assert!(rows.contains(&CFG_ENCRYPT_APP));
+        assert!(!rows.contains(&CFG_DECRYPT_APP), "nothing to decrypt yet");
+        assert!(!rows.contains(&CFG_PASSWORD_SOURCE), "no container to configure");
+    }
+
+    #[test]
+    fn an_encrypted_app_is_offered_its_settings_and_the_way_out() {
+        let rows = config_nav_order(false, false, EncryptionRows::Manage);
+        assert!(rows.contains(&CFG_PASSWORD_SOURCE));
+        assert!(rows.contains(&CFG_LOCK_ON_EXIT));
+        assert!(rows.contains(&CFG_DECRYPT_APP));
+        assert!(!rows.contains(&CFG_ENCRYPT_APP), "already encrypted");
+    }
+
+    #[test]
+    fn an_app_that_cannot_be_encrypted_gets_no_section() {
+        let sections = config_sections(false, false, EncryptionRows::Hidden);
+        assert!(
+            !sections.iter().any(|(title, _)| *title == "Encryption"),
+            "an empty Encryption header would be worse than none"
+        );
+    }
+
+    #[test]
+    fn an_alias_is_never_offered_encryption() {
+        // An alias owns no tree — encrypting it would seal a near-empty
+        // directory and leave the real files in the open.
+        assert_eq!(EncryptionRows::for_app("no-such-app", true), EncryptionRows::Hidden);
+    }
+
+    #[test]
+    fn the_save_button_moves_down_as_encryption_rows_appear() {
+        // The Save index is derived from the row count; a stale one would make
+        // Enter on Save cycle a setting instead.
+        let hidden = app_cfg_save_idx(false, EncryptionRows::Hidden);
+        assert_eq!(app_cfg_save_idx(false, EncryptionRows::Offer), hidden + 1);
+        assert_eq!(app_cfg_save_idx(false, EncryptionRows::Manage), hidden + 3);
+    }
+
+    #[test]
+    fn navigation_reaches_every_encryption_row_and_then_save() {
+        // Rows the renderer draws but ↑/↓ cannot reach are invisible in
+        // practice — this is how the Encryption section shipped empty once.
+        let save = app_cfg_save_idx(false, EncryptionRows::Manage);
+        let mut seen = vec![];
+        let mut at = 0;
+        for _ in 0..save + 2 {
+            seen.push(at);
+            at = config_nav_step(false, false, EncryptionRows::Manage, save, at, 1);
+        }
+        for row in [CFG_PASSWORD_SOURCE, CFG_LOCK_ON_EXIT, CFG_DECRYPT_APP, save] {
+            assert!(seen.contains(&row), "row {row} unreachable: {seen:?}");
+        }
+    }
+
+    #[test]
+    fn converting_an_app_offers_a_way_to_back_out_first() {
+        // Index 0 is the "don't" option in both tables, which is what
+        // on_ask_encrypt keys its cancel path on.
+        assert!(CONVERT_CHOICES[0].2.is_empty());
+        assert_eq!(ENCRYPT_CHOICES[0].2.len(), CONVERT_CHOICES[0].2.len());
+    }
+
+    #[test]
+    fn convert_choices_pass_encrypt_flags_not_install_flags() {
+        // `wryayer encrypt` spells them --master/--generate; the install
+        // command spells them --encrypt-master/--encrypt-generate. Sending the
+        // wrong pair silently produces a prompt-source container.
+        let flags: Vec<&str> = CONVERT_CHOICES.iter().flat_map(|c| c.2.iter().copied()).collect();
+        assert!(flags.contains(&"--master"), "{flags:?}");
+        assert!(flags.contains(&"--generate"), "{flags:?}");
+        assert!(!flags.iter().any(|f| f.starts_with("--encrypt")), "{flags:?}");
+    }
+
+    #[test]
     fn a_locked_container_shows_a_closed_padlock() {
         assert_eq!(
             crate::tui::ui::encryption_glyphs(EncState { locked: true, master: false, fill: None }),
@@ -4948,6 +5244,79 @@ mod op_log_tests {
         app.encrypted_apps = HashMap::new();
         let out = render(&mut app, 110, 30);
         assert!(!out.contains("Encrypted:"), "encryption line shown for a plain app:\n{out}");
+    }
+
+    /// The config popup for `name`, with the encryption rows forced on.
+    fn config_screen(name: &str, selected: usize) -> App {
+        let mut app = App::new().unwrap();
+        app.installed = vec![stub_manifest(name)];
+        app.inst_state.select(Some(0));
+        app.screen = Screen::Config {
+            app_name: name.to_string(),
+            config: crate::config::AppConfig::default(),
+            selected,
+        };
+        app
+    }
+
+    #[test]
+    fn enter_on_the_encrypt_row_opens_the_password_source_choice() {
+        let mut app = config_screen("plainapp", CFG_ENCRYPT_APP);
+        handle_key(&mut app, KeyCode::Enter).unwrap();
+
+        let Screen::AskEncrypt { kind, args, selected, .. } = &app.screen else {
+            panic!("expected the encrypt choice screen");
+        };
+        assert_eq!(*kind, EncryptAsk::Convert);
+        assert_eq!(args, &["encrypt".to_string(), "plainapp".to_string()]);
+        assert_ne!(*selected, 0, "the cursor should not start on the back-out row");
+    }
+
+    #[test]
+    fn backing_out_of_the_encrypt_choice_runs_nothing() {
+        let mut app = config_screen("plainapp", CFG_ENCRYPT_APP);
+        handle_key(&mut app, KeyCode::Enter).unwrap();
+        // Move to the "leave it as it is" row and take it.
+        while !matches!(&app.screen, Screen::AskEncrypt { selected: 0, .. }) {
+            handle_key(&mut app, KeyCode::Up).unwrap();
+        }
+        handle_key(&mut app, KeyCode::Enter).unwrap();
+
+        assert!(
+            matches!(app.screen, Screen::Main),
+            "backing out must not start an operation"
+        );
+    }
+
+    #[test]
+    fn enter_on_the_decrypt_row_asks_for_confirmation_first() {
+        let mut app = config_screen("vaultapp", CFG_DECRYPT_APP);
+        handle_key(&mut app, KeyCode::Enter).unwrap();
+
+        let Screen::Confirm { action, .. } = &app.screen else {
+            panic!("expected a confirmation, got straight to work");
+        };
+        assert!(matches!(action, PendingAction::ConfirmedDecrypt(n) if n == "vaultapp"));
+    }
+
+    #[test]
+    fn left_on_an_action_row_does_nothing() {
+        // Left cycles a setting's value. On an action row there is no value —
+        // and starting a multi-gigabyte copy from a stray arrow key would be a
+        // nasty surprise.
+        let mut app = config_screen("plainapp", CFG_ENCRYPT_APP);
+        handle_key(&mut app, KeyCode::Left).unwrap();
+        assert!(matches!(app.screen, Screen::Config { .. }), "Left should stay put");
+    }
+
+    #[test]
+    fn the_encrypt_choice_screen_renders_its_options() {
+        let mut app = config_screen("plainapp", CFG_ENCRYPT_APP);
+        handle_key(&mut app, KeyCode::Enter).unwrap();
+        let out = render(&mut app, 100, 30);
+        assert!(out.contains("plainapp"), "{out}");
+        assert!(out.contains("master store"), "master option missing:\n{out}");
+        assert!(out.contains("Leave it as it is"), "no way back out:\n{out}");
     }
 
     #[test]

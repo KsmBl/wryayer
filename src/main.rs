@@ -180,11 +180,19 @@ enum Commands {
         /// Generate the password instead of typing one
         #[arg(long)]
         generate: bool,
+        /// Read the container/master/sudo passwords from stdin as key=value
+        /// lines. Used internally by the TUI, which collects them itself.
+        #[arg(long, hide = true)]
+        encrypt_secrets_stdin: bool,
     },
     /// Move an app out of its VeraCrypt container back into a plain directory
     Decrypt {
         /// The app name as shown by `wryayer list`
         app_name: String,
+        /// Read the container/master/sudo passwords from stdin as key=value
+        /// lines. Used internally by the TUI, which collects them itself.
+        #[arg(long, hide = true)]
+        encrypt_secrets_stdin: bool,
     },
     /// Unlock (mount) an encrypted app's container
     Unlock {
@@ -517,10 +525,14 @@ fn main() {
         Commands::SnapshotDelete { app_name, snapshot } => {
             commands::snapshot::delete(&app_name, &snapshot)
         }
-        Commands::Encrypt { app_name, master, generate } => {
-            commands::encrypt::run(&app_name, master, generate)
+        Commands::Encrypt { app_name, master, generate, encrypt_secrets_stdin } => {
+            commands::encrypt::supplied_secrets(encrypt_secrets_stdin)
+                .and_then(|s| commands::encrypt::run_with(&app_name, master, generate, &s))
         }
-        Commands::Decrypt { app_name } => commands::encrypt::decrypt(&app_name),
+        Commands::Decrypt { app_name, encrypt_secrets_stdin } => {
+            commands::encrypt::supplied_secrets(encrypt_secrets_stdin)
+                .and_then(|s| commands::encrypt::decrypt_with(&app_name, &s))
+        }
         Commands::Unlock { app_name } => commands::encrypt::unlock(&app_name),
         Commands::Lock { app_name } => commands::encrypt::lock(&app_name),
         Commands::Grow { app_name, to } => commands::encrypt::grow(&app_name, to.as_deref()),

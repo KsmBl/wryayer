@@ -120,6 +120,19 @@ pub fn prepare(
     Ok(Prepared { password, use_master })
 }
 
+/// Collect secrets from stdin when the caller says they're there, and nothing
+/// otherwise.
+///
+/// The TUI collects passwords in its own overlays — it owns the terminal, so a
+/// child that prompts would be painted over — and passes them down this way.
+pub fn supplied_secrets(from_stdin: bool) -> Result<SuppliedSecrets> {
+    if from_stdin {
+        SuppliedSecrets::from_stdin()
+    } else {
+        Ok(SuppliedSecrets::default())
+    }
+}
+
 /// Move `app_name`'s tree into a new VeraCrypt container.
 ///
 /// `use_master` stores the container password in the master password store
@@ -127,7 +140,17 @@ pub fn prepare(
 /// `generate` produces the password with the multi-source generator rather than
 /// asking the user to type one.
 pub fn run(app_name: &str, use_master: bool, generate: bool) -> Result<()> {
-    let prepared = prepare(app_name, use_master, generate, &SuppliedSecrets::default())?;
+    run_with(app_name, use_master, generate, &SuppliedSecrets::default())
+}
+
+/// [`run`], using secrets the caller has already collected.
+pub fn run_with(
+    app_name: &str,
+    use_master: bool,
+    generate: bool,
+    supplied: &SuppliedSecrets,
+) -> Result<()> {
+    let prepared = prepare(app_name, use_master, generate, supplied)?;
     run_prepared(app_name, prepared)
 }
 
@@ -357,10 +380,16 @@ pub fn recover_interrupted_encrypt(app_name: &str) -> Result<()> {
 
 /// Move `app_name`'s tree out of its container and delete the container.
 pub fn decrypt(app_name: &str) -> Result<()> {
+    decrypt_with(app_name, &SuppliedSecrets::default())
+}
+
+/// [`decrypt`], using secrets the caller has already collected.
+pub fn decrypt_with(app_name: &str, supplied: &SuppliedSecrets) -> Result<()> {
     if !veracrypt::is_encrypted(app_name) {
         bail!("'{app_name}' is not stored in an encrypted container");
     }
-    ensure_unlocked(app_name)?;
+    // The tree has to be readable before it can be copied out.
+    unlock_and_password(app_name, supplied)?;
 
     let dir = app_dir(app_name)?;
     let staging = decrypt_staging_dir(app_name)?;
@@ -465,10 +494,10 @@ pub fn unlock_and_password(
     app_name: &str,
     supplied: &SuppliedSecrets,
 ) -> Result<Zeroizing<String>> {
-    let password = match &supplied.container {
-        Some(pw) => pw.clone(),
-        None => resolve_password(app_name)?,
-    };
+    if let Some(sudo) = &supplied.sudo {
+        veracrypt::prime_sudo(sudo)?;
+    }
+    let password = resolve_password_with(app_name, supplied)?;
     // No-op when it is already mounted.
     veracrypt::mount(app_name, &password)?;
     Ok(password)
@@ -476,7 +505,25 @@ pub fn unlock_and_password(
 
 /// Look up or ask for `app_name`'s container password.
 fn resolve_password(app_name: &str) -> Result<Zeroizing<String>> {
+    resolve_password_with(app_name, &SuppliedSecrets::default())
+}
+
+/// [`resolve_password`], preferring anything the caller already collected.
+///
+/// A supplied master password is used to *open* the store rather than as the
+/// answer itself, which also caches this boot's key — so nothing further down
+/// the operation drops to a prompt on a terminal the TUI is painting over.
+fn resolve_password_with(
+    app_name: &str,
+    supplied: &SuppliedSecrets,
+) -> Result<Zeroizing<String>> {
+    if let Some(pw) = &supplied.container {
+        return Ok(pw.clone());
+    }
     if password_source(app_name) == PasswordSource::Master {
+        if let Some(master) = &supplied.master {
+            crate::secrets::open(master)?;
+        }
         if let Some(pw) = password_from_master(app_name)? {
             return Ok(pw);
         }

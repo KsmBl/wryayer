@@ -10,7 +10,7 @@ use crate::commands::dedup::format_bytes;
 use crate::config::{AppConfig, AvahiMode, LocalDelete, TempMode};
 
 use super::{
-    App, EncState, Screen, Tab, CFG_SAVE, CFG_SHARES, CFG_GAME_EXE, CFG_GAME_PREFIX,
+    App, EncState, EncryptAsk, EncryptionRows, Screen, Tab, CFG_SAVE, CFG_SHARES, CFG_GAME_EXE, CFG_GAME_PREFIX,
     CFG_RAM_LIMIT, CFG_SPOOF_CPUINFO, CFG_SPOOF_UPTIME, CFG_USB,
     app_cfg_save_idx, setting_description, setting_options, setting_current, setting_title,
     HOSTNAME_SAMPLE, MACHINE_ID_SAMPLE, USERNAME_SAMPLE,
@@ -242,7 +242,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             let config = config.clone();
             let selected = *selected;
             let wine_game = app.editing_wine_game.clone();
-            draw_config(f, area, &app_name, &config, selected, wine_game.as_ref());
+            let encryption = app.encryption_rows_for(&app_name);
+            draw_config(f, area, &app_name, &config, selected, wine_game.as_ref(), encryption);
         }
         Screen::SharedDirs { app_name, dirs, selected } => {
             let app_name = app_name.clone();
@@ -301,7 +302,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             // For app configs draw the Config popup as backing; for the global
             // Settings tab the 2-panel background is already rendered.
             if !app_name.is_empty() {
-                draw_config(f, area, &app_name, &config, setting_idx, wine_game.as_ref());
+                draw_config(f, area, &app_name, &config, setting_idx, wine_game.as_ref(),
+                    app.encryption_rows_for(&app_name));
             }
             draw_option_picker(f, area, setting_idx, selected, &config);
         }
@@ -311,7 +313,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             let back_selected = *back_selected;
             let wine_game = app.editing_wine_game.clone();
             if !app_name.is_empty() {
-                draw_config(f, area, &app_name, &config, back_selected, wine_game.as_ref());
+                draw_config(f, area, &app_name, &config, back_selected, wine_game.as_ref(),
+                    app.encryption_rows_for(&app_name));
             }
             draw_setting_help(f, area, back_selected);
         }
@@ -322,7 +325,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             let picker_selected = *picker_selected;
             let wine_game = app.editing_wine_game.clone();
             if !app_name.is_empty() {
-                draw_config(f, area, &app_name, &config, setting_idx, wine_game.as_ref());
+                draw_config(f, area, &app_name, &config, setting_idx, wine_game.as_ref(),
+                    app.encryption_rows_for(&app_name));
             }
             draw_option_picker(f, area, setting_idx, picker_selected, &config);
             draw_option_help(f, area, setting_idx, picker_selected);
@@ -335,7 +339,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             let value = value.clone();
             let wine_game = app.editing_wine_game.clone();
             if !app_name.is_empty() {
-                draw_config(f, area, &app_name, &config, back_selected, wine_game.as_ref());
+                draw_config(f, area, &app_name, &config, back_selected, wine_game.as_ref(),
+                    app.encryption_rows_for(&app_name));
             }
             let title = match field_idx {
                 CFG_GAME_EXE    => "Game Exe path",
@@ -394,10 +399,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             let selected = *selected;
             draw_ask_shortcut(f, area, &pkg, selected);
         }
-        Screen::AskEncrypt { pkg, selected, .. } => {
+        Screen::AskEncrypt { pkg, selected, kind, .. } => {
             let pkg = pkg.clone();
             let selected = *selected;
-            draw_ask_encrypt(f, area, &pkg, selected);
+            let kind = *kind;
+            draw_ask_encrypt(f, area, &pkg, selected, kind);
         }
         Screen::RevealPasswords { entries, value, selected, error } => {
             let entries = entries.clone();
@@ -447,7 +453,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             let wine_game = app.editing_wine_game.clone();
             // Back the popup with the per-app Config screen (global uses the tabs).
             if !app_name.is_empty() {
-                draw_config(f, area, &app_name, &config, CFG_SPOOF_CPUINFO, wine_game.as_ref());
+                draw_config(f, area, &app_name, &config, CFG_SPOOF_CPUINFO, wine_game.as_ref(),
+                    app.encryption_rows_for(&app_name));
             }
             let editing_ref = editing.as_ref().map(|(s, c)| (s.as_str(), *c));
             draw_cpu_config(f, area, &draft, selected, editing_ref);
@@ -1724,7 +1731,7 @@ fn draw_settings_tab(f: &mut Frame, app: &mut App, area: Rect) {
     // visible; the separator + Save button stay pinned at the bottom.
     enum Item { Header(&'static str), Row(usize) }
     let mut items: Vec<Item> = Vec::with_capacity(rows.len() + 4);
-    for (title, idxs) in super::config_sections(true, false, false) {
+    for (title, idxs) in super::config_sections(true, false, EncryptionRows::Hidden) {
         items.push(Item::Header(title));
         for idx in idxs {
             if idx < rows.len() {
@@ -1915,6 +1922,7 @@ fn draw_config(
     config: &AppConfig,
     selected: usize,
     wine_game: Option<&(String, String)>,
+    encryption: EncryptionRows,
 ) {
     let popup = centered_rect(54, 92, area);
     f.render_widget(Clear, popup);
@@ -2030,7 +2038,7 @@ fn draw_config(
     // addresses rows by CFG index and silently drops any that sit past the end,
     // which is how the Encryption rows came to have a section header and no
     // rows under it.
-    while rows.len() <= super::CFG_LOCK_ON_EXIT {
+    while rows.len() <= super::CFG_DECRYPT_APP {
         rows.push(("", String::new()));
     }
     rows[CFG_SPOOF_UPTIME] = ("Spoof upt. ", uptime_val);
@@ -2044,10 +2052,12 @@ fn draw_config(
     );
     rows[super::CFG_LOCK_ON_EXIT] =
         ("Lock on exit", b(config.lock_on_exit).to_string());
+    // Action rows: their "value" is what pressing Enter does, not a setting.
+    rows[super::CFG_ENCRYPT_APP] = ("Encryption ", "encrypt  →".to_string());
+    rows[super::CFG_DECRYPT_APP] = ("Encryption ", "remove   →".to_string());
 
     let has_wg = wine_game.is_some();
-    let is_enc = crate::veracrypt::is_encrypted(app_name);
-    let save_idx = app_cfg_save_idx(has_wg, is_enc);
+    let save_idx = app_cfg_save_idx(has_wg, encryption);
 
     // Save is pinned to the bottom so it's always reachable on small terminals.
     let save_y = inner.y + inner.height.saturating_sub(2);
@@ -2057,7 +2067,7 @@ fn draw_config(
     // tab and ↑/↓ navigation. Headers are non-selectable lines between rows.
     enum Item { Header(&'static str), Row(usize) }
     let mut items: Vec<Item> = Vec::with_capacity(rows.len() + 4);
-    for (title, idxs) in super::config_sections(false, has_wg, is_enc) {
+    for (title, idxs) in super::config_sections(false, has_wg, encryption) {
         items.push(Item::Header(title));
         for idx in idxs {
             if idx < rows.len() {
@@ -2925,8 +2935,8 @@ fn draw_ask_shortcut(f: &mut Frame, area: Rect, pkg: &str, selected: usize) {
     );
 }
 
-fn draw_ask_encrypt(f: &mut Frame, area: Rect, pkg: &str, selected: usize) {
-    use super::ENCRYPT_CHOICES;
+fn draw_ask_encrypt(f: &mut Frame, area: Rect, pkg: &str, selected: usize, kind: EncryptAsk) {
+    let choices = kind.choices();
     let inner = popup_frame(f, area, 62, 48, "Encrypted container?", c_accent());
 
     let chunks = Layout::default()
@@ -2940,21 +2950,26 @@ fn draw_ask_encrypt(f: &mut Frame, area: Rect, pkg: &str, selected: usize) {
         ])
         .split(inner);
 
+    let lead = match kind {
+        EncryptAsk::Install => "  Store ",
+        EncryptAsk::Convert => "  Move ",
+    };
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("  Store ", Style::default().fg(c_dim())),
+            Span::styled(lead, Style::default().fg(c_dim())),
             Span::styled(pkg, Style::default().fg(c_fg()).add_modifier(Modifier::BOLD)),
-            Span::styled(" in its own VeraCrypt container?", Style::default().fg(c_dim())),
+            Span::styled(" into its own VeraCrypt container?", Style::default().fg(c_dim())),
         ])),
         chunks[0],
     );
 
-    let items: Vec<ListItem> = ENCRYPT_CHOICES
+    let items: Vec<ListItem> = choices
         .iter()
         .enumerate()
-        .map(|(i, (label, desc, extra))| {
+        .map(|(i, (label, desc, _))| {
             let is_sel = i == selected;
-            let color = if extra.is_empty() { c_dim() } else { c_green() };
+            // Index 0 backs out in both tables, so it never reads as a go-ahead.
+            let color = if i == 0 { c_dim() } else { c_green() };
             ListItem::new(Line::from(vec![
                 Span::styled(if is_sel { " ▶ " } else { "   " }, Style::default().fg(c_accent())),
                 Span::styled(
@@ -2973,11 +2988,12 @@ fn draw_ask_encrypt(f: &mut Frame, area: Rect, pkg: &str, selected: usize) {
     let list = List::new(items).highlight_style(Style::default().bg(c_select()));
     f.render_stateful_widget(list, chunks[1], &mut list_state);
 
-    // Encrypting drops out of the TUI, so say so before it happens.
-    let note = if selected == 0 {
-        "  The app is installed normally, in a plain directory.".to_string()
-    } else {
-        "  Runs on the terminal: VeraCrypt asks for sudo to mount.".to_string()
+    let note = match (kind, selected) {
+        (EncryptAsk::Install, 0) => "  The app is installed normally, in a plain directory.",
+        (EncryptAsk::Convert, 0) => "  Nothing is moved; the app stays as it is.",
+        // Both copy the whole tree into a fresh volume, which is the part worth
+        // warning about before someone starts it on a 10 GiB game.
+        _ => "  Copies the whole app into a new container — this can take a while.",
     };
     f.render_widget(
         Paragraph::new(Span::styled(note, Style::default().fg(c_dim()))),
