@@ -53,6 +53,10 @@ pub fn run(app_name: &str, bin: Option<&str>, args: &[String]) -> Result<()> {
         crate::commands::encrypt::recover_interrupted_encrypt(&fs_root_name)?;
         crate::commands::encrypt::ensure_unlocked(&fs_root_name)?;
     }
+    // The container is open now, so this is the first point its fill level can
+    // be read — and the last point before the app starts writing into it.
+    crate::commands::encrypt::warn_if_nearly_full(&fs_root_name);
+
     let app_root = app_dir(&fs_root_name)?;
     if !app_root.exists() {
         bail!(

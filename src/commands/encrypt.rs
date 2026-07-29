@@ -662,6 +662,31 @@ fn status_row(
     format!("{name:<24} {state:<10} {size:>10} {used:>10} {fill:>6}  {source}")
 }
 
+/// Warn on stderr if `app_name`'s container is nearly full.
+///
+/// Called at launch: that is the moment the user is present, and the moment
+/// before the app starts writing. Waiting for the app itself to hit ENOSPC
+/// hands the user a failure from inside a sandbox with no explanation.
+///
+/// Never fails a launch. A container that can't be measured is not a reason to
+/// refuse to start the app.
+pub fn warn_if_nearly_full(app_name: &str) {
+    if !veracrypt::is_encrypted(app_name) {
+        return;
+    }
+    // Mounted by now — `ensure_unlocked` runs before this on every launch path.
+    let Some(usage) = veracrypt::usage(app_name) else { return };
+    let pct = usage.percent_used();
+    if pct < veracrypt::FULL_WARN_PERCENT {
+        return;
+    }
+    eprintln!(
+        "warning: '{app_name}' container is {pct}% full — {} left.",
+        human_size(usage.available)
+    );
+    eprintln!("{}", grow_hint(app_name));
+}
+
 /// What to tell a user whose container is nearly full.
 ///
 /// A warning with no remedy is just noise, so it always names the command that
