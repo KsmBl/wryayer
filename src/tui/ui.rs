@@ -883,6 +883,40 @@ fn draw_detail(f: &mut Frame, app: &mut App, area: Rect) {
             dim,
         ));
         lines.push(Line::from(spans));
+
+        // Only readable while the container is open, which is also the only
+        // time the number can go stale — so it sits under the state, not
+        // beside it.
+        if let Some(usage) = state.fill {
+            let pct = usage.percent_used();
+            let colour = if pct >= crate::veracrypt::FULL_WARN_PERCENT {
+                c_red()
+            } else if pct >= 75 {
+                c_yellow()
+            } else {
+                c_green()
+            };
+            lines.push(Line::from(vec![
+                Span::styled("  Container:  ", dim),
+                Span::styled(
+                    format!(
+                        "{} / {} ({pct}%)",
+                        format_bytes(usage.used),
+                        format_bytes(usage.used + usage.available)
+                    ),
+                    Style::default().fg(colour),
+                ),
+            ]));
+            // On its own line: appended to the one above it would be the first
+            // thing clipped by a narrow details pane, which is exactly the
+            // wrong thing to lose.
+            if pct >= crate::veracrypt::FULL_WARN_PERCENT {
+                lines.push(Line::from(Span::styled(
+                    format!("              nearly full — wryayer grow {}", m.app.name),
+                    Style::default().fg(c_red()),
+                )));
+            }
+        }
     }
 
     if let Some(new_ver) = app.update_available.get(&m.app.name) {

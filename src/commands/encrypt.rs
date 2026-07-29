@@ -550,6 +550,154 @@ pub fn relock_on_exit(app_name: &str, relock: bool) {
     }
 }
 
+// ── Growing a container ───────────────────────────────────────────────────────
+
+/// Rebuild `app_name`'s container at a larger size, keeping its contents.
+///
+/// Containers are sized generously at creation precisely so this is rare, but a
+/// long-lived app — a browser accumulating a profile and cache — eventually
+/// fills one, and VeraCrypt cannot resize a volume in place. Merge installs
+/// already grow the parent automatically; this is the same operation for the
+/// case where nothing is being installed and the app simply needs more room.
+///
+/// `to` is a size like `8G` or `512M`; without it the container is re-sized the
+/// way a fresh one would be for the data it currently holds, so it comes out
+/// with the same headroom a new container would have had.
+pub fn grow(app_name: &str, to: Option<&str>) -> Result<()> {
+    if !veracrypt::is_encrypted(app_name) {
+        bail!("'{app_name}' is not stored in an encrypted container");
+    }
+    let requested = to.map(parse_size).transpose()?;
+
+    // Growing copies the contents out and back, so the volume has to be open.
+    // This also makes `usage` below meaningful.
+    let password = unlock_and_password(app_name, &SuppliedSecrets::default())?;
+
+    let container = veracrypt::container_path(app_name)?;
+    let current = std::fs::metadata(&container)
+        .with_context(|| format!("failed to stat {}", container.display()))?
+        .len();
+
+    let target = match requested {
+        Some(size) => size,
+        None => {
+            let used = veracrypt::usage(app_name)
+                .map(|u| u.used)
+                .unwrap_or_else(|| veracrypt::tree_size(&app_dir(app_name).unwrap_or_default()));
+            // Never settle for less than half again as much: re-running the
+            // creation rule on a container that is merely half full would
+            // otherwise "grow" it to roughly its current size.
+            veracrypt::recommended_size(used).max(current + current / 2)
+        }
+    };
+
+    if target <= current {
+        bail!(
+            "'{app_name}' is already {} — nothing to grow to {}",
+            human_size(current),
+            human_size(target)
+        );
+    }
+
+    println!(
+        "Growing '{app_name}' from {} to {}.",
+        human_size(current),
+        human_size(target)
+    );
+    println!("This copies the whole container and may take a while.");
+    println!("The original is kept until the copy is verified, so an interruption is safe.");
+    veracrypt::grow(app_name, target, &password)
+}
+
+/// Parse a human size like `8G`, `512M`, `1.5GiB` or a plain byte count.
+///
+/// Binary units throughout — a container's size is a filesystem size, and every
+/// other size wryayer prints is powers of two.
+fn parse_size(spec: &str) -> Result<u64> {
+    let spec = spec.trim();
+    let digits_end = spec
+        .find(|c: char| !c.is_ascii_digit() && c != '.')
+        .unwrap_or(spec.len());
+    let (number, unit) = spec.split_at(digits_end);
+    let number: f64 = number
+        .parse()
+        .with_context(|| format!("'{spec}' is not a size (try 8G, 512M or 2048K)"))?;
+    if !number.is_finite() || number < 0.0 {
+        bail!("'{spec}' is not a size (try 8G, 512M or 2048K)");
+    }
+
+    // Accept the shorthand and the pedantic spelling of each unit alike.
+    let multiplier: u64 = match unit.trim().to_ascii_uppercase().as_str() {
+        "" | "B" => 1,
+        "K" | "KB" | "KIB" => 1024,
+        "M" | "MB" | "MIB" => 1024 * 1024,
+        "G" | "GB" | "GIB" => 1024 * 1024 * 1024,
+        "T" | "TB" | "TIB" => 1024_u64.pow(4),
+        other => bail!("unknown size unit '{other}' (try K, M, G or T)"),
+    };
+
+    let bytes = number * multiplier as f64;
+    if bytes > u64::MAX as f64 {
+        bail!("'{spec}' is too large to be a container size");
+    }
+    Ok(bytes as u64)
+}
+
+/// Format one row of the encryption status table.
+///
+/// A locked container has no readable fill: it isn't mounted, and asking the
+/// unmounted mount point would answer for the host filesystem instead. Those
+/// columns are dashed rather than guessed at.
+fn status_row(
+    name: &str,
+    state: &str,
+    size: &str,
+    usage: Option<veracrypt::Usage>,
+    source: &str,
+) -> String {
+    let (used, fill) = match usage {
+        Some(u) => (human_size(u.used), format!("{}%", u.percent_used())),
+        None => ("—".to_string(), "—".to_string()),
+    };
+    format!("{name:<24} {state:<10} {size:>10} {used:>10} {fill:>6}  {source}")
+}
+
+/// Warn on stderr if `app_name`'s container is nearly full.
+///
+/// Called at launch: that is the moment the user is present, and the moment
+/// before the app starts writing. Waiting for the app itself to hit ENOSPC
+/// hands the user a failure from inside a sandbox with no explanation.
+///
+/// Never fails a launch. A container that can't be measured is not a reason to
+/// refuse to start the app.
+pub fn warn_if_nearly_full(app_name: &str) {
+    if !veracrypt::is_encrypted(app_name) {
+        return;
+    }
+    // Mounted by now — `ensure_unlocked` runs before this on every launch path.
+    let Some(usage) = veracrypt::usage(app_name) else { return };
+    let pct = usage.percent_used();
+    if pct < veracrypt::FULL_WARN_PERCENT {
+        return;
+    }
+    eprintln!(
+        "warning: '{app_name}' container is {pct}% full — {} left.",
+        human_size(usage.available)
+    );
+    eprintln!("{}", grow_hint(app_name));
+}
+
+/// What to tell a user whose container is nearly full.
+///
+/// A warning with no remedy is just noise, so it always names the command that
+/// fixes it.
+pub fn grow_hint(app_name: &str) -> String {
+    format!(
+        "The app will start failing to write once it is full. Give it more room with:\n    \
+         wryayer grow {app_name}"
+    )
+}
+
 // ── Status ────────────────────────────────────────────────────────────────────
 
 /// Print every encrypted app and whether it is currently unlocked.
@@ -563,21 +711,39 @@ pub fn status() -> Result<()> {
     if encrypted.is_empty() {
         println!("No apps are stored in encrypted containers.");
     } else {
-        println!("{:<24} {:<10} {:>10}  SOURCE", "APP", "STATE", "SIZE");
+        println!(
+            "{:<24} {:<10} {:>10} {:>10} {:>6}  SOURCE",
+            "APP", "STATE", "SIZE", "USED", "FILL"
+        );
+        let mut crowded: Vec<(&str, u64)> = Vec::new();
         for m in encrypted {
             let name = &m.app.name;
-            let state = if veracrypt::is_mounted(name)? { "unlocked" } else { "locked" };
+            let mounted = veracrypt::is_mounted(name)?;
+            let state = if mounted { "unlocked" } else { "locked" };
             let size = veracrypt::container_path(name)
                 .ok()
                 .and_then(|p| std::fs::metadata(p).ok())
                 .map(|md| human_size(md.len()))
                 .unwrap_or_else(|| "?".into());
+            // Fill is only knowable while the container is mounted — statvfs on
+            // an unmounted mount point would describe the host filesystem.
+            let usage = if mounted { veracrypt::usage(name) } else { None };
+            if let Some(pct) = usage.map(|u| u.percent_used()) {
+                if pct >= veracrypt::FULL_WARN_PERCENT {
+                    crowded.push((name.as_str(), pct));
+                }
+            }
             // Read through the marker, so this stays accurate while locked.
             let source = match password_source(name) {
                 PasswordSource::Master => "master",
                 PasswordSource::Prompt => "prompt",
             };
-            println!("{name:<24} {state:<10} {size:>10}  {source}");
+            println!("{}", status_row(name, state, &size, usage, source));
+        }
+        for (name, pct) in crowded {
+            println!();
+            println!("warning: '{name}' is {pct}% full.");
+            println!("{}", grow_hint(name));
         }
     }
 
@@ -1040,6 +1206,66 @@ mod tests {
                 decrypt_staging_dir("app").unwrap()
             );
         });
+    }
+
+    #[test]
+    fn a_locked_container_reports_no_fill_rather_than_a_wrong_one() {
+        // statvfs on an unmounted mount point describes whatever ~/.wryayer
+        // sits on, which would look like a perfectly plausible answer.
+        let row = status_row("vault", "locked", "763 MB", None, "master");
+        assert!(row.contains('—'), "{row}");
+        assert!(!row.contains('%'), "a locked container cannot have a fill: {row}");
+    }
+
+    #[test]
+    fn a_mounted_container_reports_used_bytes_and_fill() {
+        let usage = veracrypt::Usage {
+            used: 900 * 1024 * 1024,
+            available: 100 * 1024 * 1024,
+            total: 1024 * 1024 * 1024,
+        };
+        let row = status_row("vault", "unlocked", "1.0 GB", Some(usage), "prompt");
+        assert!(row.contains("900 MB"), "{row}");
+        assert!(row.contains("90%"), "{row}");
+    }
+
+    #[test]
+    fn the_fill_warning_names_the_command_that_fixes_it() {
+        // A warning the user cannot act on is just noise.
+        let hint = grow_hint("vault");
+        assert!(hint.contains("wryayer grow vault"), "{hint}");
+    }
+
+    #[test]
+    fn sizes_are_parsed_in_binary_units() {
+        assert_eq!(parse_size("512").unwrap(), 512);
+        assert_eq!(parse_size("2K").unwrap(), 2048);
+        assert_eq!(parse_size("4M").unwrap(), 4 * 1024 * 1024);
+        assert_eq!(parse_size("8G").unwrap(), 8 * 1024 * 1024 * 1024);
+        assert_eq!(parse_size("1T").unwrap(), 1024_u64.pow(4));
+    }
+
+    #[test]
+    fn size_units_are_accepted_however_they_are_spelled() {
+        // Someone who types GiB means the same thing as someone who types g.
+        let expected = 3 * 1024 * 1024 * 1024;
+        for spec in ["3G", "3g", "3GB", "3gb", "3GiB", "3gib", " 3G "] {
+            assert_eq!(parse_size(spec).unwrap(), expected, "{spec}");
+        }
+    }
+
+    #[test]
+    fn fractional_sizes_work() {
+        assert_eq!(parse_size("1.5G").unwrap(), 1536 * 1024 * 1024);
+    }
+
+    #[test]
+    fn nonsense_sizes_are_rejected_rather_than_guessed_at() {
+        // Silently reading "big" as some default would rebuild a multi-gigabyte
+        // container at a size nobody asked for.
+        for spec in ["", "big", "G", "8X", "-4G", "8 gigs"] {
+            assert!(parse_size(spec).is_err(), "{spec:?} should not parse");
+        }
     }
 
     #[test]

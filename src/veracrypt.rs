@@ -292,20 +292,73 @@ pub fn is_locked(app_name: &str) -> bool {
     is_encrypted(app_name) && !is_mounted(app_name).unwrap_or(false)
 }
 
-/// Free bytes inside `app_name`'s mounted container, or `None` if it isn't
-/// mounted (or the filesystem can't be queried).
-pub fn free_space(app_name: &str) -> Option<u64> {
+/// How full a container's filesystem is.
+///
+/// `used + available` is deliberately *not* `total`: ext4 reserves a slice for
+/// root that an unprivileged process can never write into. Reporting a
+/// container as 95% full while `df` says 100% would be worse than useless right
+/// when the user needs to act, so the percentage below is computed the way `df`
+/// computes its Use% — over what is actually reachable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Usage {
+    /// Bytes occupied by files.
+    pub used: u64,
+    /// Bytes an unprivileged process may still write.
+    pub available: u64,
+    /// The filesystem's nominal size, reserve included.
+    pub total: u64,
+}
+
+impl Usage {
+    /// Percentage of the reachable space that is in use, as `df` reports it.
+    pub fn percent_used(&self) -> u64 {
+        let reachable = self.used + self.available;
+        if reachable == 0 {
+            return 0;
+        }
+        // Round up, so "99%" never appears for a filesystem with nothing left.
+        (self.used * 100).div_ceil(reachable)
+    }
+}
+
+/// Space accounting for the filesystem mounted at `app_name`'s directory, or
+/// `None` if it can't be queried.
+///
+/// Only meaningful once the container is mounted: `statvfs` on an unmounted
+/// mount point describes whatever filesystem `~/.wryayer` sits on, which is a
+/// plausible-looking wrong answer. Callers know their own mount state —
+/// [`is_mounted`] costs a fork, so this doesn't pay for one on every call.
+pub fn usage(app_name: &str) -> Option<Usage> {
     let dir = crate::manifest::app_dir(app_name).ok()?;
     let c_path = std::ffi::CString::new(dir.as_os_str().as_encoded_bytes()).ok()?;
     // SAFETY: c_path is a valid NUL-terminated string; statvfs only writes to sv.
-    unsafe {
+    let sv = unsafe {
         let mut sv: libc::statvfs = std::mem::zeroed();
         if libc::statvfs(c_path.as_ptr(), &mut sv) != 0 {
             return None;
         }
-        Some(sv.f_bavail as u64 * sv.f_frsize as u64)
-    }
+        sv
+    };
+    let frsize = sv.f_frsize as u64;
+    Some(Usage {
+        used: (sv.f_blocks as u64).saturating_sub(sv.f_bfree as u64) * frsize,
+        available: sv.f_bavail as u64 * frsize,
+        total: sv.f_blocks as u64 * frsize,
+    })
 }
+
+/// Free bytes inside `app_name`'s mounted container. Same caveat as [`usage`]:
+/// the caller is the one that knows whether the container is mounted.
+pub fn free_space(app_name: &str) -> Option<u64> {
+    usage(app_name).map(|u| u.available)
+}
+
+/// How full a container has to get before wryayer says so unprompted.
+///
+/// Growing a container costs a full copy of the volume, so the warning has to
+/// arrive while there is still room to work — not at the point where the app
+/// has already failed to write.
+pub const FULL_WARN_PERCENT: u64 = 90;
 
 /// How much a compressed package archive is assumed to expand to on disk.
 ///
@@ -383,7 +436,7 @@ pub fn ensure_room_for(app_name: &str, archive_bytes: u64, password: &str) -> Re
 }
 
 /// Rebuild `app_name`'s container at `new_size`, preserving its contents.
-fn grow(app_name: &str, new_size: u64, password: &str) -> Result<()> {
+pub fn grow(app_name: &str, new_size: u64, password: &str) -> Result<()> {
     let container = container_path(app_name)?;
     let bigger = container.with_extension("hc.growing");
     let mount_point = crate::manifest::app_dir(app_name)?;
@@ -851,6 +904,40 @@ fn take_ownership_of_lost_found(mount_point: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fill_is_measured_against_reachable_space_not_nominal_size() {
+        // ext4 reserves a slice for root. A container 100% full as far as the
+        // app is concerned still has that reserve free, and reporting 95% at
+        // the moment writes start failing would be actively misleading.
+        let u = Usage { used: 950, available: 0, total: 1000 };
+        assert_eq!(u.percent_used(), 100);
+    }
+
+    #[test]
+    fn fill_rounds_up_so_full_never_reads_as_nearly_full() {
+        // 1 byte left out of a million must not round down to 99%.
+        let u = Usage { used: 999_999, available: 1, total: 1_000_000 };
+        assert_eq!(u.percent_used(), 100);
+    }
+
+    #[test]
+    fn an_empty_container_is_zero_percent() {
+        let u = Usage { used: 0, available: 1024, total: 1024 };
+        assert_eq!(u.percent_used(), 0);
+    }
+
+    #[test]
+    fn a_container_with_no_reachable_space_does_not_divide_by_zero() {
+        let u = Usage { used: 0, available: 0, total: 0 };
+        assert_eq!(u.percent_used(), 0);
+    }
+
+    #[test]
+    fn half_full_is_half_full() {
+        let u = Usage { used: 512, available: 512, total: 1024 };
+        assert_eq!(u.percent_used(), 50);
+    }
 
     #[test]
     fn parses_a_mounted_volume_line() {

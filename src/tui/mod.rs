@@ -931,6 +931,10 @@ pub struct EncState {
     /// Its password is in the master store, so unlocking needs no typing once
     /// the store itself has been opened for this boot.
     pub master: bool,
+    /// How full the container is, once it is open enough to ask. `None` while
+    /// locked — an unmounted mount point answers for the host filesystem, and a
+    /// plausible wrong number is worse here than no number.
+    pub fill: Option<crate::veracrypt::Usage>,
 }
 
 /// Map every encrypted app to the state of its container.
@@ -962,7 +966,8 @@ fn scan_encrypted_apps(installed: &[Manifest]) -> HashMap<String, EncState> {
         // config.ini holding the same value is unreachable.
         let master = crate::commands::encrypt::password_source(name)
             == crate::config::PasswordSource::Master;
-        out.insert(name.to_string(), EncState { locked: !is_mounted, master });
+        let fill = is_mounted.then(|| crate::veracrypt::usage(name)).flatten();
+        out.insert(name.to_string(), EncState { locked: !is_mounted, master, fill });
     }
     out
 }
@@ -4829,7 +4834,7 @@ mod op_log_tests {
     #[test]
     fn a_locked_container_shows_a_closed_padlock() {
         assert_eq!(
-            crate::tui::ui::encryption_glyphs(EncState { locked: true, master: false }),
+            crate::tui::ui::encryption_glyphs(EncState { locked: true, master: false, fill: None }),
             ("🔒", None)
         );
     }
@@ -4837,7 +4842,7 @@ mod op_log_tests {
     #[test]
     fn an_open_container_shows_an_open_padlock() {
         assert_eq!(
-            crate::tui::ui::encryption_glyphs(EncState { locked: false, master: false }),
+            crate::tui::ui::encryption_glyphs(EncState { locked: false, master: false, fill: None }),
             ("🔓", None)
         );
     }
@@ -4847,7 +4852,7 @@ mod op_log_tests {
         // The key answers "will the next launch stop to ask me for a password",
         // which is true whether the container happens to be open right now.
         for locked in [true, false] {
-            let (_, key) = crate::tui::ui::encryption_glyphs(EncState { locked, master: true });
+            let (_, key) = crate::tui::ui::encryption_glyphs(EncState { locked, master: true, fill: None });
             assert_eq!(key, Some("🔑"), "locked = {locked}");
         }
     }
@@ -4882,7 +4887,7 @@ mod op_log_tests {
 
     #[test]
     fn the_details_pane_spells_out_a_prompting_container() {
-        let out = render_with_encrypted(EncState { locked: true, master: false });
+        let out = render_with_encrypted(EncState { locked: true, master: false, fill: None });
         assert!(out.contains("Encrypted:"), "no encryption line:\n{out}");
         assert!(out.contains("locked"), "lock state missing:\n{out}");
         assert!(out.contains("asks for a password"), "source missing:\n{out}");
@@ -4890,9 +4895,47 @@ mod op_log_tests {
 
     #[test]
     fn the_details_pane_spells_out_a_master_backed_container() {
-        let out = render_with_encrypted(EncState { locked: false, master: true });
+        let out = render_with_encrypted(EncState { locked: false, master: true, fill: None });
         assert!(out.contains("unlocked"), "lock state missing:\n{out}");
         assert!(out.contains("master store"), "source missing:\n{out}");
+    }
+
+    #[test]
+    fn an_open_container_shows_how_full_it_is() {
+        let out = render_with_encrypted(EncState {
+            locked: false,
+            master: false,
+            fill: Some(crate::veracrypt::Usage {
+                used: 512 * 1024 * 1024,
+                available: 512 * 1024 * 1024,
+                total: 1024 * 1024 * 1024,
+            }),
+        });
+        assert!(out.contains("Container:"), "no fill line:\n{out}");
+        assert!(out.contains("50%"), "fill percentage missing:\n{out}");
+    }
+
+    #[test]
+    fn a_nearly_full_container_says_what_to_do_about_it() {
+        let out = render_with_encrypted(EncState {
+            locked: false,
+            master: false,
+            fill: Some(crate::veracrypt::Usage {
+                used: 990 * 1024 * 1024,
+                available: 10 * 1024 * 1024,
+                total: 1024 * 1024 * 1024,
+            }),
+        });
+        assert!(out.contains("nearly full"), "no warning:\n{out}");
+        assert!(out.contains("wryayer grow vault"), "no remedy named:\n{out}");
+    }
+
+    #[test]
+    fn a_locked_container_shows_no_fill_at_all() {
+        // Reading it would mean statvfs on an unmounted mount point, which
+        // describes the host filesystem — a plausible, wrong number.
+        let out = render_with_encrypted(EncState { locked: true, master: false, fill: None });
+        assert!(!out.contains("Container:"), "fill shown for a locked container:\n{out}");
     }
 
     #[test]
