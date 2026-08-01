@@ -3,6 +3,7 @@ pub mod child_output;
 pub mod commands;
 pub mod config;
 pub mod cpu;
+pub mod desktop;
 pub mod distro;
 pub mod entropy;
 #[cfg(feature = "gui")]

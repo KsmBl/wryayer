@@ -533,12 +533,11 @@ fn run_inner(
     } else {
         eprintln!(
             "Run with: {}  or  wryayer run {alias_name}",
-            created_launchers
-                .iter()
-                .map(|b| format!("~/bin/{b}"))
-                .collect::<Vec<_>>()
-                .join(", ")
+            created_launchers.join(", ")
         );
+        // Publish the app's own .desktop files to the host so menus, "Open
+        // with" and link handling see it the way they see a packaged app.
+        register_desktop_entries(&alias_name_owned);
     }
 
     // Skip the cross-app dedup pass when this install added zero files —
@@ -550,6 +549,25 @@ fn run_inner(
     }
 
     Ok(())
+}
+
+/// Publish the app's packaged `.desktop` files to the host, and say so.
+///
+/// Never fatal. A missing menu entry is a cosmetic loss next to an install that
+/// otherwise succeeded, and the app still runs from its shortcut either way.
+pub fn register_desktop_entries(app_name: &str) {
+    match crate::desktop::install(app_name) {
+        Ok(entries) => {
+            for entry in &entries {
+                eprintln!("Registered desktop entry: {}", entry.path.display());
+            }
+            if entries.iter().any(|e| e.handles_links()) {
+                eprintln!("To have other applications open links with it:");
+                eprintln!("  wryayer desktop {app_name} --default");
+            }
+        }
+        Err(e) => eprintln!("warning: desktop entries not registered: {e:#}"),
+    }
 }
 
 /// Recreate the well-known top-level symlinks that the `filesystem` package
