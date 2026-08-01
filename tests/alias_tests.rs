@@ -15,12 +15,21 @@ static HOME_LOCK: Mutex<()> = Mutex::new(());
 fn with_temp_home(f: impl FnOnce(&std::path::Path)) {
     let _guard = HOME_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let tmp = tempfile::tempdir().expect("tempdir");
-    let old = std::env::var("HOME").ok();
+    let saved: Vec<(&str, Option<String>)> = ["HOME", "WRYAYER_LAUNCHER_DIR", "WRYAYER_DESKTOP_DIR"]
+        .iter()
+        .map(|k| (*k, std::env::var(k).ok()))
+        .collect();
     std::env::set_var("HOME", tmp.path());
+    // Keep shortcuts and desktop entries inside the sandbox — their real homes
+    // are /usr/bin and /usr/share/applications, which no test may touch.
+    std::env::set_var("WRYAYER_LAUNCHER_DIR", tmp.path().join("bin"));
+    std::env::set_var("WRYAYER_DESKTOP_DIR", tmp.path().join("share/applications"));
     f(tmp.path());
-    match old {
-        Some(h) => std::env::set_var("HOME", h),
-        None    => std::env::remove_var("HOME"),
+    for (key, value) in saved {
+        match value {
+            Some(v) => std::env::set_var(key, v),
+            None    => std::env::remove_var(key),
+        }
     }
 }
 

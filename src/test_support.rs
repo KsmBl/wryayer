@@ -64,12 +64,23 @@ impl Drop for TestHome {
 pub fn test_home() -> TestHome {
     let lock = env_lock();
     let dir = tempfile::tempdir().unwrap();
-    let saved = SavedEnv::capture(&["HOME", "XDG_RUNTIME_DIR", "XDG_STATE_HOME"]);
+    let saved = SavedEnv::capture(&[
+        "HOME",
+        "XDG_RUNTIME_DIR",
+        "XDG_STATE_HOME",
+        "WRYAYER_LAUNCHER_DIR",
+        "WRYAYER_DESKTOP_DIR",
+    ]);
 
     std::env::set_var("HOME", dir.path());
     std::env::set_var("XDG_RUNTIME_DIR", dir.path().join("run"));
     // Keeps the root-is-mounted marker out of the developer's real state dir.
     std::env::set_var("XDG_STATE_HOME", dir.path().join("state"));
+    // Shortcuts and desktop entries are system-wide in normal use. Under test
+    // they must never be: writing them would need root, and asking for root is
+    // exactly the hang — or the damage — a test must not cause.
+    std::env::set_var("WRYAYER_LAUNCHER_DIR", dir.path().join("bin"));
+    std::env::set_var("WRYAYER_DESKTOP_DIR", dir.path().join("share/applications"));
     std::fs::create_dir_all(dir.path().join(".wryayer")).unwrap();
 
     TestHome { dir, saved, _lock: lock }
