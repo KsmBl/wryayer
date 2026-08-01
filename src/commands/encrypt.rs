@@ -116,6 +116,15 @@ pub fn prepare(
     if let Some(sudo) = &supplied.sudo {
         veracrypt::prime_sudo(sudo)?;
     }
+    // The container is only created and mounted after every package has been
+    // downloaded and extracted, which can take longer than sudo remembers an
+    // authentication. This process holds the ticket open until it exits, so
+    // that step never runs into a prompt it has no terminal to answer.
+    //
+    // Unconditional, not just when a password came in: a front-end skips
+    // asking for one when sudo is already authenticated, and it is exactly
+    // that already-warm ticket that goes cold halfway through a long install.
+    veracrypt::keep_sudo_alive();
 
     let password = obtain_password(app_name, use_master, generate, supplied)?;
     Ok(Prepared { password, use_master })
@@ -498,6 +507,15 @@ pub fn unlock_and_password(
     if let Some(sudo) = &supplied.sudo {
         veracrypt::prime_sudo(sudo)?;
     }
+    // The container is only created and mounted after every package has been
+    // downloaded and extracted, which can take longer than sudo remembers an
+    // authentication. This process holds the ticket open until it exits, so
+    // that step never runs into a prompt it has no terminal to answer.
+    //
+    // Unconditional, not just when a password came in: a front-end skips
+    // asking for one when sudo is already authenticated, and it is exactly
+    // that already-warm ticket that goes cold halfway through a long install.
+    veracrypt::keep_sudo_alive();
     let password = resolve_password_with(app_name, supplied)?;
     // No-op when it is already mounted.
     veracrypt::mount(app_name, &password)?;

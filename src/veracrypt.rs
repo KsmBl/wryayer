@@ -630,6 +630,46 @@ pub fn prime_sudo(password: &str) -> Result<()> {
     Ok(())
 }
 
+/// How often to refresh the sudo ticket. Comfortably under any usable
+/// `timestamp_timeout`, including the short ones some systems set.
+const SUDO_REFRESH: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Hold the cached sudo credentials open for as long as this process runs.
+///
+/// sudo forgets an authentication after a few minutes. Installing an app into a
+/// new container easily outlives that: the password is collected up front, then
+/// hundreds of packages are downloaded and extracted, and only afterwards does
+/// the container get created and mounted. By then the ticket has lapsed, so
+/// sudo asks again — on `/dev/tty`, which for a TUI- or GUI-spawned child is
+/// either absent or owned by the front-end. The prompt cannot be answered and
+/// the install fails at the last step, after all the work.
+///
+/// `sudo -n -v` refreshes the ticket without needing the password again, so a
+/// slow tick is enough to keep it from ever expiring mid-operation.
+///
+/// Deliberately not started by [`prime_sudo`] itself. It belongs to the process
+/// that is *doing* the work and exits when that work is done — the install
+/// child, not the TUI. A front-end that started it would hold root open for as
+/// long as the user left the interface running, which is precisely what
+/// `timestamp_timeout` exists to prevent.
+pub fn keep_sudo_alive() {
+    static STARTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    if STARTED.set(()).is_err() {
+        return; // already ticking
+    }
+    std::thread::spawn(|| loop {
+        std::thread::sleep(SUDO_REFRESH);
+        // -n so a ticket that lapsed anyway fails here quietly, rather than
+        // blocking this thread forever on a prompt nobody is watching.
+        let _ = Command::new("sudo")
+            .args(["-n", "-v"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    });
+}
+
 /// Run a veracrypt subcommand under sudo, feeding the *volume* password on
 /// stdin.
 ///
