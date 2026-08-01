@@ -69,6 +69,11 @@ enum Commands {
     },
     /// List all installed apps
     List,
+    /// Rebuild the /usr/bin shortcuts and desktop entries of installed apps
+    Relink {
+        /// The app to relink (default: every installed app)
+        app_name: Option<String>,
+    },
     /// Register an app with the desktop: menu entry, "Open with", link handling
     Desktop {
         /// The app name as shown by `wryayer list`
@@ -457,6 +462,7 @@ fn main() {
             }
         }
         Commands::List => commands::list::run(),
+        Commands::Relink { app_name } => commands::relink::run(app_name.as_deref()),
         Commands::Desktop { app_name, default, remove } => desktop(&app_name, default, remove),
         Commands::Run { app_name, bin, args } => commands::run::run(&app_name, bin.as_deref(), &args),
         Commands::Update { app_name, check, full } => {

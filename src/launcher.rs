@@ -65,12 +65,43 @@ fn candidate_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-/// Where `binary_name`'s shortcut actually is, if a wryayer-managed one exists.
+/// Where `binary_name`'s shortcut actually is, if wryayer wrote one *for
+/// `app_name`*.
 ///
 /// Used by the desktop-entry writer, which has to point `Exec=` at the real
-/// path rather than assume the shortcut made it into `/usr/bin`.
-pub fn launcher_path(binary_name: &str) -> Option<PathBuf> {
-    candidate_dirs().into_iter().map(|d| d.join(binary_name)).find(|p| is_ours(p))
+/// path rather than assume the shortcut made it into `/usr/bin` — and must not
+/// point at a shortcut that now belongs to a different app.
+pub fn launcher_path(app_name: &str, binary_name: &str) -> Option<PathBuf> {
+    candidate_dirs()
+        .into_iter()
+        .map(|d| d.join(binary_name))
+        .find(|p| owner_of(p).as_deref() == Some(app_name))
+}
+
+/// The app a shortcut was written for, read back from its marker line.
+pub fn owner_of(path: &Path) -> Option<String> {
+    let content = fs::read_to_string(path).ok()?;
+    content
+        .lines()
+        .find_map(|l| l.trim().strip_prefix(&format!("{MARKER} for ")))
+        .map(|name| name.trim().to_string())
+}
+
+/// A shortcut of this name that some *other* app already owns.
+///
+/// Two apps can legitimately want the same command name — an alias created with
+/// `install --into` records the same launcher as its target — and only one of
+/// them can have it. Callers that iterate over every app use this to avoid
+/// deciding the winner by iteration order.
+pub fn foreign_owner(app_name: &str, binary_name: &str) -> Option<(PathBuf, String)> {
+    for dir in candidate_dirs() {
+        let path = dir.join(binary_name);
+        match owner_of(&path) {
+            Some(owner) if owner != app_name => return Some((path, owner)),
+            _ => continue,
+        }
+    }
+    None
 }
 
 pub fn create_launcher(app_name: &str, binary_name: &str) -> Result<PathBuf> {
@@ -129,11 +160,6 @@ pub fn remove_launcher(binary_name: &str) -> Result<Vec<PathBuf>> {
         removed.push(path);
     }
     Ok(removed)
-}
-
-/// Whether `path` is a shortcut this program wrote.
-fn is_ours(path: &Path) -> bool {
-    fs::read_to_string(path).is_ok_and(|c| c.contains(MARKER))
 }
 
 fn launcher_content(app_name: &str) -> String {
@@ -276,6 +302,29 @@ mod tests {
         assert!(content.starts_with("#!/bin/bash\n"));
         assert!(content.contains(MARKER));
         assert!(content.contains(r#"run "firefox" "$@""#));
+    }
+
+    #[test]
+    fn a_shortcut_names_the_app_it_belongs_to() {
+        let _home = crate::test_support::test_home();
+        let path = create_launcher("Firefox2", "firefox").unwrap();
+        assert_eq!(path, launchers_dir().unwrap().join("firefox"));
+        assert_eq!(owner_of(&path).as_deref(), Some("Firefox2"));
+        assert_eq!(launcher_path("Firefox2", "firefox"), Some(path.clone()));
+        // A different app must not mistake it for its own.
+        assert_eq!(launcher_path("firefox", "firefox"), None);
+        assert_eq!(
+            foreign_owner("firefox", "firefox"),
+            Some((path, "Firefox2".to_string()))
+        );
+    }
+
+    #[test]
+    fn a_shortcut_is_not_foreign_to_its_own_app() {
+        let _home = crate::test_support::test_home();
+        create_launcher("htop", "htop").unwrap();
+        assert_eq!(foreign_owner("htop", "htop"), None);
+        assert_eq!(foreign_owner("htop", "never-created"), None);
     }
 
     #[test]

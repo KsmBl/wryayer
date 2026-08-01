@@ -94,9 +94,10 @@ pub fn install(app_name: &str) -> Result<Vec<Entry>> {
             continue;
         }
         // Point at where the shortcut really is — it may have fallen back to
-        // ~/bin — and skip the entry entirely if no shortcut was ever made,
-        // since the entry would only produce a "command not found".
-        let Some(shortcut) = launcher::launcher_path(&binary) else { continue };
+        // ~/bin — and skip the entry when this app has no shortcut of that
+        // name: either none was made, or another app owns it, and in both
+        // cases the entry would start something other than this app.
+        let Some(shortcut) = launcher::launcher_path(app_name, &binary) else { continue };
 
         let rewritten = rewrite(&content, &shortcut.to_string_lossy(), &tree, app_name);
         let stem = source.file_stem().unwrap_or_default().to_string_lossy();
@@ -648,22 +649,28 @@ image/png=gimp.desktop
 
     /// Install a fake app that ships one desktop file, plus its shortcut.
     fn fake_app(name: &str, desktop_file: Option<&str>) {
+        fake_app_named(name, name, desktop_file);
+    }
+
+    /// As [`fake_app`], but with a shortcut whose command name differs from the
+    /// app's — which is how an alias ends up competing for its target's name.
+    fn fake_app_named(name: &str, binary: &str, desktop_file: Option<&str>) {
         let dir = app_dir(name).unwrap();
         std::fs::create_dir_all(dir.join("usr/bin")).unwrap();
-        std::fs::write(dir.join("usr/bin").join(name), b"#!/bin/sh\n").unwrap();
+        std::fs::write(dir.join("usr/bin").join(binary), b"#!/bin/sh\n").unwrap();
         if let Some(content) = desktop_file {
             let apps = dir.join("usr/share/applications");
             std::fs::create_dir_all(&apps).unwrap();
-            std::fs::write(apps.join(format!("{name}.desktop")), content).unwrap();
+            std::fs::write(apps.join(format!("{binary}.desktop")), content).unwrap();
         }
         write_manifest(
             name,
             &Manifest {
                 app: AppMeta {
                     name: name.to_string(),
-                    main_binary: name.to_string(),
+                    main_binary: binary.to_string(),
                     installed_at: "2026-08-01T00:00:00Z".to_string(),
-                    launchers: vec![name.to_string()],
+                    launchers: vec![binary.to_string()],
                     alias_of: None,
                     display_name: None,
                     pkg_name: None,
@@ -673,7 +680,7 @@ image/png=gimp.desktop
             },
         )
         .unwrap();
-        crate::launcher::create_launcher(name, name).unwrap();
+        crate::launcher::create_launcher(name, binary).unwrap();
     }
 
     #[test]
@@ -689,8 +696,25 @@ image/png=gimp.desktop
         assert!(entry.handles_links());
 
         let written = std::fs::read_to_string(&entry.path).unwrap();
-        let shortcut = crate::launcher::launcher_path("firefox").unwrap();
+        let shortcut = crate::launcher::launcher_path("firefox", "firefox").unwrap();
         assert!(written.contains(&format!("Exec={} %u", shortcut.display())), "{written}");
+    }
+
+    #[test]
+    fn no_entry_is_published_for_a_shortcut_another_app_owns() {
+        let _home = crate::test_support::test_home();
+        // What an alias looks like in practice: `install --into` records the
+        // same launcher name as the app it points at, and only one of them can
+        // own /usr/bin/firefox. The loser must not get a menu entry that
+        // starts the winner.
+        fake_app("firefox", Some(FIREFOX));
+        fake_app_named("Firefox2", "firefox", Some(FIREFOX));
+
+        let shortcut = crate::launcher::launcher_path("Firefox2", "firefox").unwrap();
+        assert_eq!(crate::launcher::owner_of(&shortcut).as_deref(), Some("Firefox2"));
+
+        assert_eq!(install("Firefox2").unwrap().len(), 1);
+        assert!(install("firefox").unwrap().is_empty());
     }
 
     #[test]

@@ -434,6 +434,15 @@ fn run_inner(
                 if created_launchers.contains(bin) {
                     continue;
                 }
+                // Installing is an explicit act, so taking over a command name
+                // another app already owns is allowed — but never silently:
+                // that app's shortcut stops working the moment this one lands.
+                if let Some((path, owner)) = crate::launcher::foreign_owner(launcher_app, bin) {
+                    eprintln!(
+                        "note: {} was '{owner}'s shortcut and is now '{launcher_app}'s",
+                        path.display()
+                    );
+                }
                 let launcher_path = create_launcher(launcher_app, bin)
                     .with_context(|| format!("failed to create launcher for {bin}"))?;
                 created_launchers.push(bin.to_string());
