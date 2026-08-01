@@ -135,13 +135,37 @@ pub fn list_mounted() -> Result<Vec<MountedVolume>> {
     Ok(parse_list(&String::from_utf8_lossy(&out.stdout)))
 }
 
-/// Whether `app_name`'s container is currently mounted at its app directory.
+/// Whether `app_name`'s container is currently mounted at its app directory,
+/// i.e. whether its files are reachable right now.
 pub fn is_mounted(app_name: &str) -> Result<bool> {
     let target = crate::manifest::app_dir(app_name)?;
-    let target = target.to_string_lossy().into_owned();
-    Ok(list_mounted()?
-        .iter()
-        .any(|v| v.mount_point.as_deref() == Some(target.as_str())))
+    Ok(mounted_at(&list_mounted()?, &target.to_string_lossy()))
+}
+
+/// Whether any volume is mounted at `dir`.
+fn mounted_at(volumes: &[MountedVolume], dir: &str) -> bool {
+    volumes.iter().any(|v| v.mount_point.as_deref() == Some(dir))
+}
+
+/// The slot holding `container` open, mounted or not.
+fn slot_for<'a>(volumes: &'a [MountedVolume], container: &str) -> Option<&'a MountedVolume> {
+    volumes.iter().find(|v| v.volume == container)
+}
+
+/// The slot VeraCrypt holds open for `app_name`'s container, if any —
+/// regardless of whether its filesystem is mounted anywhere.
+///
+/// These two states come apart. A volume can be attached to a device-mapper
+/// node with no mount point at all: an unmount that did not release the slot, a
+/// sandbox killed while it held the tree busy, a manual `umount`. Nothing is
+/// readable in that state, so [`is_mounted`] rightly says no — but VeraCrypt
+/// still refuses to mount a container it already has open, so asking it to
+/// mount fails with "the volume is already mounted", which reads like a
+/// contradiction and leaves the app unlaunchable until the slot is cleared by
+/// hand.
+pub fn attached(app_name: &str) -> Result<Option<MountedVolume>> {
+    let container = container_path(app_name)?;
+    Ok(slot_for(&list_mounted()?, &container.to_string_lossy()).cloned())
 }
 
 /// Legacy marker location: inside the app's own directory, where mounting the
@@ -822,6 +846,17 @@ pub fn mount(app_name: &str, password: &str) -> Result<()> {
             container.display()
         );
     }
+    // Clear a slot left open without a mount point before asking VeraCrypt for
+    // a new one — it would otherwise refuse, having the container open already.
+    if let Some(stale) = attached(app_name)? {
+        eprintln!(
+            "note: '{app_name}' was still attached at {} without being mounted — releasing it",
+            stale.mapper
+        );
+        dismount_path(&container).with_context(|| {
+            format!("failed to release the stale volume slot for '{app_name}'")
+        })?;
+    }
     let mount_point = crate::manifest::app_dir(app_name)?;
     // The mount point must exist before mounting. It normally does — it holds
     // the .encrypted.toml marker that records the app while it is locked.
@@ -855,7 +890,10 @@ pub fn mount(app_name: &str, password: &str) -> Result<()> {
 
 /// Unmount `app_name`'s container. Prompts for sudo. No-op if not mounted.
 pub fn dismount(app_name: &str) -> Result<()> {
-    if !available() || !is_mounted(app_name)? {
+    // Keyed on the slot rather than on the mount point: a volume left attached
+    // with nothing mounted is exactly the state that needs clearing, and
+    // guarding on `is_mounted` made this a no-op precisely then.
+    if !available() || attached(app_name)?.is_none() {
         return Ok(());
     }
     let container = container_path(app_name)?;
@@ -1007,6 +1045,46 @@ garbage without a colon
         assert_eq!(v.len(), 2);
         assert_eq!(v[0].mount_point.as_deref(), Some("/mnt/a"));
         assert_eq!(v[1].volume, "/b.hc");
+    }
+
+    /// Real `veracrypt --list` output from the failure: a container still held
+    /// open on a device-mapper node, with nothing mounted anywhere.
+    const HALF_ATTACHED: &str = "\
+1: /home/u/.llms/root.dat /dev/mapper/veracrypt1 /home/u/.wryayer
+3: /home/u/.wryayer/.containers/app.hc /dev/mapper/veracrypt3 -
+";
+
+    #[test]
+    fn a_volume_attached_without_a_mount_point_is_not_mounted() {
+        let v = parse_list(HALF_ATTACHED);
+        assert!(!mounted_at(&v, "/home/u/.wryayer/app"), "nothing is readable there");
+    }
+
+    #[test]
+    fn a_volume_attached_without_a_mount_point_still_holds_its_slot() {
+        // The whole bug: the slot exists, so VeraCrypt refuses a fresh mount,
+        // while every mount-point test says the app is locked. Releasing it has
+        // to key on this, not on the mount point.
+        let v = parse_list(HALF_ATTACHED);
+        let slot = slot_for(&v, "/home/u/.wryayer/.containers/app.hc")
+            .expect("the container is open and must be found");
+        assert_eq!(slot.mapper, "/dev/mapper/veracrypt3");
+        assert_eq!(slot.mount_point, None);
+    }
+
+    #[test]
+    fn a_container_that_was_never_opened_holds_no_slot() {
+        let v = parse_list(HALF_ATTACHED);
+        assert!(slot_for(&v, "/home/u/.wryayer/.containers/other.hc").is_none());
+    }
+
+    #[test]
+    fn a_properly_mounted_container_is_both_mounted_and_attached() {
+        let v = parse_list(
+            "1: /home/u/.wryayer/.containers/app.hc /dev/mapper/veracrypt1 /home/u/.wryayer/app\n",
+        );
+        assert!(mounted_at(&v, "/home/u/.wryayer/app"));
+        assert!(slot_for(&v, "/home/u/.wryayer/.containers/app.hc").is_some());
     }
 
     #[test]
