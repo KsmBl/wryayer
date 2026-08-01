@@ -434,6 +434,21 @@ fn run_inner(
                 if created_launchers.contains(bin) {
                     continue;
                 }
+                // A package can be named after one of the system's own
+                // programs. Taking that path would delete the real binary, so
+                // the install continues without a shortcut instead.
+                if let Some(path) = crate::launcher::blocked_by(bin) {
+                    eprintln!(
+                        "warning: no shortcut for '{bin}' — {} already exists and wryayer \
+                         did not put it there.",
+                        path.display()
+                    );
+                    eprintln!(
+                        "         Run the app with `wryayer run {launcher_app}`, or reinstall \
+                         with --bin-name <name> to pick a free command name."
+                    );
+                    continue;
+                }
                 // Installing is an explicit act, so taking over a command name
                 // another app already owns is allowed — but never silently:
                 // that app's shortcut stops working the moment this one lands.

@@ -104,9 +104,28 @@ pub fn foreign_owner(app_name: &str, binary_name: &str) -> Option<(PathBuf, Stri
     None
 }
 
+/// The file standing where `binary_name`'s shortcut would go, when it is not
+/// wryayer's to replace.
+///
+/// `/usr/bin` is where the system keeps its own programs, and an app is easily
+/// named after one of them — `bash`, `fish`, `htop`, `firefox`. Writing over
+/// that file destroys a real binary. For `bash` it does worse than that: the
+/// replacement's own `#!/bin/bash` then resolves to itself, so every shell on
+/// the machine exec-loops and nothing that needs one can run, up to and
+/// including the package manager that would put it back.
+pub fn blocked_by(binary_name: &str) -> Option<PathBuf> {
+    let path = launchers_dir().ok()?.join(binary_name);
+    // symlink_metadata, so a dangling symlink still counts as occupied.
+    if path.symlink_metadata().is_err() || owner_of(&path).is_some() {
+        return None;
+    }
+    Some(path)
+}
+
 pub fn create_launcher(app_name: &str, binary_name: &str) -> Result<PathBuf> {
     let dir = launchers_dir()?;
     let path = dir.join(binary_name);
+    ensure_free(&path)?;
     let content = launcher_content(app_name);
 
     match install_shortcut(&path, &content) {
@@ -126,6 +145,7 @@ pub fn create_launcher(app_name: &str, binary_name: &str) -> Result<PathBuf> {
                 return Err(e);
             }
             let fallback = fallback_dir.join(binary_name);
+            ensure_free(&fallback)?;
             eprintln!("warning: could not install the shortcut in {}: {e}", dir.display());
             eprintln!("         using {} instead — it is only on the PATH of your", fallback.display());
             eprintln!("         interactive shell, so desktop menus will not find it.");
@@ -160,6 +180,25 @@ pub fn remove_launcher(binary_name: &str) -> Result<Vec<PathBuf>> {
         removed.push(path);
     }
     Ok(removed)
+}
+
+/// Refuse to write a shortcut over a file wryayer did not create.
+///
+/// The last line of defence, checked immediately before every write: callers
+/// that can carry on without a shortcut should ask [`blocked_by`] first and
+/// skip, rather than let this abort what they were doing.
+fn ensure_free(path: &Path) -> Result<()> {
+    if path.symlink_metadata().is_err() || owner_of(path).is_some() {
+        return Ok(());
+    }
+    bail!(
+        "{} already exists and wryayer did not put it there — refusing to replace it.\n       \
+         That file belongs to the system or to a package, and overwriting it would \
+         destroy the program that lives there.\n       \
+         Install under a different command name with --bin-name <name>, or use \
+         `wryayer run <app>`",
+        path.display()
+    )
 }
 
 fn launcher_content(app_name: &str) -> String {
@@ -317,6 +356,38 @@ mod tests {
             foreign_owner("firefox", "firefox"),
             Some((path, "Firefox2".to_string()))
         );
+    }
+
+    #[test]
+    fn a_file_wryayer_did_not_write_is_never_replaced() {
+        let _home = crate::test_support::test_home();
+        // The shortcut directory is /usr/bin in real use, so an app named
+        // after a system program aims straight at that program's path.
+        let dir = launchers_dir().unwrap();
+        fs::create_dir_all(&dir).unwrap();
+        let system_binary = dir.join("bash");
+        fs::write(&system_binary, b"\x7fELF the real bash").unwrap();
+
+        assert_eq!(blocked_by("bash").as_ref(), Some(&system_binary));
+
+        let err = create_launcher("bash", "bash").unwrap_err().to_string();
+        assert!(err.contains("refusing to replace"), "{err}");
+        assert_eq!(
+            fs::read(&system_binary).unwrap(),
+            b"\x7fELF the real bash",
+            "the system's own binary must survive untouched"
+        );
+    }
+
+    #[test]
+    fn a_free_name_and_our_own_shortcut_are_both_writable() {
+        let _home = crate::test_support::test_home();
+        assert_eq!(blocked_by("nothing-lives-here"), None);
+
+        // Replacing our own shortcut is exactly what reinstall and relink do.
+        create_launcher("htop", "htop").unwrap();
+        assert_eq!(blocked_by("htop"), None);
+        create_launcher("htop", "htop").unwrap();
     }
 
     #[test]

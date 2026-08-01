@@ -428,6 +428,14 @@ name — an alias installed with `--into` records the same launcher as its targe
 — the one that already owns it keeps it, and `relink` says so rather than
 deciding by list order.
 
+A shortcut is **never** written over a file wryayer did not create. `/usr/bin`
+is where the system keeps its own programs, and an app is easily named after
+one of them: a sandboxed `htop`, `fish` or `bash` would otherwise replace the
+real binary, and in `bash`'s case the shortcut's own `#!/bin/bash` would then
+resolve to itself and leave the machine without a working shell. Those apps get
+no shortcut and say so; run them with `wryayer run <app>`, or give them a free
+command name with `--bin-name`.
+
 > Shortcuts and desktop entries are host state naming your apps, and they stay
 > readable when `~/.wryayer` is locked. If you keep the whole of `~/.wryayer` in
 > a container specifically so installed app names aren't visible, set

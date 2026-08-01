@@ -53,6 +53,16 @@ pub fn run(app_name: Option<&str>) -> Result<()> {
                 );
                 continue;
             }
+            // An app named after one of the system's own programs — bash,
+            // fish, htop — must not be given that program's path.
+            if let Some(path) = launcher::blocked_by(launcher) {
+                eprintln!(
+                    "{app}: no shortcut — {} is not wryayer's to replace. \
+                     Run it with `wryayer run {app}`",
+                    path.display()
+                );
+                continue;
+            }
             match create_launcher(app, launcher) {
                 Ok(path) => {
                     eprintln!("{app}: {}", path.display());
