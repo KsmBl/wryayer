@@ -313,7 +313,8 @@ README-CODE.md for the diagram version.
 | `manifest.rs` | `.manifest.toml` read/write, `app_dir`/`wryayer_root` path helpers, `list_all_apps`, `tree_order`, the alias/merge model. |
 | `cpu.rs` | Built-in CPU profiles + the `CustomCpu` type; renders `/proc/cpuinfo`, and provides `cpuid_spoof_for` / `topology_for` for the launcher and shim. |
 | `distro.rs` | Detects the host distro and selects the package backend (pacman/apt/dnf); downloads packages and **verifies their signatures before extraction** (`gpg`/`rpmkeys`/apt auth). |
-| `launcher.rs` | Creates/removes the `~/bin/<app>` shell wrapper. |
+| `launcher.rs` | Creates/removes the `/usr/bin/<app>` shell wrapper, escalating through sudo when it has to. |
+| `desktop.rs` | Publishes an app's packaged `.desktop` files to `/usr/share/applications`, rewritten to run through its shortcut. |
 | `veracrypt.rs` | Per-app VeraCrypt containers: create/mount/unmount, `--list` parsing, container sizing, and the `.encrypted.toml` locked-state marker. |
 | `secrets.rs` | The master password store — Argon2id → AES-256-GCM, plus the per-boot derived-key cache in `$XDG_RUNTIME_DIR` and the no-echo password prompts. |
 | `entropy.rs` | Multi-source entropy pool (urandom, sensors, mouse, RAM, IRQs, clock) and the password generator built on it. |
@@ -327,7 +328,8 @@ README-CODE.md for the diagram version.
 | `install.rs` | resolve → download → extract → write manifest → dedup. |
 | `install_game.rs` | Wine-container import (game folder → `.exe` → prefix). |
 | `update.rs` | Re-resolve + **delta re-extract** (only changed packages; `--full` for a clean rebuild); version checks (`--check`). |
-| `remove.rs` | Delete tree + launcher; alias-aware (`--cascade`). |
+| `remove.rs` | Delete tree + launcher + desktop entries; alias-aware (`--cascade`). |
+| `relink.rs` | Rebuild the `/usr/bin` shortcuts and desktop entries of installed apps, refusing to hand a command name to an app that does not already own it. |
 | `snapshot.rs` | Hard-linked snapshots, list, rollback, delete, prune. |
 | `export.rs` / `import.rs` | Zip an app tree / recreate one from a zip. |
 | `dedup.rs` | Cross-app hard-link identical files; disk-usage accounting (`format_bytes`, `all_du`). |

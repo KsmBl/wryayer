@@ -113,12 +113,12 @@ pub struct AppConfig {
     /// Maximum RAM the app may use, in KiB — enforced via systemd-run (None = no limit).
     /// Stored in KiB so limits can be set in KB/MB/GB with full precision.
     pub ram_limit: Option<u64>,
-    /// Whether to create a ~/bin shortcut by default when installing (global only)
+    /// Whether to create a /usr/bin shortcut by default when installing (global only)
     pub create_shortcut: bool,
     /// Whether the TUI shows the "Install '<pkg>'?" confirmation before an
     /// install. When false the install starts immediately (global only).
     pub confirm_install: bool,
-    /// Whether the TUI asks about the ~/bin shortcut before installing. When
+    /// Whether the TUI asks about the /usr/bin shortcut before installing. When
     /// false it silently applies `create_shortcut` instead (global only).
     pub ask_shortcut: bool,
     /// Whether to delete the shared download/build cache (~/.cache/wryayer)
@@ -722,7 +722,7 @@ pub fn format_ini(config: &AppConfig) -> String {
     if !config.create_shortcut || !config.confirm_install || !config.ask_shortcut || config.clean_cache || config.theme != Theme::Default || config.layout != Layout::Default || !config.portal_filter {
         s.push_str("\n[behavior]\n");
         if !config.create_shortcut {
-            s.push_str("; Create ~/bin/<name> shortcut by default when installing apps\n");
+            s.push_str("; Create /usr/bin/<name> shortcut by default when installing apps\n");
             s.push_str("create_shortcut = off\n");
         }
         if !config.confirm_install {
@@ -730,7 +730,7 @@ pub fn format_ini(config: &AppConfig) -> String {
             s.push_str("confirm_install = off\n");
         }
         if !config.ask_shortcut {
-            s.push_str("; Ask whether to create a ~/bin shortcut before installing\n");
+            s.push_str("; Ask whether to create a /usr/bin shortcut before installing\n");
             s.push_str("ask_shortcut = off\n");
         }
         if config.clean_cache {

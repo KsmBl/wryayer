@@ -69,6 +69,23 @@ enum Commands {
     },
     /// List all installed apps
     List,
+    /// Rebuild the /usr/bin shortcuts and desktop entries of installed apps
+    Relink {
+        /// The app to relink (default: every installed app)
+        app_name: Option<String>,
+    },
+    /// Register an app with the desktop: menu entry, "Open with", link handling
+    Desktop {
+        /// The app name as shown by `wryayer list`
+        app_name: String,
+        /// Also make it the default handler for every MIME type and URL scheme
+        /// it declares — what makes other applications open links with it
+        #[arg(long)]
+        default: bool,
+        /// Unregister instead: delete the app's desktop entries
+        #[arg(long, conflicts_with_all = ["default"])]
+        remove: bool,
+    },
     /// Run an installed app with its isolated environment
     Run {
         /// The app name as shown by `wryayer list`
@@ -445,6 +462,8 @@ fn main() {
             }
         }
         Commands::List => commands::list::run(),
+        Commands::Relink { app_name } => commands::relink::run(app_name.as_deref()),
+        Commands::Desktop { app_name, default, remove } => desktop(&app_name, default, remove),
         Commands::Run { app_name, bin, args } => commands::run::run(&app_name, bin.as_deref(), &args),
         Commands::Update { app_name, check, full } => {
             commands::update::run(app_name.as_deref(), check, full)
@@ -596,4 +615,32 @@ fn main() {
         eprintln!("error: {:#}", e);
         std::process::exit(1);
     }
+}
+
+/// `wryayer desktop <app>` — publish, or withdraw, the app's desktop entries.
+fn desktop(app_name: &str, default: bool, remove: bool) -> anyhow::Result<()> {
+    if remove {
+        wryayer::desktop::remove(app_name)?;
+        println!("Unregistered '{app_name}' from the desktop.");
+        return Ok(());
+    }
+
+    let entries = wryayer::desktop::install(app_name)?;
+    if entries.is_empty() {
+        println!(
+            "'{app_name}' ships no .desktop file matching its shortcuts — nothing to register."
+        );
+        return Ok(());
+    }
+    for entry in &entries {
+        println!("Registered {}", entry.path.display());
+    }
+
+    if default {
+        let handled = wryayer::desktop::set_default(app_name)?;
+        println!("'{app_name}' is now the default for: {}", handled.join(", "));
+    } else if entries.iter().any(|e| e.handles_links()) {
+        println!("Add --default to have other applications open links with it.");
+    }
+    Ok(())
 }

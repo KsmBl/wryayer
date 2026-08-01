@@ -596,7 +596,7 @@ fn build_form(form: &gtk::Box, cfg: AppConfig, is_global: bool, app_name: Option
     // Global-only groups.
     let global_widgets = if is_global {
         header(form, "Install behaviour (defaults)");
-        let create_shortcut = check(form, "Create ~/bin shortcut", cfg.create_shortcut);
+        let create_shortcut = check(form, "Create /usr/bin shortcut", cfg.create_shortcut);
         let confirm_install = check(form, "Confirm before installing", cfg.confirm_install);
         let ask_shortcut = check(form, "Ask about the shortcut each time", cfg.ask_shortcut);
         let clean_cache = check(form, "Clean cache after each install", cfg.clean_cache);

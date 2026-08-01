@@ -217,7 +217,7 @@ pub fn run(
 
     eprintln!(
         "\nImported '{app_name_for_cleanup}' to ~/.wryayer/{app_name_for_cleanup}/.\n\
-         Run with:  ~/bin/{app_name_for_cleanup}  or  wryayer run {app_name_for_cleanup}"
+         Run with:  {app_name_for_cleanup}  or  wryayer run {app_name_for_cleanup}"
     );
     Ok(())
 }

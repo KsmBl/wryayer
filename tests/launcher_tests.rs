@@ -8,12 +8,21 @@ fn with_temp_home(f: impl FnOnce(&std::path::Path)) {
     let _guard = HOME_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let tmp = tempfile::tempdir().expect("tempdir");
     let old = std::env::var("HOME").ok();
+    let old_dir = std::env::var("WRYAYER_LAUNCHER_DIR").ok();
     std::env::set_var("HOME", tmp.path());
+    // Shortcuts are system-wide in normal use. A test must never go near
+    // /usr/bin: writing there needs root, and a test that asks for root either
+    // hangs waiting for a password or damages the machine it runs on.
+    std::env::set_var("WRYAYER_LAUNCHER_DIR", tmp.path().join("bin"));
     std::fs::create_dir_all(tmp.path().join("bin")).unwrap();
     f(tmp.path());
     match old {
         Some(h) => std::env::set_var("HOME", h),
         None    => std::env::remove_var("HOME"),
+    }
+    match old_dir {
+        Some(d) => std::env::set_var("WRYAYER_LAUNCHER_DIR", d),
+        None    => std::env::remove_var("WRYAYER_LAUNCHER_DIR"),
     }
 }
 

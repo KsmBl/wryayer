@@ -192,7 +192,7 @@ pub enum Screen {
         install_args: Vec<String>,
         selected: usize, // 0 = update & retry, 1 = cancel
     },
-    /// Ask whether to create a ~/bin/<pkg> shortcut before starting the install.
+    /// Ask whether to create a /usr/bin/<pkg> shortcut before starting the install.
     AskShortcut {
         pkg: String,
         title: String,
@@ -1992,7 +1992,7 @@ fn on_install_target(app: &mut App, code: KeyCode) {
                     format!("Merge '{pkg}' into '{target}'?"),
                     vec![
                         format!("Adds {pkg} (and missing deps) to ~/.wryayer/{target}/"),
-                        format!("A launcher ~/bin/{pkg} will be created."),
+                        format!("A launcher /usr/bin/{pkg} will be created."),
                         String::new(),
                         "Press y to confirm, n or Esc to cancel.".into(),
                     ],
@@ -2072,7 +2072,7 @@ fn install_confirm(app: &mut App, title: String, body: Vec<String>, action: Pend
     app.needs_clear = true;
 }
 
-/// Ask whether to create a ~/bin shortcut, or — when ask_shortcut is off —
+/// Ask whether to create a /usr/bin shortcut, or — when ask_shortcut is off —
 /// launch the install immediately using the create_shortcut default.
 fn ask_shortcut_or_launch(app: &mut App, pkg: String, title: String, args: Vec<String>) {
     if app.global_config.ask_shortcut {

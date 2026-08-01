@@ -59,8 +59,12 @@ pub fn run(app_name: &str) -> Result<()> {
     }
 
     for launcher in &manifest.app.launchers {
-        remove_launcher(launcher)?;
-        eprintln!("Removed launcher: ~/bin/{launcher}");
+        for path in remove_launcher(launcher)? {
+            eprintln!("Removed launcher: {}", path.display());
+        }
+    }
+    if let Err(e) = crate::desktop::remove(app_name) {
+        eprintln!("warning: desktop entries not removed: {e:#}");
     }
 
     // An encrypted app's files are inside its container, not under the app dir.

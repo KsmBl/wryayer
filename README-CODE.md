@@ -18,7 +18,8 @@ src/
 ├── manifest.rs        ← .manifest.toml read/write, app dir helpers, list_all_apps
 ├── config.rs          ← AppConfig, INI parse/format, global defaults.ini
 ├── cpu.rs             ← CPU profiles + custom CPUs; /proc/cpuinfo & CPUID data
-├── launcher.rs        ← ~/bin/<app> shell wrapper create/remove
+├── launcher.rs        ← /usr/bin/<app> shell wrapper create/remove
+├── desktop.rs         ← host .desktop entries: menus, Open-with, link handling
 ├── veracrypt.rs       ← per-app container create/mount/unmount, sizing, marker
 ├── secrets.rs         ← master password store (Argon2id + AES-256-GCM)
 ├── entropy.rs         ← multi-source entropy pool + password generator
@@ -33,7 +34,8 @@ src/
 │   ├── install_game.rs← wine-container import (folder → .exe → prefix)
 │   ├── run.rs         ← assemble and exec the bwrap sandbox
 │   ├── update.rs      ← re-resolve + re-extract; version checks
-│   ├── remove.rs      ← delete tree + launcher; alias-aware
+│   ├── remove.rs      ← delete tree + launcher + desktop entries; alias-aware
+│   ├── relink.rs      ← rebuild shortcuts + desktop entries of installed apps
 │   ├── snapshot.rs    ← hard-linked snapshots + rollback
 │   ├── export.rs      ← zip an app tree with progress markers
 │   ├── import.rs      ← recreate an app from an exported zip
@@ -82,7 +84,7 @@ csrc/                  ← C helpers compiled by build.rs, embedded via include_
           │                                                           │
           │  manifest.rs           config.rs          launcher.rs     │
           │  ┌──────────────┐   ┌────────────────┐  ┌─────────────┐   │
-          │  │ .manifest.   │   │ config.ini     │  │ ~/bin/<app> │   │
+          │  │ .manifest.   │   │ config.ini     │  │ /usr/bin/…  │   │
           │  │ toml R/W     │   │ INI parse/write│  │ shell wrap  │   │
           │  │ list apps    │   │ sandbox options│  │ create/rm   │   │
           │  └──────────────┘   └────────────────┘  └─────────────┘   │
@@ -151,16 +153,22 @@ codebase is package-manager agnostic.
 └── vlc/
      └── ...
 
-~/bin/
+/usr/bin/
 ├── firefox    ──►  exec wryayer run firefox "$@"
 ├── fastfetch  ──►  exec wryayer run fastfetch "$@"
 ├── hyfetch    ──►  exec wryayer run hyfetch "$@"   (bwrap roots on fastfetch/)
 └── vlc
+
+/usr/share/applications/
+└── wryayer-firefox-firefox.desktop   ← the app's own entry, Exec'd through
+                                        /usr/bin/firefox (menus, link handling)
 ```
 
 Everything wryayer writes lives under `~/.wryayer/` (state, snapshots, spoof
-files, global defaults) and `~/bin/` (launchers). Build/download caches live
-under `~/.cache/wryayer/{pkg,build}`. Nothing is written elsewhere.
+files, global defaults), plus the two host locations that make an app reachable
+the way a packaged one is: `/usr/bin/` (shortcuts) and
+`/usr/share/applications/` (desktop entries). Build/download caches live under
+`~/.cache/wryayer/{pkg,build}`. Nothing is written elsewhere.
 
 ---
 
@@ -340,7 +348,7 @@ source = "official"     # or "aur"
 **target's** tree (reusing deps already there), appends the new packages to the
 target's manifest, and writes a **thin alias dir** at `~/.wryayer/<pkg>/`
 containing only a manifest with `alias_of = <target>` plus its own `config.ini`.
-The alias is a first-class entry in `list`/`tui`, gets its own `~/bin` launcher,
+The alias is a first-class entry in `list`/`tui`, gets its own `/usr/bin` launcher,
 and its launcher calls `wryayer run <alias>` — which follows `alias_of` to the
 real tree but reads the alias's own config. Removing an alias touches only the
 alias dir + launcher; removing a target that still has aliases is refused

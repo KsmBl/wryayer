@@ -92,14 +92,18 @@ pub fn run(zip_path: &Path) -> Result<()> {
     // to this machine's username so the profile is found regardless of account.
     remap_sandbox_home(&dest)?;
 
-    // Recreate launchers in ~/bin/ — the export only contains ~/.wryayer/<app>/
-    // so launchers are never in the zip and must be reconstructed from the manifest.
+    // Recreate the shortcuts — the export only contains ~/.wryayer/<app>/, so
+    // they are never in the zip and must be rebuilt from the manifest, along
+    // with the host desktop entries that point at them.
     let manifest = read_manifest(&app_name)
         .with_context(|| format!("failed to read imported manifest for '{app_name}'"))?;
     for launcher_name in &manifest.app.launchers {
         let launcher_path = create_launcher(&manifest.app.name, launcher_name)
             .with_context(|| format!("failed to create launcher for '{launcher_name}'"))?;
         eprintln!("Created launcher: {}", launcher_path.display());
+    }
+    if !manifest.app.launchers.is_empty() {
+        super::install::register_desktop_entries(&app_name);
     }
 
     eprintln!("Imported '{app_name}' to {} ({file_count} files)", dest.display());
