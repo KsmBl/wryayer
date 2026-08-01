@@ -433,6 +433,8 @@ pub enum PendingAction {
     UpdateAll,
     Install { pkg: String, app_name: Option<String>, into: Option<String> },
     Export(String),
+    /// Write the app's /usr/bin shortcut and desktop entry.
+    Relink(String),
     Snapshot(String),
     Rollback(String, String),
     DeleteSnapshot(String, String),
@@ -1581,6 +1583,18 @@ fn on_installed(app: &mut App, code: KeyCode) {
                 app.screen = Screen::Config { app_name: name, config, selected: 0 };
             }
         }
+        KeyCode::Char('S') => {
+            if let Some(m) = app.selected_installed() {
+                let name = m.app.name.clone();
+                app.screen = Screen::Confirm {
+                    title: format!("Create shortcut for '{name}'?"),
+                    body: shortcut_plan(&name),
+                    action: PendingAction::Relink(name),
+                    danger: false,
+                };
+                app.needs_clear = true;
+            }
+        }
         KeyCode::Char('n') => {
             if let Some(m) = app.selected_installed() {
                 let name = m.app.name.clone();
@@ -1596,6 +1610,64 @@ fn on_installed(app: &mut App, code: KeyCode) {
         }
         _ => {}
     }
+}
+
+/// Spell out exactly which paths creating a shortcut would write, and which it
+/// would leave alone and why.
+///
+/// A shortcut lands in a system directory, so the confirmation names every file
+/// before anything is written rather than afterwards in a log.
+pub fn shortcut_plan(app_name: &str) -> Vec<String> {
+    use crate::launcher;
+
+    let Ok(manifest) = crate::manifest::read_manifest_or_marker(app_name) else {
+        return vec![
+            "Could not read this app's manifest.".into(),
+            String::new(),
+            "Press n or Esc to go back.".into(),
+        ];
+    };
+    if manifest.app.launchers.is_empty() {
+        return vec![
+            format!("'{app_name}' records no launcher binary, so there is no"),
+            "command name to create. Run it with `wryayer run` instead.".into(),
+            String::new(),
+            "Press n or Esc to go back.".into(),
+        ];
+    }
+
+    let dir = launcher::launchers_dir().unwrap_or_else(|_| launcher::SYSTEM_LAUNCHER_DIR.into());
+    let mut creates: Vec<String> = Vec::new();
+    let mut skips: Vec<String> = Vec::new();
+    for bin in &manifest.app.launchers {
+        if let Some((path, owner)) = launcher::foreign_owner(app_name, bin) {
+            skips.push(format!("  {} — belongs to '{owner}'", path.display()));
+        } else if let Some(path) = launcher::blocked_by(bin) {
+            skips.push(format!("  {} — not wryayer's to replace", path.display()));
+        } else {
+            creates.push(format!("  {}", dir.join(bin).display()));
+        }
+    }
+
+    let mut body = Vec::new();
+    if !creates.is_empty() {
+        body.push("Creates:".into());
+        body.extend(creates);
+        body.push("plus a desktop entry, if the app ships one — so menus".into());
+        body.push("and other applications can reach it.".into());
+    }
+    if !skips.is_empty() {
+        if !body.is_empty() {
+            body.push(String::new());
+        }
+        body.push("Left alone:".into());
+        body.extend(skips);
+    }
+    body.push(String::new());
+    body.push("Writing to a system directory needs your sudo password.".into());
+    body.push(String::new());
+    body.push("Press y to confirm, n or Esc to cancel.".into());
+    body
 }
 
 fn on_key_help(app: &mut App) {
@@ -2804,6 +2876,11 @@ fn execute_action(app: &mut App, action: PendingAction) {
                 std::env::var("HOME").unwrap_or_default()
             ));
             launch_op(app, format!("Export — {name}"), vec!["export".into(), name], total, false);
+        }
+        PendingAction::Relink(name) => {
+            // Writing into /usr/bin is root's business, and the child is piped
+            // with no terminal to prompt on, so sudo has to be cached first.
+            launch_op_with_sudo(app, format!("Shortcut — {name}"), vec!["relink".into(), name]);
         }
         PendingAction::Snapshot(name) =>
             launch_op(app, format!("Snapshot — {name}"), vec!["snapshot".into(), name], None, true),
@@ -5273,6 +5350,71 @@ mod op_log_tests {
             },
             packages: vec![],
         }
+    }
+
+    // ── [S] create shortcut ──────────────────────────────────────────────────
+
+    /// An app that exists on disk, selected in the list, ready for a keystroke.
+    fn installed_app(name: &str) -> (crate::test_support::TestHome, App) {
+        let home = crate::test_support::test_home();
+        std::fs::create_dir_all(home.root().join(name)).unwrap();
+        crate::manifest::write_manifest(name, &stub_manifest(name)).unwrap();
+        let mut app = App::new().unwrap();
+        app.installed = vec![stub_manifest(name)];
+        app.inst_state.select(Some(0));
+        app.screen = Screen::Main;
+        app.tab = Tab::Installed;
+        (home, app)
+    }
+
+    #[test]
+    fn s_asks_before_writing_a_shortcut() {
+        let (_home, mut app) = installed_app("htop");
+        handle_key(&mut app, KeyCode::Char('S')).unwrap();
+
+        let Screen::Confirm { title, body, action, .. } = &app.screen else {
+            panic!("expected a confirmation, got something else");
+        };
+        assert!(title.contains("htop"), "{title}");
+        assert!(
+            matches!(action, PendingAction::Relink(name) if name == "htop"),
+            "the confirmation must be wired to the shortcut action"
+        );
+
+        // A system directory is about to be written to, so the exact path is
+        // named before anything happens, not afterwards in a log.
+        let text = body.join("\n");
+        let expected = crate::launcher::launchers_dir().unwrap().join("htop");
+        assert!(text.contains("Creates:"), "{text}");
+        assert!(text.contains(&expected.display().to_string()), "{text}");
+        assert!(text.contains("sudo password"), "{text}");
+    }
+
+    #[test]
+    fn the_plan_names_what_it_will_not_touch() {
+        let (_home, _app) = installed_app("bash");
+        // Stand a system binary where the shortcut would go.
+        let dir = crate::launcher::launchers_dir().unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("bash"), b"\x7fELF").unwrap();
+
+        let text = shortcut_plan("bash").join("\n");
+        assert!(text.contains("Left alone:"), "{text}");
+        assert!(text.contains("not wryayer's to replace"), "{text}");
+        assert!(!text.contains("Creates:"), "{text}");
+    }
+
+    #[test]
+    fn an_app_with_no_launcher_says_so_instead_of_offering_a_path() {
+        let home = crate::test_support::test_home();
+        std::fs::create_dir_all(home.root().join("libthing")).unwrap();
+        let mut manifest = stub_manifest("libthing");
+        manifest.app.launchers.clear();
+        crate::manifest::write_manifest("libthing", &manifest).unwrap();
+
+        let text = shortcut_plan("libthing").join("\n");
+        assert!(text.contains("no launcher binary"), "{text}");
+        assert!(!text.contains("Creates:"), "{text}");
     }
 
     /// Render the app list with one encrypted app in the given state.

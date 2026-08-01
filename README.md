@@ -114,6 +114,7 @@ to lock the container when the app exits, and the way back out:
 | `U` | Update **all** out-of-date apps |
 | `c` | Check for updates |
 | `s` | Open per-app config |
+| `S` | Create the app's `/usr/bin` shortcut and desktop entry |
 | `n` | Rename app (set display name) |
 | `q` / `Esc` | Quit / close overlay |
 | `t` | Toggle debug log during install/remove operations |
@@ -421,6 +422,10 @@ where only an interactive shell will find them. One command moves everything:
 wryayer relink          # every installed app
 wryayer relink firefox  # just one
 ```
+
+In the TUI, `S` does the same for the app under the cursor. It lists every path
+it is about to write — and every one it will leave alone, with the reason —
+before asking for your password.
 
 It rebuilds the `/usr/bin` shortcuts and the desktop entries from each app's
 manifest, and asks for your password once. Where two apps want the same command

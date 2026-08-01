@@ -1024,7 +1024,7 @@ fn draw_detail(f: &mut Frame, app: &mut App, area: Rect) {
         )));
     }
     lines.push(Line::from(Span::styled(
-        "  [c] Check  [u] Update  [U] Update all  [s] Config",
+        "  [c] Check  [u] Update  [U] Update all  [s] Config  [S] Shortcut",
         dim,
     )));
 
@@ -1189,7 +1189,7 @@ fn draw_import(f: &mut Frame, app: &App, area: Rect) {
 fn draw_statusbar(f: &mut Frame, app: &App, area: Rect) {
     let hint = match app.tab {
         Tab::Installed if app.detail_focused => "[↑↓] Scroll  [←/Esc] Back  [q] Quit",
-        Tab::Installed => "[Tab] Switch  [→] Details  [r] Run  [d] Delete  [e] Export  [p] Snapshots  [c] Check  [u] Update  [U] Update all  [s] Config  [n] Rename  [?] Help  [q] Quit",
+        Tab::Installed => "[Tab] Switch  [→] Details  [r] Run  [d] Delete  [e] Export  [p] Snapshots  [c] Check  [u] Update  [U] Update all  [s] Config  [S] Shortcut  [n] Rename  [?] Help  [q] Quit",
         Tab::Install   => "[Tab] Switch  Type to search  [↓] Select  [Enter] Install/Uninstall  [q] Quit",
         Tab::Import    => "[Tab] Switch  Type zip path  [Enter] Import  [Esc] Clear  [Shift+Q] Quit",
         Tab::Games     => "[Tab] Switch  [↑↓] Navigate  [Enter/r] Run  [s] Settings  [d] Delete  [i/a] Import  [q] Quit",
@@ -2411,6 +2411,7 @@ fn draw_key_help(f: &mut Frame, area: Rect) {
         ("u",          "Update the selected app"),
         ("U",          "Update all apps"),
         ("s",          "Open per-app settings (incl. game exe/prefix for wine games)"),
+        ("S",          "Create the app's /usr/bin shortcut and desktop entry"),
         ("n",          "Rename app (set display name)"),
         ("Tab",        "Switch between tabs"),
         ("↑ / k",      "Move selection up"),
