@@ -126,7 +126,7 @@ to lock the container when the app exits, and the way back out:
 
 **Multi-select install** — In the Install tab, press `Space` to mark one or more search results, then `Enter` to install all marked packages one after another. Marks persist across searches, so you can queue packages from several searches before starting. Pressing `Enter` with no marks installs the hovered item.
 
-**Install prompts** — Before an install begins, wryayer asks for a confirmation, then whether to create a `~/bin/<name>` launcher shortcut, and finally whether to install the app into its own [encrypted container](#encrypted-containers). The first two can be turned off in the Settings tab if you'd rather installs start immediately:
+**Install prompts** — Before an install begins, wryayer asks for a confirmation, then whether to create a `/usr/bin/<name>` launcher shortcut, and finally whether to install the app into its own [encrypted container](#encrypted-containers). The first two can be turned off in the Settings tab if you'd rather installs start immediately:
 
 | Setting | Effect |
 |---|---|
@@ -315,7 +315,7 @@ Re-run after updating the binary to pick up new subcommands.
 wryayer install firefox
 wryayer install neovim
 
-# Override the app directory name and/or the ~/bin/ launcher name
+# Override the app directory name and/or the /usr/bin/ launcher name
 wryayer install python --app-name py312 --bin-name python3.12
 
 # Multiple launchers from one package (e.g. a toolkit shipping several CLIs)
@@ -329,7 +329,7 @@ wryayer install signal-desktop --encrypt
 # tree (sharing deps already extracted there), but the new package gets
 # its own thin manifest dir at ~/.wryayer/<pkg>/ that carries an
 # `alias_of` pointer back to the target. Each alias is a first-class
-# entry in `wryayer list` and `wryayer tui`, gets its own ~/bin/<name>
+# entry in `wryayer list` and `wryayer tui`, gets its own /usr/bin/<name>
 # launcher, and can have its own sandbox config.
 wryayer install neovim
 wryayer install ripgrep --into neovim
@@ -383,6 +383,55 @@ wryayer run neovim --bin nvim
 # After: wryayer install ripgrep --into neovim
 wryayer run ripgrep -- --json "TODO" .   # or just: rg --json "TODO" .
 ```
+
+### Desktop integration (menus, Open-with, links)
+
+Installing an app puts its shortcut in `/usr/bin` and publishes the `.desktop`
+files the package itself ships to `/usr/share/applications`, rewritten so
+`Exec=` runs through that shortcut. The app then appears in your application
+menu, in a file manager's **Open with**, and in the list of applications that
+can handle a MIME type — the same places a natively packaged one appears.
+
+That last step is opt-in, because being the *default* handler is a preference:
+
+```fish
+# Register (or re-register) an app's desktop entries
+wryayer desktop firefox
+
+# ... and claim every MIME type and URL scheme it declares. This is what makes
+# other applications open links with it, exactly as a native install would.
+wryayer desktop firefox --default
+
+# Take the entries back out
+wryayer desktop firefox --remove
+```
+
+`--default` writes to your `~/.config/mimeapps.list`, which is where the desktop
+specification keeps per-user handler preferences; nothing system-wide changes.
+An app only offers this if its own `.desktop` file declares `MimeType=` — a
+command-line tool has nothing to register and says so.
+
+To open links **from inside** a sandbox rather than into one — a sandboxed chat
+app handing a URL to your browser — see [bound apps](#open-links-in-another-app-bound-apps).
+
+Apps installed before shortcuts became system-wide still have theirs in `~/bin`,
+where only an interactive shell will find them. One command moves everything:
+
+```fish
+wryayer relink          # every installed app
+wryayer relink firefox  # just one
+```
+
+It rebuilds the `/usr/bin` shortcuts and the desktop entries from each app's
+manifest, and asks for your password once. Where two apps want the same command
+name — an alias installed with `--into` records the same launcher as its target
+— the one that already owns it keeps it, and `relink` says so rather than
+deciding by list order.
+
+> Shortcuts and desktop entries are host state naming your apps, and they stay
+> readable when `~/.wryayer` is locked. If you keep the whole of `~/.wryayer` in
+> a container specifically so installed app names aren't visible, set
+> `WRYAYER_LAUNCHER_DIR` (e.g. to `$HOME/bin`) and skip `wryayer desktop`.
 
 ### List installed apps
 
@@ -647,7 +696,7 @@ second, separate lock so that unlocking your app collection doesn't
 automatically expose the one app you care most about.
 
 ```fish
-# During install (the TUI asks right after the ~/bin shortcut question)
+# During install (the TUI asks right after the /usr/bin shortcut question)
 wryayer install signal-desktop --encrypt
 
 # Or convert an already-installed app
@@ -900,6 +949,10 @@ Set it in the TUI (**Bound apps** row on an app's config → tick the apps to
 expose) or the GTK config page. No host-wide default-browser change is made; the
 routing exists only for the app you configure. Because browsers are
 single-instance, repeated links reuse the running Firefox as new tabs.
+
+This is the inbound direction's mirror image: bound apps let a sandbox reach
+out, while [`wryayer desktop --default`](#desktop-integration-menus-open-with-links)
+lets the host hand links *in*.
 
 ### File pickers only show shared directories
 
