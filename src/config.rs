@@ -506,20 +506,19 @@ pub fn parse_uptime(v: &str) -> Option<u64> {
     for ch in s.chars() {
         if ch.is_ascii_digit() {
             num.push(ch);
-        } else if let Some(mult) = match ch {
-            'w' => Some(604800u64),
-            'd' => Some(86400),
-            'h' => Some(3600),
-            'm' => Some(60),
-            's' => Some(1),
-            _ if ch.is_whitespace() => continue,
-            _ => None,
-        } {
+        } else {
+            let mult: u64 = match ch {
+                'w' => 604800,
+                'd' => 86400,
+                'h' => 3600,
+                'm' => 60,
+                's' => 1,
+                _ if ch.is_whitespace() => continue,
+                _ => return None, // unrecognised unit
+            };
             let n: u64 = num.parse().ok()?;
             total = total.checked_add(n.checked_mul(mult)?)?;
             num.clear();
-        } else {
-            return None; // unrecognised unit
         }
     }
     // A trailing number with no unit is treated as seconds.
