@@ -128,7 +128,7 @@ complete -c wryayer -n "not __fish_seen_subcommand_from $cmds" -a completions   
 # ── install ───────────────────────────────────────────────────────────────────
 complete -c wryayer -n '__fish_seen_subcommand_from install' -a '(__wryayer_pkgs)' -d 'package'
 complete -c wryayer -n '__fish_seen_subcommand_from install' -l app-name  -d 'Override app directory name under ~/.wryayer/' -r
-complete -c wryayer -n '__fish_seen_subcommand_from install' -l bin-name  -d 'Override launcher binary name in ~/bin/' -r
+complete -c wryayer -n '__fish_seen_subcommand_from install' -l bin-name  -d 'Override launcher binary name in /usr/bin/' -r
 complete -c wryayer -n '__fish_seen_subcommand_from install' -l bin-names -d 'Comma-separated list of launcher binary names' -r
 complete -c wryayer -n '__fish_seen_subcommand_from install' -l into      -d 'Merge into an existing app instead of creating a new one' -xa '(__wryayer_apps)'
 

@@ -3516,7 +3516,7 @@ pub fn setting_description(idx: usize) -> &'static str {
         14 => "How to answer apps that probe Avahi/zeroconf at startup (Electron/Chromium, KDE, CUPS-linked).\n\n• stub — private in-sandbox stub bus; no host change, no LAN broadcast (default)\n• host — start the host avahi-daemon if it's installed but stopped\n• off  — leave the harmless 'Daemon not running' warning as-is",
         15 => "Whether to pre-select 'Yes' or 'No' in the shortcut prompt shown before each install.\n\nThe prompt always appears — this only controls which answer is highlighted by default.",
         16 => "Whether to show the 'Install <pkg>?' confirmation before installing.\n\n• on  — ask for a y/n confirmation first (default)\n• off — start the install immediately, no prompt",
-        17 => "Whether to ask about creating a ~/bin shortcut before installing.\n\n• on  — show the shortcut prompt (default)\n• off — skip it and use the 'Default shortcut' setting above without asking",
+        17 => "Whether to ask about creating a /usr/bin shortcut before installing.\n\n• on  — show the shortcut prompt (default)\n• off — skip it and use the 'Default shortcut' setting above without asking",
         18 => "Delete the shared download/build cache (~/.cache/wryayer) after each successful install.\n\n• on  — wipe the cache every install; leaves no record of installed packages outside ~/.wryayer (useful when that dir is an encrypted container)\n• off — keep the cache to speed up re-installs (default)",
         19 => "Colour palette for the TUI (independent of Layout). Applies immediately.\n\n• default — cool: cyan accent on a dark-blue selection\n• amber   — warm: amber accent on a dark-brown selection\n• matrix  — green-phosphor: the body text itself is green, not white",
         20 => "Structural layout for the TUI (independent of Colour theme). Applies immediately.\n\n• default — horizontal tab strip on top, single-line borders\n• sidebar — vertical tab bar down the left, double-line borders, prompt-style cursor\n• bottom  — horizontal tab strip along the bottom, rounded borders, chevron cursor",
@@ -3617,12 +3617,12 @@ pub fn option_description(setting_idx: usize, choice_idx: usize) -> &'static str
         (14, 2) => "off — Do nothing; apps that probe Avahi print a harmless 'Daemon not running' warning.",
         // Default shortcut
         (15, 0) => "yes — Pre-select 'Yes' in the shortcut prompt. The prompt still appears; press Enter to confirm quickly.",
-        (15, 1) => "no — Pre-select 'No' in the shortcut prompt. Useful if you rarely want ~/bin shortcuts.",
+        (15, 1) => "no — Pre-select 'No' in the shortcut prompt. Useful if you rarely want system-wide shortcuts.",
         // Confirm install
         (16, 0) => "on — Show the 'Install <pkg>?' confirmation before every install.",
         (16, 1) => "off — Skip the confirmation and start installing right away.",
         // Ask shortcut
-        (17, 0) => "on — Ask whether to create a ~/bin shortcut before each install.",
+        (17, 0) => "on — Ask whether to create a /usr/bin shortcut before each install.",
         (17, 1) => "off — Don't ask; silently apply the 'Default shortcut' setting.",
         // Clean cache
         (18, 0) => "on — Wipe ~/.cache/wryayer after every install. No record of installed packages is left outside ~/.wryayer.",

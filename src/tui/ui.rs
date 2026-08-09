@@ -2950,14 +2950,14 @@ fn draw_ask_shortcut(f: &mut Frame, area: Rect, pkg: &str, selected: usize) {
 
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("  ~/bin/", Style::default().fg(c_dim())),
+            Span::styled("  /usr/bin/", Style::default().fg(c_dim())),
             Span::styled(pkg, Style::default().fg(c_fg()).add_modifier(Modifier::BOLD)),
         ])),
         chunks[0],
     );
 
     let choices: &[(&str, &str, Color)] = &[
-        ("Yes", "add shortcut to ~/bin/", c_green()),
+        ("Yes", "shortcut + desktop entry", c_green()),
         ("No",  "install without shortcut", c_dim()),
     ];
     let items: Vec<ListItem> = choices.iter().enumerate().map(|(i, (label, desc, color))| {
@@ -3260,7 +3260,7 @@ fn draw_no_launcher_choice(f: &mut Frame, area: Rect, pkg: &str, available_bins:
     }
 
     let choices: &[(&str, &str, &str, Color)] = &[
-        ("✚", "Keep without launcher", "files installed, no ~/bin/ shortcut", c_green()),
+        ("✚", "Keep without launcher", "files installed, no shortcut made", c_green()),
         ("✕", "Clean up",              "remove all installed files",           c_red()),
     ];
 
@@ -3505,7 +3505,7 @@ fn draw_game_name_input(f: &mut Frame, area: Rect, game_dir: &str, exe: &str, va
     f.render_widget(
         Paragraph::new(Line::from(spans))
             .block(Block::default().borders(Borders::ALL).border_type(c_border_type())
-                .title(" Name (~/.wryayer/<name>/ and ~/bin/<name>) ")
+                .title(" Name (~/.wryayer/<name>/ and /usr/bin/<name>) ")
                 .title_style(Style::default().fg(c_fg()))
                 .border_style(Style::default().fg(c_accent())))
             .style(Style::default().fg(c_fg())),

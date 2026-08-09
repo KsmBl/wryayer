@@ -24,7 +24,7 @@ enum Commands {
         /// Override the app directory name under ~/.wryayer/ (default: pkg name)
         #[arg(long)]
         app_name: Option<String>,
-        /// Override the launcher binary name placed in ~/bin/ (default: pkg name)
+        /// Override the launcher binary name placed in /usr/bin/ (default: pkg name)
         #[arg(long)]
         bin_name: Option<String>,
         /// Create multiple launchers — comma-separated list of binary names
@@ -35,7 +35,7 @@ enum Commands {
         /// instead of creating a new one. Useful for plugins, multi-tool bundles.
         #[arg(long)]
         into: Option<String>,
-        /// Keep installed files even when no launcher binary was found (no ~/bin/ shortcut created).
+        /// Keep installed files even when no launcher binary was found (no /usr/bin/ shortcut created).
         /// Used internally by the TUI after the user confirms the choice popup.
         #[arg(long, hide = true)]
         keep_without_launcher: bool,
