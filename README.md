@@ -884,11 +884,18 @@ keystream and the unbiased character selection — is written up in
   asks for your sudo password; later ones reuse the cached credentials. In the
   TUI this is just the first prompt of the install — nothing drops to a bare
   terminal.
-- **Locked apps are read-only to wryayer.** `update`, `repair`, `snapshot`,
-  `rollback` and `export` refuse to touch a locked app and tell you to unlock it
-  first. `wryayer update` (all apps) skips locked ones rather than failing.
-  Locked apps still appear in `list` and the TUI, with a 🔒 badge, and can still
-  be removed.
+- **Updating a locked app asks for its password.** `wryayer update firefox`
+  opens the container itself — from the master store, or by asking — updates the
+  app inside it, and locks it again afterwards. An app you had already unlocked
+  is left unlocked. The TUI (`u`) and the GUI collect the password in their own
+  dialog first, since the operation they run has no terminal to prompt on.
+  Updating *everything* (`wryayer update`, `U`, "Update all") cannot ask once
+  per app: it unlocks only the containers the master store answers for, and says
+  which it skipped.
+- **Other commands are read-only to a locked app.** `repair`, `snapshot`,
+  `rollback`, `export` and `update --check` refuse to touch one and tell you to
+  unlock it first — a check is not worth a password. Locked apps still appear in
+  `list` and the TUI, with a 🔒 badge, and can still be removed.
 - **With `prompt`, don't lose the password.** It is not stored anywhere. A
   generated password is printed once, at creation.
 

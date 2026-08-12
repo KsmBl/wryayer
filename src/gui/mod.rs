@@ -349,12 +349,7 @@ fn build_app_list_tab(ctx: &Ctx, games: bool) -> (gtk::Box, Rc<dyn Fn()>) {
     }
 
     act!(run_btn, |ctx: &Ctx, name: &str| launch_detached(ctx, name));
-    act!(update_btn, |ctx: &Ctx, name: &str| {
-        op::run_operation(&ctx.window, "Update", vec!["update".into(), name.into()], {
-            let ctx = ctx.clone();
-            move |_| ctx.refresh()
-        });
-    });
+    act!(update_btn, |ctx: &Ctx, name: &str| encryption::update_app(ctx, name));
     act!(check_btn, |ctx: &Ctx, name: &str| {
         op::run_operation(&ctx.window, "Check updates", vec!["update".into(), name.into(), "--check".into()], {
             let ctx = ctx.clone();
@@ -367,10 +362,12 @@ fn build_app_list_tab(ctx: &Ctx, games: bool) -> (gtk::Box, Rc<dyn Fn()>) {
         update_all_btn.connect_clicked(move |_| {
             let ctx2 = ctx.clone();
             confirm(&ctx, "Update all apps?", "Re-resolves and updates every installed app that has a newer version.", false, move || {
-                op::run_operation(&ctx2.window, "Update all apps", vec!["update".into()], {
-                    let ctx = ctx2.clone();
-                    move |_| ctx.refresh()
-                });
+                let apps: Vec<String> = list_all_apps()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|m| m.app.name)
+                    .collect();
+                encryption::update_all(&ctx2, &apps);
             });
         });
     }

@@ -2245,7 +2245,7 @@ fn ask_encrypt(app: &mut App, pkg: String, title: String, args: Vec<String>) {
     // asking "encrypt?" here would imply a second container that never exists.
     if let Some(root) = merge_target_root(&args) {
         if crate::veracrypt::is_encrypted(&root) {
-            begin_merge_into_encrypted(app, title, args, &root);
+            begin_op_on_container(app, title, args, &root);
             return;
         }
     }
@@ -2307,12 +2307,41 @@ fn open_container_stages(app_name: &str) -> Vec<SecretStage> {
     stages
 }
 
-/// Start an install into an already-encrypted app: no encryption question, just
-/// whatever is needed to open that app's container.
-fn begin_merge_into_encrypted(app: &mut App, title: String, args: Vec<String>, root: &str) {
-    // The master store may already know this container's password, in which
-    // case the install can open it without asking anything.
-    let stages = open_container_stages(root);
+/// Start an operation that has to open an app's existing container — an install
+/// merging into it, or an update rewriting the tree inside it.
+///
+/// No encryption question is asked: the container is already there. Only what
+/// is needed to open it is collected, which for a master-backed app with sudo
+/// still cached is nothing at all.
+fn begin_op_on_container(app: &mut App, title: String, args: Vec<String>, root: &str) {
+    begin_op_with_stages(app, title, args, open_container_stages(root));
+}
+
+/// Start an operation that touches *several* apps' containers, where no single
+/// container password could be the answer for all of them.
+///
+/// It gets root and the master store — everything an unlocking that asks the
+/// user nothing per app can be built from. Containers whose password is only in
+/// the user's head are left locked, and the operation says which it skipped.
+fn begin_unattended_unlock_op(app: &mut App, title: String, args: Vec<String>) {
+    let mut stages = Vec::new();
+    if !crate::veracrypt::sudo_is_primed() {
+        stages.push(SecretStage::Sudo);
+    }
+    if crate::secrets::exists() && !crate::secrets::is_unlocked() {
+        stages.push(SecretStage::MasterExisting);
+    }
+    begin_op_with_stages(app, title, args, stages);
+}
+
+/// Collect `stages`, then run the operation with whatever was collected handed
+/// to the child on stdin. Nothing to collect means nothing to ask.
+fn begin_op_with_stages(
+    app: &mut App,
+    title: String,
+    args: Vec<String>,
+    stages: Vec<SecretStage>,
+) {
     if stages.is_empty() {
         launch_encrypted_op(app, title, args, "", "", "");
         return;
@@ -2585,9 +2614,7 @@ impl SecretStage {
             SecretStage::MasterExisting => "Unlocks the master password store for this boot.",
             SecretStage::ContainerNew => "Opens this app's container. Not stored anywhere.",
             SecretStage::ContainerConfirm => "Must match what you just typed.",
-            SecretStage::ContainerExisting => {
-                "Opens the container this app is being installed into."
-            }
+            SecretStage::ContainerExisting => "Opens the container this app's files live in.",
         }
     }
 }
@@ -2850,10 +2877,33 @@ fn execute_action(app: &mut App, action: PendingAction) {
                 launch_op(app, title, args, None, true);
             }
         }
-        PendingAction::Update(name) =>
-            launch_op(app, format!("Update — {name}"), vec!["update".into(), name], None, true),
-        PendingAction::UpdateAll =>
-            launch_op(app, "Update all apps".into(), vec!["update".into()], None, true),
+        PendingAction::Update(name) => {
+            let title = format!("Update — {name}");
+            let args = vec!["update".into(), name.clone()];
+            // An update rewrites the app's tree, so a locked container has to be
+            // opened first — and the password has to be collected here, because
+            // the child is piped and cannot prompt for one.
+            if crate::veracrypt::is_locked(&name) {
+                begin_op_on_container(app, title, args, &name);
+            } else {
+                launch_op(app, title, args, None, true);
+            }
+        }
+        PendingAction::UpdateAll => {
+            let title = "Update all apps".to_string();
+            let args = vec!["update".into()];
+            // Updating everything cannot ask for one container password per app,
+            // so it unlocks only what the master store already answers for and
+            // skips the rest. Sudo and the master password are collected once.
+            let names: Vec<&str> = app.installed.iter().map(|m| m.app.name.as_str()).collect();
+            let any_locked =
+                crate::commands::encrypt::scan(names).values().any(|state| state.locked);
+            if any_locked {
+                begin_unattended_unlock_op(app, title, args);
+            } else {
+                launch_op(app, title, args, None, true);
+            }
+        }
         PendingAction::Install { pkg, app_name: None, into: None } => {
             let title = format!("Install — {pkg}");
             let args = vec!["install".into(), pkg.clone()];

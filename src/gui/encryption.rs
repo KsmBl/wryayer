@@ -428,6 +428,44 @@ pub fn lock_container(ctx: &Ctx, app_name: &str) {
     );
 }
 
+/// Update `app_name`, opening its container first when it is locked.
+///
+/// An update rewrites the tree the container holds, so it has to be mounted —
+/// and the password for it has to come from this dialog, since the child the
+/// GUI streams has no terminal to ask on. An unlocked (or unencrypted) app goes
+/// straight to the operation without being asked anything.
+pub fn update_app(ctx: &Ctx, app_name: &str) {
+    let title = format!("Update — {app_name}");
+    let args = vec!["update".to_string(), app_name.to_string()];
+    if !crate::veracrypt::is_locked(app_name) {
+        run_plain(ctx, &title, args);
+        return;
+    }
+    run_with_secrets(ctx, &title, args, Needs::for_existing_container(app_name));
+}
+
+/// Update every app that has a newer version.
+///
+/// No single container password could open all of them, so this collects only
+/// what unlocks without asking per app — root, and the master store. Containers
+/// whose password is only in the user's head stay locked, and the operation's
+/// log names the ones it skipped.
+pub fn update_all(ctx: &Ctx, apps: &[String]) {
+    let title = "Update all apps".to_string();
+    let args = vec!["update".to_string()];
+    let states = crate::commands::encrypt::scan(apps.iter().map(String::as_str));
+    if !states.values().any(|state| state.locked) {
+        run_plain(ctx, &title, args);
+        return;
+    }
+    let needs = Needs {
+        sudo: !crate::veracrypt::sudo_is_primed(),
+        master_existing: crate::secrets::exists() && !crate::secrets::is_unlocked(),
+        ..Default::default()
+    };
+    run_with_secrets(ctx, &title, args, needs);
+}
+
 /// Enlarge `app_name`'s container.
 pub fn grow_container(ctx: &Ctx, app_name: &str) {
     let ctx2 = ctx.clone();
@@ -453,6 +491,12 @@ pub fn grow_container(ctx: &Ctx, app_name: &str) {
             );
         },
     );
+}
+
+/// Stream an operation that needs no secrets at all into a console.
+fn run_plain(ctx: &Ctx, title: &str, args: Vec<String>) {
+    let ctx2 = ctx.clone();
+    op::run_operation(&ctx.window, title, args, move |_| ctx2.refresh());
 }
 
 /// Collect whatever `needs` requires, then stream the operation into a console.
