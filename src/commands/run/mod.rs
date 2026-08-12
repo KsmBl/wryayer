@@ -38,6 +38,9 @@ pub fn run(app_name: &str, bin: Option<&str>, args: &[String]) -> Result<()> {
     // container is unlocked once `alias_of` is known.
     crate::commands::encrypt::recover_interrupted_encrypt(app_name)?;
     crate::commands::encrypt::ensure_unlocked(app_name)?;
+    // An encrypted app is updated from the inside, so the scratch space an
+    // interrupted update leaves behind was invisible until just now.
+    crate::commands::update::recover_interrupted_update(app_name)?;
 
     let manifest = read_manifest(app_name)
         .with_context(|| format!("'{app_name}' is not installed"))?;
@@ -52,6 +55,7 @@ pub fn run(app_name: &str, bin: Option<&str>, args: &[String]) -> Result<()> {
         crate::commands::update::recover_interrupted_update(&fs_root_name)?;
         crate::commands::encrypt::recover_interrupted_encrypt(&fs_root_name)?;
         crate::commands::encrypt::ensure_unlocked(&fs_root_name)?;
+        crate::commands::update::recover_interrupted_update(&fs_root_name)?;
     }
     // The container is open now, so this is the first point its fill level can
     // be read — and the last point before the app starts writing into it.

@@ -108,6 +108,10 @@ enum Commands {
         /// ones (a clean rebuild; clears any stale files a delta update leaves)
         #[arg(long)]
         full: bool,
+        /// Read the container/master/sudo passwords from stdin as key=value
+        /// lines. Used internally by the TUI, which collects them itself.
+        #[arg(long, hide = true)]
+        encrypt_secrets_stdin: bool,
     },
     /// Scan an app for missing shared libraries and install them
     Repair {
@@ -465,8 +469,10 @@ fn main() {
         Commands::Relink { app_name } => commands::relink::run(app_name.as_deref()),
         Commands::Desktop { app_name, default, remove } => desktop(&app_name, default, remove),
         Commands::Run { app_name, bin, args } => commands::run::run(&app_name, bin.as_deref(), &args),
-        Commands::Update { app_name, check, full } => {
-            commands::update::run(app_name.as_deref(), check, full)
+        Commands::Update { app_name, check, full, encrypt_secrets_stdin } => {
+            commands::encrypt::supplied_secrets(encrypt_secrets_stdin).and_then(|secrets| {
+                commands::update::run(app_name.as_deref(), check, full, &secrets)
+            })
         }
         Commands::Repair { app_name } => commands::repair::run(&app_name),
         Commands::Config { app_name, setting } => match setting {

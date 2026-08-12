@@ -400,7 +400,16 @@ or the machine loses power mid-update:
    `extract_package` unlink-firsts, overlaying a changed file writes a fresh
    inode and never mutates the shared clone/snapshot inode.
 6. Swaps it in with two atomic renames: the old tree is parked as
-   `.<app>.wr-old`, then the staging tree is moved into place.
+   `.<app>.wr-old`, then the staging tree is moved into place. An **encrypted**
+   app cannot be swapped this way — its directory is a VeraCrypt mount point,
+   which the kernel refuses to rename, and nothing outside the container shares
+   its filesystem, so even the hard-linked delta clone would fail with `EXDEV`.
+   There `SwapLayout` puts the scratch space *inside* the tree (`.wr-new`,
+   `.wr-old`, `.wr-phase`; the `.wr-` prefix is reserved) and swaps by moving
+   top-level entries: every live entry into `.wr-old`, then every built entry
+   out of `.wr-new`. Both halves leave entries spread across all three places,
+   so `.wr-phase` records which half is running — written atomically, because
+   reading it wrong is the one way to mix two versions of a tree.
 7. Carries the user data (`home`, `config.ini`, `.snapshots`) from the parked
    old tree into the new one, then drops the old tree. `carry_over_user_data`
    **merges** rather than skips on collision, so a package-provided empty
@@ -412,7 +421,11 @@ or the machine loses power mid-update:
 `recover_interrupted_update()` runs at the start of every update and every
 launch: it finishes a swap that was interrupted forward, or restores the parked
 old tree if the new one never landed — so an interrupted update always heals to
-a consistent, fully-extracted tree on the next run.
+a consistent, fully-extracted tree on the next run. It heals both swap forms,
+and a launch runs it again after unlocking, since an encrypted app's scratch
+space is invisible until its container is mounted. Where the in-place recovery
+has to guess — a phase marker that never made it to disk — it rolls back, the
+branch that trusts nothing it has not verified.
 
 ### Trade-off: delta cruft
 
@@ -664,11 +677,18 @@ existing container" rule, used by merge installs and by decryption.
 
 ### Guardrails
 
-`require_unlocked` fails `update`, `repair`, `snapshot`, `rollback` and `export`
-on a locked app. This matters beyond convenience: the app directory is a mount
-point, so an operation run while locked would write its result into the
-*underlying* directory, where the next mount would hide it. `wryayer update`
-across all apps skips locked ones instead of failing the batch.
+`require_unlocked` fails `repair`, `snapshot`, `rollback`, `export` and
+`update --check` on a locked app. This matters beyond convenience: the app
+directory is a mount point, so an operation run while locked would write its
+result into the *underlying* directory, where the next mount would hide it.
+
+`update` is the exception: naming an app is a request to update *that* app, so
+it opens the container itself through `open_for_operation`, which returns an
+`OpenContainer` guard that re-locks on drop — including on the error path, and
+only for a container it actually opened. Across all apps there is no one
+password to ask for, so the sweep unlocks only what `can_open_unattended`
+answers for (a master-store app whose store is open this boot) and skips the
+rest, as before.
 
 ### Password generation (`entropy.rs`)
 

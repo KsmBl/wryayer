@@ -85,6 +85,15 @@ impl SuppliedSecrets {
         }
         Ok(out)
     }
+
+    /// The same secrets without the container password.
+    ///
+    /// For an operation that spans several apps: a password typed for one
+    /// container is not an answer for another's, and offering it to VeraCrypt
+    /// as if it were would fail the wrong app for the wrong reason.
+    pub fn without_container(&self) -> Self {
+        Self { container: None, master: self.master.clone(), sudo: self.sudo.clone() }
+    }
 }
 
 /// The container password for a pending encryption, resolved and validated.
@@ -522,6 +531,78 @@ pub fn unlock_and_password(
     Ok(password)
 }
 
+/// A container held open for the duration of one operation, and closed again
+/// when the guard is dropped.
+///
+/// The point is to leave the app exactly as the operation found it: one the
+/// user had already unlocked stays unlocked, one that was locked is locked
+/// again — including when the operation fails partway, which is precisely when
+/// a container silently left open would be least expected.
+#[must_use = "the container stays open until this guard is dropped"]
+pub struct OpenContainer {
+    /// The app to re-lock, or `None` when this guard did not unlock anything.
+    app: Option<String>,
+}
+
+impl OpenContainer {
+    /// A guard over nothing: the app is not encrypted, or was already open.
+    pub fn borrowed() -> Self {
+        Self { app: None }
+    }
+}
+
+impl Drop for OpenContainer {
+    fn drop(&mut self) {
+        if let Some(app) = self.app.take() {
+            relock_on_exit(&app, true);
+        }
+    }
+}
+
+/// Mount `app_name`'s container for an operation that has to read and rewrite
+/// its tree, resolving the password from whatever the caller collected, the
+/// master store, or a prompt.
+///
+/// No-op for an app that isn't encrypted, and for one whose container is
+/// already mounted — that one was opened by the user, so it is not this
+/// operation's to close.
+pub fn open_for_operation(
+    app_name: &str,
+    supplied: &SuppliedSecrets,
+) -> Result<OpenContainer> {
+    if !veracrypt::is_encrypted(app_name) {
+        return Ok(OpenContainer::borrowed());
+    }
+    if let Some(sudo) = &supplied.sudo {
+        veracrypt::prime_sudo(sudo)?;
+    }
+    if veracrypt::is_mounted(app_name)? {
+        return Ok(OpenContainer::borrowed());
+    }
+    // Mounting needs root now, and closing the container again will need it
+    // once the operation is done — which for an update is after every package
+    // has been downloaded and extracted, long enough for a sudo ticket to
+    // lapse and leave the unmount prompting where nobody can answer.
+    veracrypt::keep_sudo_alive();
+    let password = resolve_password_with(app_name, supplied)?;
+    veracrypt::mount(app_name, &password)?;
+    Ok(OpenContainer { app: Some(app_name.to_string()) })
+}
+
+/// Whether `app_name`'s container can be opened without asking a human for
+/// anything.
+///
+/// True only for a master-store app whose store is already open for this boot.
+/// Used by operations that sweep over every installed app, where stopping on
+/// each encrypted one to ask for a password would be worse than skipping it.
+pub fn can_open_unattended(app_name: &str) -> bool {
+    password_source(app_name) == PasswordSource::Master
+        && crate::secrets::open_cached()
+            .ok()
+            .flatten()
+            .is_some_and(|store| store.get(app_name).is_some())
+}
+
 /// Look up or ask for `app_name`'s container password.
 fn resolve_password(app_name: &str) -> Result<Zeroizing<String>> {
     resolve_password_with(app_name, &SuppliedSecrets::default())
@@ -602,9 +683,10 @@ pub fn should_relock_on_exit(app_name: &str) -> bool {
         && read_config(app_name).map(|c| c.lock_on_exit).unwrap_or(true)
 }
 
-/// Unmount `app_name`'s container after the app has exited.
+/// Unmount `app_name`'s container once whatever needed it is done — the app has
+/// exited, or an operation that opened the container has finished with it.
 ///
-/// Never fails the launch: if another instance of the app is still running, the
+/// Never fails the caller: if another instance of the app is still running, the
 /// kernel refuses to unmount a busy filesystem and the container simply stays
 /// open — which is the correct outcome, not an error.
 pub fn relock_on_exit(app_name: &str, relock: bool) {
