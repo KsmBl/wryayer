@@ -540,10 +540,40 @@ fn move_entries(from: &Path, to: &Path) -> Result<()> {
         if dst.symlink_metadata().is_ok() {
             remove_any(&dst)?;
         }
-        fs::rename(&src, &dst)
-            .with_context(|| format!("failed to move {} to {}", src.display(), dst.display()))?;
+        rename_entry(&src, &dst)?;
     }
     Ok(())
+}
+
+/// Move one entry into a different directory, whatever its permissions.
+///
+/// Moving a directory rewrites its `..` entry, so the kernel wants write
+/// permission on the directory *being moved* — and its owner is no exception to
+/// a missing write bit. An app tree is full of directories that lack one:
+/// `proc` and `sys` arrive as `dr-xr-xr-x` from the `filesystem` package, and a
+/// swap that cannot move them cannot apply an update at all.
+///
+/// So the bit is granted for the move and taken straight back off afterwards,
+/// on whichever path the directory ended up at. The tree keeps the permissions
+/// its packages asked for.
+fn rename_entry(src: &Path, dst: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let meta = fs::symlink_metadata(src)
+        .with_context(|| format!("failed to stat {}", src.display()))?;
+    let mode = meta.permissions().mode();
+    let borrow_write = meta.is_dir() && mode & 0o200 == 0;
+    if borrow_write {
+        fs::set_permissions(src, fs::Permissions::from_mode(mode | 0o200))
+            .with_context(|| format!("failed to make {} movable", src.display()))?;
+    }
+
+    let moved = fs::rename(src, dst);
+    if borrow_write {
+        let landed = if moved.is_ok() { dst } else { src };
+        let _ = fs::set_permissions(landed, fs::Permissions::from_mode(mode));
+    }
+    moved.with_context(|| format!("failed to move {} to {}", src.display(), dst.display()))
 }
 
 /// Delete whatever is at `path`, directory or not.
@@ -651,7 +681,7 @@ fn carry_over_user_data(from: &Path, to: &Path) -> Result<()> {
             continue;
         }
         if !dst.exists() {
-            fs::rename(&src, &dst)
+            rename_entry(&src, &dst)
                 .with_context(|| format!("failed to carry over '{item}' during update"))?;
             continue;
         }
@@ -692,7 +722,7 @@ fn merge_preferring_src(src: &Path, dst: &Path) -> Result<()> {
                     .with_context(|| format!("failed to clear {}", d.display()))?;
             }
         }
-        fs::rename(&s, &d).with_context(|| format!("failed to move {}", s.display()))?;
+        rename_entry(&s, &d)?;
     }
     // `src` is now empty; drop it so the backup removal has nothing left to do.
     fs::remove_dir(src).ok();
@@ -1020,6 +1050,41 @@ mod tests {
         assert!(!layout.staging.exists());
         assert!(!layout.backup.exists());
         assert!(!app.join(".wr-phase").exists());
+    }
+
+    /// Regression: an app tree is not all writable directories.
+    ///
+    /// `proc` and `sys` come out of the `filesystem` package as `dr-xr-xr-x`,
+    /// and moving a directory to a new parent needs write permission on it, so
+    /// a swap that renames entries as they are stops dead at the first one —
+    /// which is where an encrypted app's update failed.
+    #[test]
+    fn swapping_in_place_moves_read_only_directories() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let app = tmp.path().join("app");
+        let layout = SwapLayout {
+            staging: app.join(".wr-new"),
+            backup: app.join(".wr-old"),
+            phase: Some(app.join(".wr-phase")),
+        };
+
+        fs::create_dir_all(app.join("proc")).unwrap();
+        fs::set_permissions(app.join("proc"), fs::Permissions::from_mode(0o555)).unwrap();
+        fs::create_dir_all(layout.staging.join("proc")).unwrap();
+        fs::set_permissions(layout.staging.join("proc"), fs::Permissions::from_mode(0o555))
+            .unwrap();
+
+        layout.apply(&app, "app").unwrap();
+
+        // Moved, and still exactly as read-only as the package made it.
+        let mode = fs::metadata(app.join("proc")).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o555, "the tree must keep its own permissions");
+        assert_eq!(
+            fs::metadata(layout.backup.join("proc")).unwrap().permissions().mode() & 0o777,
+            0o555,
+        );
     }
 
     /// Old files win over any colliding entry the new skeleton happened to carry.
