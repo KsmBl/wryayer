@@ -965,6 +965,14 @@ runs `firefox <url>` — or calls `xdg-open`, which is routed to your bound brow
 automatically — the request is forwarded out and re-launched as
 `wryayer run firefox -- <url>` in Firefox's own container.
 
+Apps that don't run a command at all are covered too. Thunderbird never runs
+`firefox`: it asks the desktop which application handles `https` links, so
+wryayer answers that question inside the sandbox as well, registering each bound
+app under the file types and URL schemes its own package declares and making
+your bound browser the default for links. Clicking a link in a sandboxed
+Thunderbird opens it in your bound Firefox; `mailto:` links stay with
+Thunderbird, since it handles those itself.
+
 Set it in the TUI (**Bound apps** row on an app's config → tick the apps to
 expose) or the GTK config page. No host-wide default-browser change is made; the
 routing exists only for the app you configure. Because browsers are

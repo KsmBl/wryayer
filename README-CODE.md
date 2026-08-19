@@ -284,12 +284,28 @@ own container. For each bound app, `run.rs`:
 3. also symlinks the generic openers (`xdg-open`, `x-www-browser`, …) to the
    helper and binds them over the real `/usr/bin/xdg-open`, setting
    `WRYAYER_OPEN_APP` to the chosen browser (`pick_open_app` prefers a
-   browser-named bound app).
+   browser-named bound app);
+4. generates a **desktop-entry tree** (`desktop::sandbox_entries`, written by
+   `bus::write_bound_app_entries` into the app's `.spoof` dir and bound at
+   `/.wryayer-share`): one `.desktop` per bound app whose `Exec`/`TryExec` point
+   at that app's shim, claiming the MIME types the bound app's own package
+   declares, plus a `mimeapps.list` making the link handler the default. The
+   directory goes first on `XDG_DATA_DIRS`, and its `xdg/mimeapps.list` copy
+   first on `XDG_CONFIG_DIRS`.
 
 When the sandboxed app runs `firefox <url>` (or `xdg-open <url>`), the helper
 sends the target app name + args over the socket; the listener validates it
 against the allowed set and runs `wryayer run <app> -- <args>` on the host. The
 listener carries `PR_SET_PDEATHSIG` so it dies with the sandbox.
+
+Step 4 is what makes *link clicks* work, as opposed to command lines.
+Thunderbird never runs `firefox`: it asks the desktop which application handles
+`x-scheme-handler/https`, and a container holding one app has no entry to
+answer with, so the click does nothing at all. The generated entries are that
+answer. Types the sandboxed app declares itself (Thunderbird's `mailto:`,
+`message/rfc822`, …) are left out of them, so the app keeps answering for its
+own — an unclaimed type is what makes GIO fall through to the container's own
+entry.
 
 ### Avahi / zeroconf
 
