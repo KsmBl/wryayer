@@ -414,6 +414,209 @@ fn resolve_icon(name: &str, tree: &Path) -> String {
         .unwrap_or_else(|| name.to_string())
 }
 
+// ── entries for the sandbox side of app binding ───────────────────────────────
+//
+// Standing in for a bound app on the sandbox's PATH is not enough for one app
+// to open another's links. Thunderbird never runs `firefox`: it asks the
+// desktop which application handles `x-scheme-handler/https`, and inside a
+// sandbox with no `.desktop` file to answer that, the click does nothing at
+// all. These entries are the answer — the same trick as the host ones, but
+// pointed at the portal shims instead of at `/usr/bin` shortcuts.
+
+/// An app made reachable from inside another app's sandbox.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundApp {
+    /// Its wryayer app name, which is also the name of the portal shim that
+    /// stands in for it on the sandbox's PATH.
+    pub app: String,
+    /// What to call it in an "Open with" list.
+    pub name: String,
+    /// The MIME types and URL schemes it declares it can open.
+    pub mime_types: Vec<String>,
+}
+
+impl BoundApp {
+    /// Whether it already claims some URL scheme, i.e. whether it can be
+    /// handed a link as it stands.
+    pub fn handles_links(&self) -> bool {
+        self.mime_types.iter().any(|m| m.starts_with("x-scheme-handler/"))
+    }
+}
+
+/// What a link handler is assumed to open when nothing says otherwise — its
+/// container may be locked, or it may ship no `.desktop` file at all, and
+/// "open this link in the app I bound" has to work either way.
+pub const LINK_MIME_TYPES: &[&str] = &[
+    "text/html",
+    "x-scheme-handler/http",
+    "x-scheme-handler/https",
+    "x-scheme-handler/ftp",
+];
+
+/// Describe `app_name` from its own container: the name its package gives it
+/// and the MIME types that package declares.  An app whose container says
+/// nothing — locked, or a command-line tool with no entry — keeps its bare app
+/// name and claims nothing.
+pub fn bound_app(app_name: &str) -> BoundApp {
+    let (name, mime_types) = declared(app_name)
+        .unwrap_or_else(|| (app_name.to_string(), Vec::new()));
+    BoundApp { app: app_name.to_string(), name, mime_types }
+}
+
+
+/// The name and MIME types an installed app's packaged entries declare.
+pub(crate) fn declared(app_name: &str) -> Option<(String, Vec<String>)> {
+    let manifest = read_manifest(app_name).ok()?;
+    // As in `install`: an alias owns shortcuts, not files — the entries live in
+    // the tree of the app it points at.
+    let fs_root = manifest.app.alias_of.clone().unwrap_or_else(|| app_name.to_string());
+    let tree = app_dir(&fs_root).ok()?;
+
+    let mut launchers = manifest.app.launchers.clone();
+    if !manifest.app.main_binary.is_empty() && !launchers.contains(&manifest.app.main_binary) {
+        launchers.push(manifest.app.main_binary.clone());
+    }
+
+    let mut first_name = None;
+    let mut main_name = None;
+    let mut mimes: Vec<String> = Vec::new();
+    for (_, content) in packaged_entries(&tree) {
+        // A container holds the app's dependencies too, and some of them ship
+        // entries of their own (avahi-discover, htop, …). Only the app's own
+        // launchers speak for it — the same rule `install` publishes by.
+        let Some(binary) = exec_binary(&content) else { continue };
+        if !launchers.contains(&binary) {
+            continue;
+        }
+        let name = value(&content, "Name=");
+        // A package can ship several entries (a private-window launcher, a
+        // settings shortcut); the one starting the app itself names it best.
+        if binary == manifest.app.main_binary {
+            main_name = main_name.or_else(|| name.clone());
+        }
+        first_name = first_name.or(name);
+        for mime in mime_types(&content) {
+            if !mimes.contains(&mime) {
+                mimes.push(mime);
+            }
+        }
+    }
+
+    let name = main_name
+        .or(first_name)
+        .unwrap_or_else(|| app_name.to_string());
+    Some((name, mimes))
+}
+
+/// The files making up the desktop-entry tree handed to a sandbox, as
+/// (path relative to that tree, contents).  `shim_dir` is where the portal
+/// shims live inside the sandbox.
+///
+/// A `mimeapps.list` is written twice: next to the entries, where it belongs to
+/// them, and again under `xdg/` for `XDG_CONFIG_DIRS` — which the specification
+/// ranks above every data directory, so a default left behind in the container
+/// cannot outrank the app the user just bound.
+///
+/// `reserved` are the types the sandboxed app itself handles, and no bound app
+/// is offered for them: binding Firefox into Thunderbird should hand it the web
+/// links, not the `mailto:` ones Thunderbird is there to answer. Leaving them
+/// merely undefaulted would not be enough — with no default set, GIO falls back
+/// to whichever application claims the type first.
+pub fn sandbox_entries(
+    apps: &[BoundApp],
+    shim_dir: &str,
+    reserved: &[String],
+) -> Vec<(String, String)> {
+    let mut files = Vec::new();
+
+    // MIME type → the entries claiming it, first claimant first.  Order is the
+    // caller's: whichever app it lists first wins the types two apps share.
+    let mut claims: Vec<(String, Vec<String>)> = Vec::new();
+    for app in apps {
+        let id = sandbox_entry_id(&app.app);
+        let mimes: Vec<String> = app
+            .mime_types
+            .iter()
+            .filter(|m| !reserved.contains(m))
+            .cloned()
+            .collect();
+        files.push((format!("applications/{id}"), sandbox_entry(app, &mimes, shim_dir)));
+        for mime in &mimes {
+            match claims.iter_mut().find(|(m, _)| m == mime) {
+                Some((_, ids)) => {
+                    if !ids.contains(&id) {
+                        ids.push(id.clone());
+                    }
+                }
+                None => claims.push((mime.clone(), vec![id.clone()])),
+            }
+        }
+    }
+
+    let defaults: String = claims
+        .iter()
+        .map(|(mime, ids)| format!("{mime}={}\n", ids[0]))
+        .collect();
+    let associations: String = claims
+        .iter()
+        .map(|(mime, ids)| format!("{mime}={};\n", ids.join(";")))
+        .collect();
+
+    let mimeapps =
+        format!("[Default Applications]\n{defaults}\n[Added Associations]\n{associations}");
+    files.push(("applications/mimeapps.list".to_string(), mimeapps.clone()));
+    files.push(("xdg/mimeapps.list".to_string(), mimeapps));
+    // Written by hand because update-desktop-database cannot be run against a
+    // directory that only exists inside the sandbox — and GIO consults the
+    // cache before falling back to scanning the entries itself.
+    files.push((
+        "applications/mimeinfo.cache".to_string(),
+        format!("[MIME Cache]\n{associations}"),
+    ));
+
+    files
+}
+
+/// What a sandbox-side entry for `app` is called.  Prefixed so it can never
+/// collide with an entry the container itself ships.
+fn sandbox_entry_id(app: &str) -> String {
+    format!("wryayer-{app}.desktop")
+}
+
+/// One sandbox-side entry: everything the desktop needs to hand this app a
+/// link, and nothing else.  `Exec` is the portal shim, so choosing this entry
+/// launches the app in its own container.
+fn sandbox_entry(app: &BoundApp, mime_types: &[String], shim_dir: &str) -> String {
+    let exec = format!("{}/{}", shim_dir.trim_end_matches('/'), app.app);
+    // TryExec is not decoration here: GIO discards an entry whose TryExec it
+    // cannot find, so it has to name the shim, which does exist in the sandbox.
+    let mut entry = format!(
+        "[Desktop Entry]\n\
+         Type=Application\n\
+         Name={}\n\
+         {OWNER_KEY}={}\n\
+         Exec={exec} %U\n\
+         TryExec={exec}\n\
+         Terminal=false\n\
+         StartupNotify=false\n",
+        app.name, app.app,
+    );
+    if !mime_types.is_empty() {
+        entry.push_str(&format!("MimeType={};\n", mime_types.join(";")));
+    }
+    entry
+}
+
+/// The value of a desktop-entry key, unlocalised, or None when it is missing
+/// or empty.
+fn value(content: &str, key: &str) -> Option<String> {
+    content
+        .lines()
+        .find_map(|l| l.trim().strip_prefix(key))
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
 // ── privileged file operations ───────────────────────────────────────────────
 
 fn write_entry(path: &Path, content: &str) -> Result<()> {
@@ -785,5 +988,131 @@ image/png=gimp.desktop
 
         let err = set_default("htop").unwrap_err().to_string();
         assert!(err.contains("no registered desktop entries"), "{err}");
+    }
+
+    // ── sandbox entries ──────────────────────────────────────────────────────
+
+    fn browser() -> BoundApp {
+        BoundApp {
+            app: "firefox".to_string(),
+            name: "Firefox".to_string(),
+            mime_types: vec![
+                "text/html".to_string(),
+                "x-scheme-handler/http".to_string(),
+                "x-scheme-handler/https".to_string(),
+            ],
+        }
+    }
+
+    fn file_of<'a>(files: &'a [(String, String)], path: &str) -> &'a str {
+        files
+            .iter()
+            .find(|(p, _)| p == path)
+            .map(|(_, c)| c.as_str())
+            .unwrap_or_else(|| panic!("no {path} in {:?}", files.iter().map(|(p, _)| p).collect::<Vec<_>>()))
+    }
+
+    #[test]
+    fn sandbox_entry_launches_through_the_shim() {
+        let files = sandbox_entries(&[browser()], "/.wryayer-bin", &[]);
+        let entry = file_of(&files, "applications/wryayer-firefox.desktop");
+        assert!(entry.contains("Exec=/.wryayer-bin/firefox %U"), "{entry}");
+        // GIO discards an entry whose TryExec it cannot find, so it must name
+        // the shim rather than the app's real binary.
+        assert!(entry.contains("TryExec=/.wryayer-bin/firefox"), "{entry}");
+        assert!(entry.contains("Name=Firefox"), "{entry}");
+    }
+
+    #[test]
+    fn sandbox_entry_claims_the_declared_mime_types() {
+        let files = sandbox_entries(&[browser()], "/.wryayer-bin", &[]);
+        let entry = file_of(&files, "applications/wryayer-firefox.desktop");
+        assert_eq!(
+            mime_types(entry),
+            ["text/html", "x-scheme-handler/http", "x-scheme-handler/https"]
+        );
+    }
+
+    #[test]
+    fn sandbox_entry_claiming_nothing_has_no_mime_line() {
+        let app = BoundApp { app: "vim".to_string(), name: "Vim".to_string(), mime_types: Vec::new() };
+        let files = sandbox_entries(&[app], "/.wryayer-bin", &[]);
+        let entry = file_of(&files, "applications/wryayer-vim.desktop");
+        assert!(!entry.contains("MimeType="), "{entry}");
+    }
+
+    #[test]
+    fn sandbox_defaults_go_to_the_first_claimant() {
+        let other = BoundApp {
+            app: "chromium".to_string(),
+            name: "Chromium".to_string(),
+            mime_types: vec!["x-scheme-handler/https".to_string()],
+        };
+        let files = sandbox_entries(&[browser(), other], "/.wryayer-bin", &[]);
+        let list = file_of(&files, "applications/mimeapps.list");
+        assert!(list.contains("x-scheme-handler/https=wryayer-firefox.desktop\n"), "{list}");
+        // The loser is still offered, just not as the default.
+        assert!(
+            list.contains("x-scheme-handler/https=wryayer-firefox.desktop;wryayer-chromium.desktop;"),
+            "{list}"
+        );
+    }
+
+    #[test]
+    fn a_type_the_sandboxed_app_answers_itself_is_not_handed_out() {
+        let mut app = browser();
+        app.mime_types.push("x-scheme-handler/mailto".to_string());
+        let reserved = vec!["x-scheme-handler/mailto".to_string()];
+        let files = sandbox_entries(&[app], "/.wryayer-bin", &reserved);
+        let list = file_of(&files, "applications/mimeapps.list");
+        // Not defaulted, and not claimed either — an unclaimed type is what
+        // leaves the sandboxed app's own entry answering for it.
+        assert!(!list.contains("mailto"), "{list}");
+        assert!(list.contains("x-scheme-handler/https=wryayer-firefox.desktop"), "{list}");
+        let entry = file_of(&files, "applications/wryayer-firefox.desktop");
+        assert!(!entry.contains("mailto"), "{entry}");
+        assert!(entry.contains("x-scheme-handler/https"), "{entry}");
+    }
+
+    #[test]
+    fn sandbox_mimeapps_is_written_where_config_dirs_look_too() {
+        let files = sandbox_entries(&[browser()], "/.wryayer-bin", &[]);
+        assert_eq!(
+            file_of(&files, "applications/mimeapps.list"),
+            file_of(&files, "xdg/mimeapps.list")
+        );
+    }
+
+    #[test]
+    fn sandbox_mime_cache_lists_every_claimant() {
+        let files = sandbox_entries(&[browser()], "/.wryayer-bin", &[]);
+        let cache = file_of(&files, "applications/mimeinfo.cache");
+        assert!(cache.starts_with("[MIME Cache]\n"), "{cache}");
+        assert!(cache.contains("text/html=wryayer-firefox.desktop;"), "{cache}");
+    }
+
+    #[test]
+    fn sandbox_entries_of_nothing_are_empty_lists() {
+        let files = sandbox_entries(&[], "/.wryayer-bin", &[]);
+        let list = file_of(&files, "applications/mimeapps.list");
+        assert!(list.contains("[Default Applications]"), "{list}");
+        assert!(!files.iter().any(|(p, _)| p.ends_with(".desktop")));
+    }
+
+    #[test]
+    fn link_mime_types_cover_the_web_schemes() {
+        assert!(LINK_MIME_TYPES.contains(&"x-scheme-handler/http"));
+        assert!(LINK_MIME_TYPES.contains(&"x-scheme-handler/https"));
+    }
+
+    #[test]
+    fn handles_links_sees_a_scheme_claim() {
+        assert!(browser().handles_links());
+        let plain = BoundApp {
+            app: "gimp".to_string(),
+            name: "GIMP".to_string(),
+            mime_types: vec!["image/png".to_string()],
+        };
+        assert!(!plain.handles_links());
     }
 }
