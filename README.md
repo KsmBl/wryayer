@@ -221,7 +221,7 @@ wryayer auto-detects your distro from `/etc/os-release` and uses the appropriate
 | **bubblewrap** | `sudo pacman -S bubblewrap` | Required at runtime |
 | **Rust toolchain** | `curl https://sh.rustup.rs -sSf \| sh` | For building |
 | **git** | `sudo pacman -S git` | AUR package builds |
-| **base-devel** | `sudo pacman -S base-devel` | AUR builds (`makepkg`) |
+| **base-devel** | `sudo pacman -S base-devel` | AUR builds (`makepkg`), and the C compiler + static libc the sandbox shims are built with (see below) |
 | **yay** (optional) | AUR | Cache reused when present; fallback is `makepkg` |
 | `vercmp` | Bundled with `pacman` | Version comparison |
 | `ldconfig` | Bundled with `glibc` | Library cache rebuild after install |
@@ -239,7 +239,7 @@ wryayer auto-detects your distro from `/etc/os-release` and uses the appropriate
 |---|---|---|
 | **bubblewrap** | `sudo apt install bubblewrap` | Required at runtime |
 | **Rust toolchain** | `curl https://sh.rustup.rs -sSf \| sh` | For building |
-| **binutils** | `sudo apt install binutils` | Provides `readelf` — used by soname scanner |
+| **build-essential** | `sudo apt install build-essential libc6-dev` | C compiler + static libc for the sandbox shims (see below) |
 | **dpkg** | Pre-installed | Package extraction (`dpkg-deb`) |
 | **apt** | Pre-installed | Dep resolution and download |
 | `ldconfig` | `sudo apt install libc-bin` | Library cache rebuild after install |
@@ -253,11 +253,18 @@ wryayer auto-detects your distro from `/etc/os-release` and uses the appropriate
 |---|---|---|
 | **bubblewrap** | `sudo dnf install bubblewrap` | Required at runtime |
 | **Rust toolchain** | `curl https://sh.rustup.rs -sSf \| sh` | For building |
-| **binutils** | `sudo dnf install binutils` | Provides `readelf` — used by soname scanner |
+| **gcc + glibc-static** | `sudo dnf install gcc glibc-static` | C compiler + static libc for the sandbox shims (see below) |
 | **dnf** | Pre-installed | Dep resolution and download |
 | **rpm2cpio** | `sudo dnf install rpm` | Package extraction |
 | `ldconfig` | Pre-installed | Library cache rebuild after install |
 | `xdg-dbus-proxy` | `sudo dnf install xdg-dbus-proxy` | Optional — required for the file-picker portal filter (on by default) |
+
+> **The C compiler is a build-time dependency you feel later.** Three small C
+> helpers are compiled into the binary: the CPUID shim (CPU spoofing), the
+> uptime shim, and the static client that [bound apps](#open-links-in-another-app-bound-apps)
+> forward through. If `cc` — or a static libc, for that last one — is missing,
+> the build still succeeds and prints a warning, and those features are simply
+> unavailable at runtime.
 
 ---
 
@@ -268,6 +275,14 @@ wryayer auto-detects your distro from `/etc/os-release` and uses the appropriate
 git clone https://github.com/KsmBl/wryayer.git
 cd wryayer
 
+# Guided install: picks the front-ends, installs the distro packages above,
+# builds, and puts the binary on your PATH
+./install.sh
+```
+
+`./uninstall.sh` reverses it. To do the same by hand:
+
+```fish
 # Build release binary
 cargo build --release
 
@@ -494,6 +509,14 @@ straight from the live tree via hard links — so bumping one library in a
 dependency tree. If a package *disappears* from the dependency set (or you pass
 `--full`), wryayer falls back to a clean full rebuild so no stale files linger.
 
+An [encrypted app](#encrypted-containers) can be updated like any other: naming
+it unlocks its container (asking only for what it doesn't already know), the
+swap happens inside the container — a VeraCrypt mount point cannot be renamed,
+so its entries are moved within it — and it is locked again afterwards if the
+update was what opened it. A sweep (`wryayer update` with no app) only opens
+containers it can open without asking, and names the ones it skipped;
+`--check` never asks for a password and refuses a locked app.
+
 Updates also **preserve your data and snapshots**: the sandbox `home/` (browser
 profiles, settings), the per-app `config.ini`, and every saved snapshot survive
 the swap, and any programs merged in with `--into` are re-resolved so their
@@ -690,10 +713,19 @@ wryayer config firefox share list
 | `usb` | `on` `off` | `off` | Bind the removable-media roots (`/run/media`, `/media`, `/mnt`) into the sandbox so USB drives — including ones mounted after launch — are visible to the app |
 | `share add <path>` | Any existing directory | — | Bind-mount `<path>` read-write inside the sandbox |
 | `ramlimit <MiB\|none>` | Integer (MiB) or `none` | `none` | Hard cap on RAM **and** swap combined, enforced via `systemd-run --scope -p MemoryMax=NM -p MemorySwapMax=0` (requires systemd). Both limits are necessary — without `MemorySwapMax=0` the kernel silently offloads pages to swap (including zram), letting the app exceed the cap. |
+| `avahi` | `stub` `host` `off` | `stub` | How zeroconf is answered: `stub` gives the sandbox a private system bus owning `org.freedesktop.Avahi`, `host` best-effort starts the host daemon, `off` leaves apps to print a harmless "Daemon not running" |
 | `portal_filter` | `on` `off` | `on` | Hide the host desktop portal so in-sandbox file pickers list only your shared directories instead of the whole home tree. Turn `off` if an app needs portal features (screen-share, portal-based file open). |
 | `bind_app <name>` | Another installed app | — | Let this app open links/files in `<name>`'s sandbox (see below) |
 | `password_source` | `prompt` `master` | `prompt` | Only for apps in a VeraCrypt container: where the container password comes from (see [Encrypted containers](#encrypted-containers)) |
 | `lock-on-exit` | `on` `off` | `on` | Unmount an encrypted app's container when the app exits. `off` keeps it mounted until locked by hand — no sudo prompt per launch, but the files stay readable |
+
+`avahi`, `portal_filter` and `bind_app` have no `wryayer config` subcommand yet:
+set them in the TUI (`s` on an app), in the GUI's settings page, or by editing
+`~/.wryayer/<app>/config.ini` directly — the key names in the table are the ones
+the file uses. The install-behaviour keys (`create_shortcut`, `confirm_install`,
+`ask_shortcut`, `clean_cache`) and the TUI's `theme` / `layout` are written into
+every generated `config.ini`, but only ever read from the global
+`~/.wryayer/defaults.ini` — set them in the Settings tab.
 
 ## Encrypted containers
 
@@ -997,17 +1029,14 @@ Override what the sandbox reports about the host machine. Useful for preventing 
 ```fish
 # Spoof /etc/hostname and $HOSTNAME
 wryayer config firefox spoof-hostname myworkstation
-wryayer config firefox spoof-hostname sample   # → "workstation"
 wryayer config firefox spoof-hostname system   # disable
 
 # Spoof $USER and $LOGNAME
-wryayer config firefox spoof-username sample   # → "user"
 wryayer config firefox spoof-username myname
 
 # Spoof /etc/machine-id
 wryayer config firefox spoof-machine-id system    # use real ID (default)
 wryayer config firefox spoof-machine-id random    # fresh UUID every launch
-wryayer config firefox spoof-machine-id sample    # → cafebabe0011223344556677deadbeef
 wryayer config firefox spoof-machine-id a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4
 
 # Spoof the CPU — presets, a custom file, or the TUI configurator
@@ -1042,7 +1071,7 @@ on `libcpuid` read the CPU by executing the `CPUID` instruction directly, so a
 faked `/proc/cpuinfo` alone doesn't fool them. wryayer also injects a small
 `LD_PRELOAD` shim that intercepts `CPUID` (via CPUID-faulting) and reports the
 spoofed vendor, brand string and family/model/stepping — so the fake CPU is what
-detection libraries see too. Pick from **ten built-in profiles** (`preset:<key>`,
+detection libraries see too. Pick from **eleven built-in profiles** (`preset:<key>`,
 spanning budget → flagship → server across Intel and AMD), or build your own in
 the TUI: choose **custom** on the *Spoof CPU info* row to open a field-by-field
 **configurator** (vendor, model name, family, model, stepping, cores, threads,
@@ -1065,6 +1094,12 @@ DMI/SMBIOS identity (`/sys/devices/virtual/dmi/id/*`) that drives `fastfetch`'s
 picked to match the CPU (a Supermicro server board for EPYC/Xeon, an enthusiast
 desktop board otherwise); or type your own in the configurator's **Host** field
 (e.g. `ASUS ROG STRIX X670E-E GAMING`) — the OEM vendor is inferred from the text.
+
+On the command line the value you type is used verbatim; the ready-made
+placeholders (`workstation`, `user`, `cafebabe0011223344556677deadbeef`) are
+options the TUI's pickers offer, not keywords the CLI understands. The keywords
+that *are* recognised everywhere are `system`/`off` (disable), `random` (for
+`spoof-machine-id`), `sample` and `preset:<key>` (for `spoof-cpuinfo`).
 
 All settings are editable in the TUI config screen (`s` on an installed app). Each row uses a picker; press `?` on any row or option to see a description of what the setting does.
 

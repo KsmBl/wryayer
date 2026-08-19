@@ -59,7 +59,7 @@ Two data structures anchor almost everything:
   launchers, `alias_of`, wine-game block. See README-CODE.md for the alias/merge
   model.
 
-Add a knob → it almost always starts in `AppConfig` and ends in `run.rs`.
+Add a knob → it almost always starts in `AppConfig` and ends in `commands/run/`.
 
 ---
 
@@ -75,7 +75,7 @@ This is the most common change. Say you want a boolean `foo`.
      constructs a fully-populated `AppConfig` — add your field there too, or the
      build breaks).
 
-2. **`src/commands/run.rs`** — read `config.foo` in `bwrap_cmd()` and add the
+2. **`src/commands/run/mod.rs`** — read `config.foo` in `bwrap_cmd()` and add the
    corresponding `--bind` / `--setenv` / etc. (see §5).
 
 3. **CLI** (`src/main.rs` + `src/commands/config.rs`) — add a `ConfigSetting`
@@ -131,7 +131,11 @@ assert!(text.contains("…"));
 
 ---
 
-## 5. The sandbox launcher (`src/commands/run.rs`)
+## 5. The sandbox launcher (`src/commands/run/`)
+
+`mod.rs` holds the launcher itself, `bus.rs` the D-Bus proxy / Avahi stub /
+portal listener / bound-app desktop entries, and `spoof.rs` the `/proc`, `/sys`
+and DMI overlays plus the device masks.
 
 `bwrap_cmd()` assembles the `bwrap` command line and returns it plus optional
 child handles (D-Bus proxy, Avahi stub, portal listener) whose lifetimes are
@@ -157,12 +161,15 @@ Rules of thumb when adding a spoof or bind:
 
 ## 6. The C shims (`csrc/`, `build.rs`)
 
-Two helpers are compiled by `build.rs` into `OUT_DIR` and embedded with
+Three helpers are compiled by `build.rs` into `OUT_DIR` and embedded with
 `include_bytes!`:
 
 - **`cpuid_spoof.c`** → `libcpuidspoof.so`, injected via `LD_PRELOAD` to intercept
   `CPUID` and `sched_get/setaffinity`. See README-CODE.md → *CPU spoofing* for how
   CPUID faulting works.
+- **`uptime_spoof.c`** → `libuptimespoof.so`, also `LD_PRELOAD`ed, interposing
+  `clock_gettime(CLOCK_BOOTTIME)` and `sysinfo()` so the sandbox reports a fake
+  uptime.
 - **`portal_client.c`** → `wryayer-portal`, a **static** helper for cross-container
   app binding.
 
@@ -280,11 +287,11 @@ otherwise teaches the wrong thing.
 
 | I want to change… | Go to |
 |---|---|
-| a config field | `config.rs` → `run.rs` → `main.rs`/`commands/config.rs` → `tui/` → `gui/config.rs` |
+| a config field | `config.rs` → `commands/run/mod.rs` → `main.rs`/`commands/config.rs` → `tui/` → `gui/config.rs` |
 | an encryption behaviour | `veracrypt.rs` (container ops) / `secrets.rs` (passwords) → `commands/encrypt.rs` → `main.rs` → `tui/` |
-| how an app is sandboxed | `commands/run.rs` (`bwrap_cmd`, `launch_bwrap`) |
-| CPU / topology spoofing | `cpu.rs` (data) + `csrc/cpuid_spoof.c` (CPUID/affinity) + `run.rs` (`/proc`, `/sys`) |
-| cross-container app binding | `csrc/portal_client.c` + `commands/portal.rs` + `run.rs` |
+| how an app is sandboxed | `commands/run/` (`mod.rs`: `bwrap_cmd`, `launch_bwrap`) |
+| CPU / topology spoofing | `cpu.rs` (data) + `csrc/cpuid_spoof.c` (CPUID/affinity) + `commands/run/spoof.rs` (`/proc`, `/sys`) |
+| cross-container app binding | `csrc/portal_client.c` + `commands/portal.rs` + `commands/run/bus.rs` + `desktop.rs` (the entries the sandbox looks up) |
 | a TUI screen or row | `tui/mod.rs` (state/keys) + `tui/ui.rs` (render) |
 | a GUI form field or button | `gui/config.rs` / `gui/mod.rs` |
 | install / extract / deps | `package/` + `commands/install.rs` |
@@ -303,7 +310,7 @@ README-CODE.md for the diagram version.
 |---|---|
 | `main.rs` | The `clap` CLI: every subcommand and flag is defined here and dispatched to a `commands::*` function. Add a CLI command/flag here. |
 | `lib.rs` | Module wiring; re-exports used by the integration tests in `tests/`. |
-| `build.rs` | Compiles the two C helpers in `csrc/` and embeds them; best-effort (empty blob + warning if no compiler). |
+| `build.rs` | Compiles the three C helpers in `csrc/` and embeds them; best-effort (empty blob + warning if no compiler). |
 
 **Core data & shared helpers**
 
@@ -314,17 +321,21 @@ README-CODE.md for the diagram version.
 | `cpu.rs` | Built-in CPU profiles + the `CustomCpu` type; renders `/proc/cpuinfo`, and provides `cpuid_spoof_for` / `topology_for` for the launcher and shim. |
 | `distro.rs` | Detects the host distro and selects the package backend (pacman/apt/dnf); downloads packages and **verifies their signatures before extraction** (`gpg`/`rpmkeys`/apt auth). |
 | `launcher.rs` | Creates/removes the `/usr/bin/<app>` shell wrapper, escalating through sudo when it has to. |
-| `desktop.rs` | Publishes an app's packaged `.desktop` files to `/usr/share/applications`, rewritten to run through its shortcut. |
+| `desktop.rs` | Publishes an app's packaged `.desktop` files to `/usr/share/applications`, rewritten to run through its shortcut — and generates the entries a sandbox gets for its bound apps, pointed at their portal shims. |
 | `veracrypt.rs` | Per-app VeraCrypt containers: create/mount/unmount, `--list` parsing, container sizing, and the `.encrypted.toml` locked-state marker. |
 | `secrets.rs` | The master password store — Argon2id → AES-256-GCM, plus the per-boot derived-key cache in `$XDG_RUNTIME_DIR` and the no-echo password prompts. |
 | `entropy.rs` | Multi-source entropy pool (urandom, sensors, mouse, RAM, IRQs, clock) and the password generator built on it. |
 | `avahi_stub.rs` | Config/data for the in-sandbox Avahi stub bus. |
+| `child_output.rs` | Sanitises a subprocess's output before a front-end draws it. |
+| `test_support.rs` | The one `HOME` lock and temp-root sandbox every test that touches the filesystem takes. |
 
 **`commands/` — one file per subcommand**
 
 | File | Responsibility |
 |---|---|
-| `run.rs` | **The sandbox launcher.** `bwrap_cmd` assembles the bwrap command line (all binds, spoofs, env, portal, CPU); `launch_bwrap` spawns it, runs updater threads, waits, tears down. The biggest and most important runtime file. |
+| `run/mod.rs` | **The sandbox launcher.** `bwrap_cmd` assembles the bwrap command line (all binds, spoofs, env, portal, CPU); `launch_bwrap` spawns it, runs updater threads, waits, tears down. The biggest and most important runtime file. |
+| `run/bus.rs` | The D-Bus filter proxy, the Avahi stub bus, the portal listener, and the desktop entries a sandbox needs to find its bound apps. |
+| `run/spoof.rs` | The `/proc`, `/sys` and DMI overlays behind identity/CPU spoofing, plus the device and socket masks. |
 | `install.rs` | resolve → download → extract → write manifest → dedup. |
 | `install_game.rs` | Wine-container import (game folder → `.exe` → prefix). |
 | `update.rs` | Re-resolve + **delta re-extract** (only changed packages; `--full` for a clean rebuild); version checks (`--check`). |
@@ -374,6 +385,7 @@ README-CODE.md for the diagram version.
 |---|---|
 | `cpuid_spoof.c` | `LD_PRELOAD` shim: CPUID faulting + emulation, and `sched_get/setaffinity` interposition. See §6 and README-CODE.md. |
 | `portal_client.c` | Static helper symlinked into sandboxes as each bound app / opener; forwards launch requests to the host portal. |
+| `uptime_spoof.c` | `LD_PRELOAD` shim: fake `CLOCK_BOOTTIME` / `sysinfo()` uptime. |
 
 **`tests/`** — integration tests, one file per area (`config_tests.rs`,
 `option_picker_tests.rs`, `snapshot_tests.rs`, …). See §7.

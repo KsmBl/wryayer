@@ -16,6 +16,9 @@ src/
 ├── main.rs            ← clap CLI entry point; dispatches subcommands
 ├── lib.rs             ← module wiring; exposed for the integration tests
 ├── manifest.rs        ← .manifest.toml read/write, app dir helpers, list_all_apps
+├── avahi_stub.rs      ← in-process owner of org.freedesktop.Avahi on a private bus
+├── child_output.rs    ← sanitising a subprocess's output before it is drawn
+├── test_support.rs    ← the one HOME lock every test that touches the FS takes
 ├── config.rs          ← AppConfig, INI parse/format, global defaults.ini
 ├── cpu.rs             ← CPU profiles + custom CPUs; /proc/cpuinfo & CPUID data
 ├── launcher.rs        ← /usr/bin/<app> shell wrapper create/remove
@@ -32,7 +35,10 @@ src/
 ├── commands/
 │   ├── install.rs     ← resolve → download → extract → manifest → dedup
 │   ├── install_game.rs← wine-container import (folder → .exe → prefix)
-│   ├── run.rs         ← assemble and exec the bwrap sandbox
+│   ├── run/
+│   │   ├── mod.rs     ← assemble and exec the bwrap sandbox
+│   │   ├── bus.rs     ← D-Bus proxy, Avahi stub, portal listener, bound-app entries
+│   │   └── spoof.rs   ← /proc, /sys and DMI overlays; device masks
 │   ├── update.rs      ← re-resolve + re-extract; version checks
 │   ├── remove.rs      ← delete tree + launcher + desktop entries; alias-aware
 │   ├── relink.rs      ← rebuild shortcuts + desktop entries of installed apps
@@ -43,6 +49,7 @@ src/
 │   ├── repair.rs      ← resolve+install packages for missing sonames
 │   ├── encrypt.rs     ← move an app into/out of a container; password sources
 │   ├── list.rs        ← table + apparent/on-disk/savings totals
+│   ├── clean.rs       ← wipe the shared download/build cache
 │   ├── portal.rs      ← host-side listener for cross-container app binding
 │   └── config.rs      ← `wryayer config` CLI surface
 ├── tui/
@@ -58,6 +65,7 @@ src/
 
 csrc/                  ← C helpers compiled by build.rs, embedded via include_bytes!
 ├── cpuid_spoof.c      ← LD_PRELOAD shim: intercept CPUID + sched_get/setaffinity
+├── uptime_spoof.c     ← LD_PRELOAD shim: fake CLOCK_BOOTTIME / sysinfo uptime
 └── portal_client.c    ← static helper symlinked into sandboxes as bound apps
 ```
 
@@ -73,8 +81,8 @@ csrc/                  ← C helpers compiled by build.rs, embedded via include_
               │  TUI (ratatui / crossterm)    CLI (clap)             │
               │  ┌───────────────────────┐   install   remove  list  │
               │  │ Installed │ Install   │   run       update  repair │
-              │  │ Import    │ Space     │   config    export  import │
-              │  │ Settings (global cfg) │   snapshot  rollback  tui  │
+              │  │ Import    │ Games     │   config    export  import │
+              │  │ Space     │ Settings  │   snapshot  rollback  tui  │
               │  └───────────────────────┘   snapshots  snapshot-prune│
               │                              dedup      completions   │
               └────────────────────────┬─────────────────────────────┘
@@ -168,13 +176,17 @@ Everything wryayer writes lives under `~/.wryayer/` (state, snapshots, spoof
 files, global defaults), plus the two host locations that make an app reachable
 the way a packaged one is: `/usr/bin/` (shortcuts) and
 `/usr/share/applications/` (desktop entries). Build/download caches live under
-`~/.cache/wryayer/{pkg,build}`. Nothing is written elsewhere.
+`~/.cache/wryayer/{pkg,build}`. The only other writes are ephemeral ones in
+`$XDG_RUNTIME_DIR`: a private `.wryayer-<app>/` per sandbox holding its bus
+proxy and portal sockets, and the master store's per-boot derived key. Nothing
+is written elsewhere.
 
 ---
 
 ## The bwrap sandbox
 
-At runtime `commands/run.rs` builds a `bwrap` command line. The app's own tree
+At runtime `commands/run/` builds a `bwrap` command line (`mod.rs` assembles it;
+`bus.rs` and `spoof.rs` hold the D-Bus/portal and `/proc`-`/sys` halves). The app's own tree
 becomes `/`, and a curated set of host paths are bound in:
 
 ```
@@ -196,8 +208,8 @@ becomes `/`, and a curated set of host paths are bound in:
 ```
 
 `bwrap_cmd()` returns the assembled `Command` plus optional child handles
-(the D-Bus filter proxy, the Avahi stub bus) whose lifetimes are tied to the
-sandbox. The
+(the D-Bus filter proxy, the Avahi stub bus, the portal listener) whose
+lifetimes are tied to the sandbox. The
 launcher forks bwrap, waits, and on abnormal exit re-scans the sandbox `home/`
 for missing sonames (self-updating apps like Discord write new ELF binaries
 there) and retries once.
@@ -787,12 +799,13 @@ cargo build --release  # optimized
 ### Run tests
 
 Tests that touch the filesystem isolate themselves by temporarily redirecting
-`HOME` to a temp directory. Run single-threaded to avoid races on `HOME`:
+`HOME` to a temp directory. They all take the single lock in `test_support.rs`
+while they do, and under `cfg(test)` `manifest::wryayer_root` refuses to hand
+back a path outside that temp directory — so the suite is safe to run in
+parallel:
 
 ```fish
-cargo test -- --test-threads=1
-# or
-RUST_TEST_THREADS=1 cargo test
+cargo test --all-features
 ```
 
 ### Test coverage
@@ -809,12 +822,16 @@ representative per class) plus explicit boundary and error-path tests.
 | `launcher.rs` | `create_launcher` (content, permissions), `remove_launcher` (missing, non-wryayer, valid) |
 | `commands/dedup.rs` | `format_bytes` (4 EC + 7 boundaries), `du_walk` (SKIP_DIRS, hard-link accounting) |
 | `package/deps.rs` | `strip_version_constraint` (7 operators), `is_soname_dep` (5 EC), `parse_pacman_field`, `parse_pacman_depends` (5 EC) |
-| `commands/run.rs` | Arg stripping (5 cases), `no_other_instance`, `has_systemd_run`, `wrap_with_ram_limit` (program, `--user`/`--scope`/`--quiet`, `MemoryMax`, `MemorySwapMax=0`, `--` separator, inner args, env transfer) |
+| `commands/run/` (`run_tests.rs`) | Arg stripping (5 cases), `no_other_instance`, `has_systemd_run`, `wrap_with_ram_limit` (program, `--user`/`--scope`/`--quiet`, `MemoryMax`, `MemorySwapMax=0`, `--` separator, inner args, env transfer) |
 | `commands/install.rs` | `ensure_base_layout` (creates all symlinks, idempotent, preserves real dirs) |
 | `commands/snapshot.rs` | `create` / `labels` / `latest` round-trip, inode sharing, `.snapshots` recursion guard, `rollback` (restores modifications, errors on missing label, preserves snapshots dir) |
 | `commands/remove.rs` + alias model | `alias_of` serde round-trip, `skip_serializing_if`, legacy manifests parse, `list_all_apps` surfaces aliases, removing an alias leaves the target intact, removing a target with dependents is blocked with blockers named |
 | `tui/mod.rs` (`option_picker_tests.rs`) | `setting_options` / `setting_title` / `setting_description` / `option_description` / `setting_current` / `apply_setting` / `cycle_setting` — full forward/backward/wrap cycles for all non-empty rows |
 | `tui/mod.rs` | `parse_progress` parsing, konami FSM |
+| `desktop.rs` | Entry rewriting (exec / icon / owner / field codes), `mimeapps.list` editing, and the entries generated for a sandbox's bound apps |
+| `commands/update.rs` (`update_recovery_tests.rs`) | The in-place swap's phases and the direction each one heals in |
+| `commands/install.rs` (`install_tests.rs`), alias model (`alias_tests.rs`), `package/deps.rs` (`deps_tests.rs`) | Base layout, alias resolution, dependency parsing |
+| `cpu.rs`, `entropy.rs`, `distro.rs`, `avahi_stub.rs` | Preset/topology rendering, pool mixing and generator bias, backend detection and version compare, D-Bus message dispatch |
 
 External-tool-dependent code (`bwrap_cmd`, `reinstall`, distro backends) is
 covered by integration tests that require a live environment with `bwrap` and
