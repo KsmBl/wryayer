@@ -138,6 +138,12 @@ enum Commands {
         /// Path to the zip file created by `wryayer export`
         path: PathBuf,
     },
+    /// Export the list of installed apps and their settings, or recreate it
+    /// on another machine — including one running a different package manager
+    Setup {
+        #[command(subcommand)]
+        action: SetupAction,
+    },
     /// Import a Windows game folder as a self-contained wine container.
     /// Each game gets its own ~/.wryayer/<name>/ with a fresh wine install
     /// and its own WINEPREFIX, so games can't interfere with each other.
@@ -279,6 +285,25 @@ enum Commands {
         socket: String,
         /// Comma-separated list of app names allowed to be launched
         allowed: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum SetupAction {
+    /// Write every installed app, how it was installed and its settings to a
+    /// file you can carry to another machine
+    Export {
+        /// Where to write it (default: ./wryayer-setup-YYYY-MM-DD.toml)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+    /// Install the apps a setup file lists and apply their settings
+    Import {
+        /// The file written by `wryayer setup export`
+        path: PathBuf,
+        /// Print what would be installed and configured, and do nothing
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -538,6 +563,12 @@ fn main() {
             commands::export::run(&app_name, output.as_ref())
         }
         Commands::Import { path } => commands::import::run(&path),
+        Commands::Setup { action } => match action {
+            SetupAction::Export { output } => {
+                commands::setup::export(output.as_deref()).map(|_| ())
+            }
+            SetupAction::Import { path, dry_run } => commands::setup::import(&path, dry_run),
+        },
         Commands::InstallGame { path, exe, app_name, delete_source, skip_size_check } => {
             commands::install_game::run(
                 &path,

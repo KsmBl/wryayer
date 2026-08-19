@@ -13,4 +13,5 @@ pub mod relink;
 pub mod remove;
 pub mod repair;
 pub mod run;
+pub mod setup;
 pub mod update;

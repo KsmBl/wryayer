@@ -105,7 +105,7 @@ complete -c wryayer -f
 # ── Top-level subcommands ─────────────────────────────────────────────────────
 # Front-end subcommands (tui/gui) are appended by install.sh to match the build;
 # they are kept in this guard list so once one is typed, top-level completions stop.
-set -l cmds install remove list run update repair config export import \
+set -l cmds install remove list run update repair config export import setup \
            snapshot rollback snapshots snapshot-prune snapshot-delete tui gui dedup completions
 
 complete -c wryayer -n "not __fish_seen_subcommand_from $cmds" -a install         -d 'Install a package in an isolated directory'
@@ -117,6 +117,7 @@ complete -c wryayer -n "not __fish_seen_subcommand_from $cmds" -a repair        
 complete -c wryayer -n "not __fish_seen_subcommand_from $cmds" -a config          -d 'View or change per-app configuration'
 complete -c wryayer -n "not __fish_seen_subcommand_from $cmds" -a export          -d 'Pack an installed app into a portable zip'
 complete -c wryayer -n "not __fish_seen_subcommand_from $cmds" -a import          -d 'Import an app from a wryayer export zip'
+complete -c wryayer -n "not __fish_seen_subcommand_from $cmds" -a setup           -d 'Export the installed apps and their settings, or recreate them elsewhere'
 complete -c wryayer -n "not __fish_seen_subcommand_from $cmds" -a snapshot        -d 'Create a hard-linked snapshot of an installed app'
 complete -c wryayer -n "not __fish_seen_subcommand_from $cmds" -a rollback        -d 'Roll an app back to a previous snapshot'
 complete -c wryayer -n "not __fish_seen_subcommand_from $cmds" -a snapshots       -d 'List snapshots for an installed app'
@@ -153,6 +154,17 @@ complete -c wryayer -n '__fish_seen_subcommand_from export' -l output -s o -d 'O
 
 # ── import — re-enable file completion so the user can navigate to the zip ───
 complete -c wryayer -n '__fish_seen_subcommand_from import' -F
+
+# ── setup ─────────────────────────────────────────────────────────────────────
+complete -c wryayer -n '__fish_seen_subcommand_from setup; and not __fish_seen_subcommand_from export import' \
+    -a export -d "Write the installed apps and their settings to a file"
+complete -c wryayer -n '__fish_seen_subcommand_from setup; and not __fish_seen_subcommand_from export import' \
+    -a import -d "Install what a setup file lists and apply its settings"
+complete -c wryayer -n '__fish_seen_subcommand_from setup; and __fish_seen_subcommand_from export' \
+    -l output -s o -d 'Where to write the setup file' -r
+complete -c wryayer -n '__fish_seen_subcommand_from setup; and __fish_seen_subcommand_from import' -F
+complete -c wryayer -n '__fish_seen_subcommand_from setup; and __fish_seen_subcommand_from import' \
+    -l dry-run -d 'Print what would be installed and configured, and do nothing'
 
 # ── snapshot ──────────────────────────────────────────────────────────────────
 complete -c wryayer -n '__fish_seen_subcommand_from snapshot' -a '(__wryayer_apps)' -d 'installed app'
