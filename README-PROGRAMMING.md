@@ -296,6 +296,7 @@ otherwise teaches the wrong thing.
 | a GUI form field or button | `gui/config.rs` / `gui/mod.rs` |
 | install / extract / deps | `package/` + `commands/install.rs` |
 | snapshots / dedup / export | the same-named files in `commands/` |
+| what an export carries between machines | `commands/setup.rs` (`Setup`, `SetupApp`, `plan`) |
 
 ---
 
@@ -343,6 +344,7 @@ README-CODE.md for the diagram version.
 | `relink.rs` | Rebuild the `/usr/bin` shortcuts and desktop entries of installed apps, refusing to hand a command name to an app that does not already own it. |
 | `snapshot.rs` | Hard-linked snapshots, list, rollback, delete, prune. |
 | `export.rs` / `import.rs` | Zip an app tree / recreate one from a zip. |
+| `setup.rs` | The installation as a list: `collect`/`export` write it, `plan` decides what an import would do (pure, so `--dry-run` and the real run agree), `import` carries it out. |
 | `dedup.rs` | Cross-app hard-link identical files; disk-usage accounting (`format_bytes`, `all_du`). |
 | `repair.rs` | Resolve + install packages for missing sonames. |
 | `encrypt.rs` | Move an app into/out of a container (rollback-safe swap), lock/unlock, password-source resolution, master-store subcommands, and the `require_unlocked` guardrail. |

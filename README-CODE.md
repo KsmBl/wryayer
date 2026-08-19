@@ -45,6 +45,7 @@ src/
 │   ├── snapshot.rs    ← hard-linked snapshots + rollback
 │   ├── export.rs      ← zip an app tree with progress markers
 │   ├── import.rs      ← recreate an app from an exported zip
+│   ├── setup.rs       ← the installation as a list: export it, rebuild it elsewhere
 │   ├── dedup.rs       ← cross-app hard-link identical files; du accounting
 │   ├── repair.rs      ← resolve+install packages for missing sonames
 │   ├── encrypt.rs     ← move an app into/out of a container; password sources
@@ -383,6 +384,36 @@ alias dir + launcher; removing a target that still has aliases is refused
 (unless `--cascade`).
 
 ---
+
+### A setup is not a backup (`commands/setup.rs`)
+
+`export`/`import` move an app's *files*; `setup export`/`setup import` move the
+*description* of an installation — which apps exist, which package each came
+from, its launchers, its `--into` target, and its `config.ini`. That is the only
+form that survives a change of package manager, because the packages themselves
+have to be fetched fresh from whatever is on the other side.
+
+The file is TOML, opens with a comment block telling the reader to edit
+`package`, and records settings as a condensed `config.ini` — the same INI the
+CLI writes, with its explanatory comments stripped, so there is still exactly
+one parser (`config::parse_ini`) and no second serialization of `AppConfig` to
+drift from it.
+
+Import is a plan and then an execution. `plan` is pure — it takes the parsed
+file and the list of what is installed, and answers `Install` / `Configure` /
+`Manual` per app — so `--dry-run` and the real run cannot disagree about what
+they are doing, and the awkward cases (a merge whose target is nowhere, a wine
+game, a blank package name) are decided in one place and tested without touching
+a disk. Merge targets are ordered before what merges into them, because the file
+is meant to be hand-edited and an edited file need not stay in tree order.
+
+Two details are deliberate. A launcher is only recorded when the user chose it
+(`--bin-name(s)`, or a merge alias): a single launcher named after the package
+is what a plain install produces anyway, and the other distribution's package
+may install a differently named binary — recording it would turn a working
+install into "binary not found". And paths under the exporting user's home are
+re-pointed at the importing user's, so shared directories survive a change of
+username while a path outside the home is left exactly as it was.
 
 ## Snapshots
 

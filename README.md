@@ -118,6 +118,7 @@ to lock the container when the app exits, and the way back out:
 | `n` | Rename app (set display name) |
 | `q` / `Esc` | Quit / close overlay |
 | `t` | Toggle debug log during install/remove operations |
+| `F3` | Import tab: write this machine's [setup list](#move-your-whole-setup-to-another-machine) |
 | `?` | Show key-bindings reference |
 | `Shift+Q` | Force-quit from anywhere |
 
@@ -177,6 +178,9 @@ wryayer gui
 - **Per-app settings** — a proper preferences page with switches, drop-downs and a
   folder picker for shared directories; writes the same `~/.wryayer/<app>/config.ini`
   the CLI uses.
+- **Import / setup list** — import an app from a zip, import a Windows game
+  folder, or export this machine's [setup list](#move-your-whole-setup-to-another-machine)
+  and recreate it from one (the plan is shown before anything is downloaded).
 - **Live console** — installs, updates and removals stream their output into a page
   you can close when done, with a progress bar for the operations that report one.
   When a child stops to ask something — a package that installed no launcher, or
@@ -555,6 +559,71 @@ Import rewrites the single home directory to the importing user's name, so
 profiles and settings carry over regardless of who exported it.
 
 The export progress bar in the TUI is real — wryayer pre-counts entries, then emits `PROGRESS n/total` markers during the zip write so the gauge and ETA reflect actual work done.
+
+### Move your whole setup to another machine
+
+A zip carries one app's *files*, which is what you want between two machines
+running the same distribution. It is the wrong thing for "set my new laptop up
+like this one": those packages come from a different package manager, in a
+different format, and have to be fetched fresh over there.
+
+So there is a second kind of export — the **list**:
+
+```fish
+# Write every installed app, how it was installed, and its settings
+wryayer setup export                       # → ./wryayer-setup-YYYY-MM-DD.toml
+wryayer setup export -o ~/my-setup.toml
+
+# On the other machine — any distro wryayer supports
+wryayer setup import my-setup.toml --dry-run   # what it would do
+wryayer setup import my-setup.toml             # do it
+```
+
+The file is small, plain TOML, and meant to be read:
+
+```toml
+version = 1
+distro = "arch"
+home = "/home/alice"
+
+[[app]]
+name = "py312"
+package = "python"
+launchers = ["python3.12"]
+config = """
+[network]
+network = on
+[sandbox]
+share_dir = /home/alice/Documents
+"""
+```
+
+**Edit `package` before importing.** It is the one field that does not travel:
+`firefox` on Arch is `firefox-esr` on Debian, and some packages have no
+equivalent at all — delete those entries. Everything under `config` is
+distro-independent and applied as it stands, with one adjustment: paths under
+the exporting user's home are re-pointed at yours, so `/home/alice/Documents`
+becomes `/home/bob/Documents` while `/mnt/media` is left alone.
+
+Apps merged with `--into` are installed after the app they merge into, and their
+launcher names are only recorded when you chose them — otherwise the other
+distribution's package decides, since its binary may be named differently.
+
+What it deliberately does **not** carry:
+
+| Not exported | Why |
+|---|---|
+| Files, sandbox homes, snapshots | This is a list, not a backup — use `wryayer export <app>` for a copy of an app |
+| Container passwords, or anything about a container | An app that was encrypted is marked as such and the import says so; putting it back in a container is a decision with a password attached (`wryayer encrypt <app>`) |
+| Windows games | Their files *are* the game; re-import the folder with `wryayer install-game` |
+
+Anything that could not be installed — a package name this distribution
+does not know — is listed at the end, so a run that hits three unknown names
+still installs everything else and tells you which three to fix.
+
+In the TUI this lives in the **Import** tab (`F3` writes the list; typing a
+`.toml` path and pressing Enter applies one), and in the GUI under
+**Import → Export setup list / Recreate from a setup list**.
 
 ### Snapshot and rollback
 
@@ -1210,6 +1279,7 @@ The config is stored as a human-readable INI file at `~/.wryayer/<app>/config.in
 - [x] **TUI package search from AUR** — Install tab searches both official repos and the AUR
 - [x] **Identity spoofing** — spoof hostname, username, machine-id, OS release, and the CPU per app (fake `/proc/cpuinfo` **and** `CPUID`, with built-in profiles and a TUI configurator)
 - [x] **CPU core/thread spoofing** — a spoofed CPU's core/thread count is reflected in `htop`, CPU-X, `lscpu` and `nproc`, with the first meters mirroring the host's real per-core usage
+- [x] **Setup export/import** — take the list of installed apps and their settings to another machine, including one with a different package manager (`wryayer setup export` / `import`)
 - [x] **Cross-container app binding** — bound apps open each other's links/files in the target app's own sandbox via a host portal (`bind_app`)
 - [x] **Global default settings** — Settings tab in TUI and `~/.wryayer/defaults.ini` set defaults inherited by all new apps
 - [x] **Multi-select install** — mark multiple search results with `Space`, install them all sequentially with `Enter`; marks persist across searches
