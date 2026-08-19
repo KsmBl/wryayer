@@ -285,3 +285,89 @@ pub(super) fn spawn_portal_listener(
     let _ = child.wait();
     None
 }
+
+/// Where the portal shims live inside a sandbox: one symlink per bound app,
+/// all pointing at the static helper, on a private tmpfs at the front of PATH.
+pub(super) const SHIM_DIR: &str = "/.wryayer-bin";
+
+/// Where the generated desktop entries for the bound apps are mounted inside a
+/// sandbox — an XDG data directory holding nothing but `applications/`.
+pub(super) const SHARE_DIR: &str = "/.wryayer-share";
+
+/// Write the desktop-entry tree that makes bound apps *findable* inside the
+/// sandbox, and return its host path.
+///
+/// The shims on PATH only help an app that runs `firefox` by name. Everything
+/// else — Thunderbird opening a link, a file manager's "Open with", any
+/// GIO/GTK `g_app_info_launch_default_for_uri` — looks for a `.desktop` file
+/// claiming the MIME type instead, and finds none inside a container that only
+/// holds one app. So generate one entry per bound app, each claiming what that
+/// app's own package declares it can open, plus the `mimeapps.list` naming the
+/// link handler as the default.
+///
+/// Lives in the app's `.spoof` dir like the other generated files, so nothing
+/// identifying is written outside `~/.wryayer`. Returns None if it cannot be
+/// written, in which case the caller simply leaves it out.
+pub(super) fn write_bound_app_entries(
+    spoof_dir: &Path,
+    app_name: &str,
+    bound: &[String],
+    open_app: Option<&str>,
+) -> Option<String> {
+    // The link handler goes first so it wins any MIME type two bound apps both
+    // claim — it is the one the user pointed at links.
+    let ordered = open_app
+        .into_iter()
+        .chain(bound.iter().map(String::as_str).filter(|a| Some(*a) != open_app));
+
+    let mut apps = Vec::new();
+    for name in ordered {
+        let mut app = crate::desktop::bound_app(name);
+        // A designated link handler that claims no scheme — because its
+        // container is locked, or it ships no entry — still has to take links,
+        // exactly as it already does for xdg-open.
+        if Some(name) == open_app && !app.handles_links() {
+            app.mime_types
+                .extend(crate::desktop::LINK_MIME_TYPES.iter().map(|m| m.to_string()));
+        }
+        apps.push(app);
+    }
+
+    // What this app handles itself stays its own: a bound app is offered for
+    // those types but never made the default for them.
+    let reserved = crate::desktop::declared(app_name)
+        .map(|(_, mimes)| mimes)
+        .unwrap_or_default();
+
+    // Rebuilt from scratch every run: an app unbound since the last one must
+    // not keep answering for links.
+    let dir = spoof_dir.join("portal-share");
+    let _ = std::fs::remove_dir_all(&dir);
+    for (rel, content) in crate::desktop::sandbox_entries(&apps, SHIM_DIR, &reserved) {
+        let path = dir.join(&rel);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).ok()?;
+        }
+        std::fs::write(&path, content).ok()?;
+    }
+    Some(dir.to_str()?.to_string())
+}
+
+/// Prepend `first` to a colon-separated XDG search path, keeping what the host
+/// set and making sure `required` (the in-container defaults) are on it — the
+/// host's own entries can point at directories no sandbox has.
+pub(super) fn xdg_path(var: &str, first: &str, required: &[&str]) -> String {
+    let mut dirs = vec![first.to_string()];
+    let inherited = std::env::var(var).unwrap_or_default();
+    for dir in inherited.split(':').filter(|d| !d.is_empty()) {
+        if !dirs.iter().any(|d| d == dir) {
+            dirs.push(dir.to_string());
+        }
+    }
+    for dir in required {
+        if !dirs.iter().any(|d| d == dir) {
+            dirs.push((*dir).to_string());
+        }
+    }
+    dirs.join(":")
+}

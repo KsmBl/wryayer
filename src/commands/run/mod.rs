@@ -1120,9 +1120,9 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
                         cmd.args(["--ro-bind", hs, "/.wryayer-portal"]);
                         // A private tmpfs dir holding one symlink per bound app,
                         // prepended to PATH so it shadows anything in the tree.
-                        cmd.args(["--tmpfs", "/.wryayer-bin"]);
+                        cmd.args(["--tmpfs", SHIM_DIR]);
                         for app in &config.bound_apps {
-                            cmd.args(["--symlink", "/.wryayer-portal", &format!("/.wryayer-bin/{app}")]);
+                            cmd.args(["--symlink", "/.wryayer-portal", &format!("{SHIM_DIR}/{app}")]);
                         }
                         // Route the generic URL/file openers (which apps like
                         // Discord/Telegram call instead of a browser by name)
@@ -1135,20 +1135,50 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
                             "xdg-open", "x-www-browser", "www-browser",
                             "sensible-browser", "gnome-open", "kde-open", "kde-open5",
                         ];
-                        if let Some(open_app) = pick_open_app(&config.bound_apps) {
+                        let open_app = pick_open_app(&config.bound_apps);
+                        if let Some(open_app) = open_app {
                             for opener in OPENERS {
-                                cmd.args(["--symlink", "/.wryayer-portal", &format!("/.wryayer-bin/{opener}")]);
+                                cmd.args(["--symlink", "/.wryayer-portal", &format!("{SHIM_DIR}/{opener}")]);
                                 cmd.args(["--ro-bind", hs, &format!("/usr/bin/{opener}")]);
                             }
                             cmd.args(["--setenv", "WRYAYER_OPEN_APP", open_app]);
                             // Point $BROWSER at the shim too, for CLI tools that
                             // honour it directly.
-                            cmd.args(["--setenv", "BROWSER", "/.wryayer-bin/x-www-browser"]);
+                            cmd.args(["--setenv", "BROWSER", &format!("{SHIM_DIR}/x-www-browser")]);
                         }
                         let path = std::env::var("PATH")
                             .unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".to_string());
-                        cmd.args(["--setenv", "PATH", &format!("/.wryayer-bin:{path}")]);
+                        cmd.args(["--setenv", "PATH", &format!("{SHIM_DIR}:{path}")]);
                         cmd.args(["--setenv", "WRYAYER_PORTAL_SOCK", &sock]);
+
+                        // Shims on PATH cover apps that spell out `firefox`.
+                        // Thunderbird doesn't: it hands the link to the desktop,
+                        // which looks for a .desktop file claiming
+                        // `x-scheme-handler/https` and, inside a container
+                        // holding one app, finds none — so the click does
+                        // nothing. Generate those entries for the bound apps and
+                        // put them at the front of the XDG search paths, where
+                        // GIO/GTK/Qt all look.
+                        if let Some(share) =
+                            write_bound_app_entries(&spoof_dir, app_name, &config.bound_apps, open_app)
+                        {
+                            cmd.args(["--ro-bind", &share, SHARE_DIR]);
+                            cmd.args([
+                                "--setenv",
+                                "XDG_DATA_DIRS",
+                                &xdg_path("XDG_DATA_DIRS", SHARE_DIR,
+                                          &["/usr/local/share", "/usr/share"]),
+                            ]);
+                            // The config-dir copy of mimeapps.list outranks every
+                            // data dir, so a default left in the container can't
+                            // beat the app the user bound.
+                            cmd.args([
+                                "--setenv",
+                                "XDG_CONFIG_DIRS",
+                                &xdg_path("XDG_CONFIG_DIRS", &format!("{SHARE_DIR}/xdg"),
+                                          &["/etc/xdg"]),
+                            ]);
+                        }
                     }
                 }
             }
