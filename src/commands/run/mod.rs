@@ -3,7 +3,7 @@ use crate::config::{read_config, AppConfig, AvahiMode, LocalDelete, TempMode};
 use crate::manifest::{app_dir, read_manifest};
 use crate::package::{download_official, extract_package, find_missing_sonames_in};
 use anyhow::{bail, Context, Result};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
@@ -1233,6 +1233,139 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
     (cmd, term_spoof_dir, dbus_proxy_child, avahi_stub_child, portal_child)
 }
 
+
+// ── What is running ───────────────────────────────────────────────────────────
+//
+// Both front-ends want the same two answers about live sandboxes — how many of
+// each app are up, and how much of its RAM cap one is using — so the reading
+// lives here with the launcher that produced the state, not in either UI.
+
+/// Count running sandboxes per app by scanning /proc for the bwrap monitor
+/// process of each launch.  Every wryayer sandbox runs `bwrap --bind <app_root>
+/// / …`, and only the outer monitor keeps that argv (the inner process is
+/// exec'd into the app), so one match == one running instance.
+///
+/// The result is keyed by `app.name`.  Programs installed with `--into <parent>`
+/// share the parent's sandbox root, so the `--bind <root> /` triple only names
+/// the parent; counting by root alone would attribute a running child to its
+/// parent and show the same total on both rows.  We instead disambiguate by the
+/// binary the sandbox is actually running (`bwrap … -- <binary> …`), which is
+/// each program's own `main_binary`, and fall back to the root's own app when a
+/// launch used a binary that matches no manifest (e.g. a `run --bin` override).
+pub fn running_instances() -> HashMap<String, usize> {
+    let mut map: HashMap<String, usize> = HashMap::new();
+    let Ok(root) = crate::manifest::wryayer_root() else { return map };
+    let root_prefix = format!("{}/", root.to_string_lossy());
+
+    // (fs_root dir name, main-binary basename) -> app.name, plus the non-alias
+    // owner of each root as the fallback attribution.
+    let manifests = crate::manifest::list_all_apps().unwrap_or_default();
+    let mut by_bin: HashMap<(String, String), String> = HashMap::new();
+    let mut root_owner: HashMap<String, String> = HashMap::new();
+    for m in &manifests {
+        let fs_root = m.app.alias_of.clone().unwrap_or_else(|| m.app.name.clone());
+        let bin = std::path::Path::new(&m.app.main_binary)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(m.app.main_binary.as_str())
+            .to_string();
+        by_bin.insert((fs_root.clone(), bin), m.app.name.clone());
+        if m.app.alias_of.is_none() {
+            root_owner.insert(fs_root, m.app.name.clone());
+        }
+    }
+
+    let Ok(entries) = std::fs::read_dir("/proc") else { return map };
+    for entry in entries.flatten() {
+        let fname = entry.file_name();
+        // Only numeric PID directories.
+        if !fname.to_str().map(|s| s.bytes().all(|b| b.is_ascii_digit())).unwrap_or(false) {
+            continue;
+        }
+        // Count only the actual bwrap monitor.  When ram_limit is set the launch
+        // is `systemd-run … bwrap --bind <root> / …`, so systemd-run's cmdline
+        // carries the same triple; filtering by the real executable (bwrap is
+        // exec'd through a symlink, but /proc/<pid>/exe still resolves to it)
+        // avoids double-counting that wrapper.
+        let is_bwrap = std::fs::read_link(entry.path().join("exe"))
+            .ok()
+            .as_deref()
+            .and_then(std::path::Path::file_name)
+            .map(|n| n == "bwrap")
+            .unwrap_or(false);
+        if !is_bwrap {
+            continue;
+        }
+        let Ok(raw) = std::fs::read(entry.path().join("cmdline")) else { continue };
+        let args: Vec<&str> = raw
+            .split(|&b| b == 0)
+            .filter_map(|s| std::str::from_utf8(s).ok())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        // The binary bwrap execs sits right after the `--` command separator.
+        let run_bin = args
+            .iter()
+            .position(|&a| a == "--")
+            .and_then(|i| args.get(i + 1))
+            .and_then(|p| std::path::Path::new(p).file_name())
+            .and_then(|n| n.to_str());
+
+        // Look for the `--bind <app_root> /` triple that mounts the sandbox root.
+        for w in args.windows(3) {
+            if w[0] == "--bind" && w[2] == "/" && w[1].starts_with(&root_prefix) {
+                if let Some(rest) = w[1].strip_prefix(&root_prefix) {
+                    let fs_root = rest.split('/').next().unwrap_or("");
+                    if !fs_root.is_empty() {
+                        // Attribute to the program whose main_binary is running in
+                        // this shared root; fall back to the root's own app.
+                        let key = run_bin
+                            .and_then(|b| by_bin.get(&(fs_root.to_string(), b.to_string())).cloned())
+                            .or_else(|| root_owner.get(fs_root).cloned())
+                            .unwrap_or_else(|| fs_root.to_string());
+                        *map.entry(key).or_insert(0) += 1;
+                    }
+                }
+                break;
+            }
+        }
+    }
+    map
+}
+
+/// Read the live `/proc/meminfo` overlay wryayer maintains for a ram-limited
+/// sandbox and return `(used_mib, total_mib)`. The file only exists — and is
+/// only kept fresh — while a ram-limited instance of `fs_root` is running, so a
+/// successful read doubles as "this app is running under a RAM cap".
+pub fn sandbox_ram(fs_root: &str) -> Option<(u64, u64)> {
+    let home = std::env::var("HOME").ok()?;
+    let path = format!("{home}/.wryayer/{fs_root}/.spoof/meminfo");
+    // The overlay is only live while a ram-limited instance is running — the
+    // updater rewrites it ~twice a second. A stale file (the RAM limit was
+    // disabled, or the app has exited) keeps its old mtime, so ignore anything
+    // that hasn't been touched in the last few seconds. Without this, disabling
+    // the limit still shows a phantom RAM cap from the leftover file.
+    let modified = std::fs::metadata(&path).ok()?.modified().ok()?;
+    if modified.elapsed().map(|d| d.as_secs() >= 3).unwrap_or(true) {
+        return None;
+    }
+    parse_meminfo(&std::fs::read_to_string(path).ok()?)
+}
+
+/// Parse a `/proc/meminfo` body into `(used_mib, total_mib)`.
+pub(crate) fn parse_meminfo(content: &str) -> Option<(u64, u64)> {
+    let (mut total, mut free) = (None, None);
+    for line in content.lines() {
+        if let Some(v) = line.strip_prefix("MemTotal:") {
+            total = v.trim().trim_end_matches("kB").trim().parse::<u64>().ok();
+        } else if let Some(v) = line.strip_prefix("MemFree:") {
+            free = v.trim().trim_end_matches("kB").trim().parse::<u64>().ok();
+        }
+    }
+    let (t, f) = (total?, free?);
+    Some((t.saturating_sub(f) / 1024, t / 1024)) // kB -> MiB
+}
+
 /// Scan the sandbox's `home/` subtree for ELF files with missing soname
 /// dependencies and install the owning packages if any are found.  Returns
 /// true if at least one package was installed (caller may retry the app).
@@ -1426,5 +1559,18 @@ mod tests {
         std::fs::write(root.join("usr/bin/app"), b"\x7fELF binary").unwrap();
         assert!(resolve_appimage_wrapper(&root, "/usr/bin/app").is_none());
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn parse_meminfo_computes_used_and_total_in_mib() {
+        // 2 GiB total, 1.5 GiB free -> 512 MiB used, 2048 MiB total.
+        let body = "MemTotal:       2097152 kB\nMemFree:        1572864 kB\nMemAvailable:   1572864 kB\n";
+        assert_eq!(parse_meminfo(body), Some((512, 2048)));
+    }
+
+    #[test]
+    fn parse_meminfo_rejects_incomplete() {
+        assert_eq!(parse_meminfo("MemTotal: 2097152 kB\n"), None);
+        assert_eq!(parse_meminfo(""), None);
     }
 }

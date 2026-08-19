@@ -87,6 +87,54 @@ pub fn owner_of(path: &Path) -> Option<String> {
         .map(|name| name.trim().to_string())
 }
 
+/// What creating an app's shortcuts would do, before any of it is done.
+///
+/// Both front-ends show this and then ask for a password, so the user learns
+/// what is about to be written to a system directory — and what is not, and why
+/// — before it happens rather than from a log afterwards.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ShortcutPlan {
+    /// Absolute paths that would be created.
+    pub creates: Vec<String>,
+    /// Paths that would be left alone, each with the reason.
+    pub skips: Vec<String>,
+    /// Set when there is nothing to plan at all — no readable manifest, or an
+    /// app that records no launcher.
+    pub problem: Option<String>,
+}
+
+/// Work out what [`crate::commands::relink`] would do for `app_name`.
+pub fn shortcut_plan(app_name: &str) -> ShortcutPlan {
+    let Ok(manifest) = crate::manifest::read_manifest_or_marker(app_name) else {
+        return ShortcutPlan {
+            problem: Some("Could not read this app's manifest.".to_string()),
+            ..Default::default()
+        };
+    };
+    if manifest.app.launchers.is_empty() {
+        return ShortcutPlan {
+            problem: Some(format!(
+                "'{app_name}' records no launcher binary, so there is no command name \
+                 to create. Run it with `wryayer run` instead."
+            )),
+            ..Default::default()
+        };
+    }
+
+    let dir = launchers_dir().unwrap_or_else(|_| SYSTEM_LAUNCHER_DIR.into());
+    let mut plan = ShortcutPlan::default();
+    for bin in &manifest.app.launchers {
+        if let Some((path, owner)) = foreign_owner(app_name, bin) {
+            plan.skips.push(format!("{} — belongs to '{owner}'", path.display()));
+        } else if let Some(path) = blocked_by(bin) {
+            plan.skips.push(format!("{} — not wryayer's to replace", path.display()));
+        } else {
+            plan.creates.push(dir.join(bin).display().to_string());
+        }
+    }
+    plan
+}
+
 /// A shortcut of this name that some *other* app already owns.
 ///
 /// Two apps can legitimately want the same command name — an alias created with
@@ -403,5 +451,69 @@ mod tests {
         assert_eq!(shell_quote("/usr/bin/wryayer"), "/usr/bin/wryayer");
         assert_eq!(shell_quote("/home/a b/wryayer"), "'/home/a b/wryayer'");
         assert_eq!(shell_quote("/o'x/wryayer"), r"'/o'\''x/wryayer'");
+    }
+
+    fn install_manifest(app: &str, launchers: &[&str]) {
+        let dir = crate::manifest::app_dir(app).unwrap();
+        fs::create_dir_all(&dir).unwrap();
+        let manifest = crate::manifest::Manifest {
+            app: crate::manifest::AppMeta {
+                name: app.to_string(),
+                main_binary: launchers.first().copied().unwrap_or("").to_string(),
+                installed_at: "2026-01-01".to_string(),
+                launchers: launchers.iter().map(|s| s.to_string()).collect(),
+                alias_of: None,
+                display_name: None,
+                pkg_name: None,
+                wine_game: None,
+            },
+            packages: vec![],
+        };
+        crate::manifest::write_manifest(app, &manifest).unwrap();
+    }
+
+    #[test]
+    fn a_plan_names_the_paths_it_would_write() {
+        let _home = crate::test_support::test_home();
+        install_manifest("vim", &["vim", "vimdiff"]);
+
+        let plan = shortcut_plan("vim");
+        assert_eq!(plan.problem, None);
+        assert!(plan.skips.is_empty(), "{:?}", plan.skips);
+        let dir = launchers_dir().unwrap();
+        assert_eq!(
+            plan.creates,
+            vec![
+                dir.join("vim").display().to_string(),
+                dir.join("vimdiff").display().to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_plan_says_why_it_would_leave_a_name_alone() {
+        let _home = crate::test_support::test_home();
+        // One name already belongs to another app, one to the system.
+        install_manifest("Firefox2", &["firefox"]);
+        create_launcher("Firefox2", "firefox").unwrap();
+        fs::write(launchers_dir().unwrap().join("bash"), b"\x7fELF the real bash").unwrap();
+        install_manifest("firefox", &["firefox", "bash", "unclaimed"]);
+
+        let plan = shortcut_plan("firefox");
+        assert_eq!(plan.creates.len(), 1, "{:?}", plan.creates);
+        assert!(plan.creates[0].ends_with("unclaimed"));
+        assert!(plan.skips.iter().any(|s| s.contains("belongs to 'Firefox2'")), "{:?}", plan.skips);
+        assert!(plan.skips.iter().any(|s| s.contains("not wryayer's to replace")), "{:?}", plan.skips);
+    }
+
+    #[test]
+    fn an_app_with_no_launcher_has_nothing_to_plan() {
+        let _home = crate::test_support::test_home();
+        install_manifest("libthing", &[]);
+
+        let plan = shortcut_plan("libthing");
+        assert!(plan.problem.unwrap().contains("no launcher binary"));
+        // And one that is not installed at all says so rather than planning.
+        assert!(shortcut_plan("absent").problem.unwrap().contains("manifest"));
     }
 }

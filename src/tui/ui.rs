@@ -767,39 +767,6 @@ fn draw_installed(f: &mut Frame, app: &mut App, area: Rect) {
     draw_detail(f, app, chunks[1]);
 }
 
-/// Read the live `/proc/meminfo` overlay wryayer maintains for a ram-limited
-/// sandbox and return `(used_mib, total_mib)`. The file only exists — and is
-/// only kept fresh — while a ram-limited instance of `fs_root` is running, so a
-/// successful read doubles as "this app is running under a RAM cap".
-fn read_sandbox_ram(fs_root: &str) -> Option<(u64, u64)> {
-    let home = std::env::var("HOME").ok()?;
-    let path = format!("{home}/.wryayer/{fs_root}/.spoof/meminfo");
-    // The overlay is only live while a ram-limited instance is running — the
-    // updater rewrites it ~twice a second. A stale file (the RAM limit was
-    // disabled, or the app has exited) keeps its old mtime, so ignore anything
-    // that hasn't been touched in the last few seconds. Without this, disabling
-    // the limit still shows a phantom RAM cap from the leftover file.
-    let modified = std::fs::metadata(&path).ok()?.modified().ok()?;
-    if modified.elapsed().map(|d| d.as_secs() >= 3).unwrap_or(true) {
-        return None;
-    }
-    parse_meminfo(&std::fs::read_to_string(path).ok()?)
-}
-
-/// Parse a `/proc/meminfo` body into `(used_mib, total_mib)`.
-fn parse_meminfo(content: &str) -> Option<(u64, u64)> {
-    let (mut total, mut free) = (None, None);
-    for line in content.lines() {
-        if let Some(v) = line.strip_prefix("MemTotal:") {
-            total = v.trim().trim_end_matches("kB").trim().parse::<u64>().ok();
-        } else if let Some(v) = line.strip_prefix("MemFree:") {
-            free = v.trim().trim_end_matches("kB").trim().parse::<u64>().ok();
-        }
-    }
-    let (t, f) = (total?, free?);
-    Some((t.saturating_sub(f) / 1024, t / 1024)) // kB -> MiB
-}
-
 /// The list markers for an encrypted app: a padlock for the container's current
 /// state, and a key when wryayer can open it on its own.
 ///
@@ -887,7 +854,7 @@ fn draw_detail(f: &mut Frame, app: &mut App, area: Rect) {
             Span::styled(format!("{running} instance(s)"), Style::default().fg(c_running())),
         ]));
         let fs_root = m.app.alias_of.as_deref().unwrap_or(&m.app.name);
-        if let Some((used, total)) = read_sandbox_ram(fs_root) {
+        if let Some((used, total)) = crate::commands::run::sandbox_ram(fs_root) {
             let pct = used.saturating_mul(100).checked_div(total).unwrap_or(0);
             let color = if pct >= 90 { c_red() } else if pct >= 70 { c_yellow() } else { c_green() };
             lines.push(Line::from(vec![
@@ -3755,16 +3722,4 @@ mod theme_tests {
         assert_eq!(c_tab_side(), TabSide::Left);
     }
 
-    #[test]
-    fn parse_meminfo_computes_used_and_total_in_mib() {
-        // 2 GiB total, 1.5 GiB free -> 512 MiB used, 2048 MiB total.
-        let body = "MemTotal:       2097152 kB\nMemFree:        1572864 kB\nMemAvailable:   1572864 kB\n";
-        assert_eq!(parse_meminfo(body), Some((512, 2048)));
-    }
-
-    #[test]
-    fn parse_meminfo_rejects_incomplete() {
-        assert_eq!(parse_meminfo("MemTotal: 2097152 kB\n"), None);
-        assert_eq!(parse_meminfo(""), None);
-    }
 }

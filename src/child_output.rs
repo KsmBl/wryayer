@@ -56,6 +56,53 @@ pub fn sanitize_line(raw: &str) -> String {
     out
 }
 
+/// A protocol line a child emitted to tell the front-end something it cannot be
+/// told any other way.
+///
+/// A `wryayer` subprocess has no terminal of its own — both front-ends stream
+/// it into a view — so where the CLI would stop and ask, the child prints one
+/// of these and exits, leaving the front-end to put the question to the user
+/// and re-run the command with the answer folded in. Recognising them is the
+/// same job in the TUI and the GUI, so it is done once, here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChildLine {
+    /// `PROGRESS <done>/<total>` — units are the caller's (bytes, files).
+    Progress(u64, u64),
+    /// `PROMPT_LAUNCHER_CHOICE:<pkg>:<bin>,<bin>` — the package installed
+    /// nothing that looked like a launcher; `bins` is what it did install.
+    NoLauncher { pkg: String, bins: Vec<String> },
+    /// `PROMPT_OUTDATED_PACKAGES:<pkg>` — a download 404'd because the local
+    /// package databases are behind the mirror.
+    OutdatedPackages { pkg: String },
+}
+
+/// Read one line as a protocol line, or None when it is ordinary output.
+pub fn classify(line: &str) -> Option<ChildLine> {
+    if let Some((done, total)) = parse_progress(line) {
+        return Some(ChildLine::Progress(done, total));
+    }
+    if let Some(rest) = line.strip_prefix("PROMPT_LAUNCHER_CHOICE:") {
+        let (pkg, bins) = rest.split_once(':')?;
+        let bins = if bins.is_empty() {
+            Vec::new()
+        } else {
+            bins.split(',').map(str::to_string).collect()
+        };
+        return Some(ChildLine::NoLauncher { pkg: pkg.to_string(), bins });
+    }
+    if let Some(pkg) = line.strip_prefix("PROMPT_OUTDATED_PACKAGES:") {
+        return Some(ChildLine::OutdatedPackages { pkg: pkg.to_string() });
+    }
+    None
+}
+
+/// Parse a `PROGRESS <done>/<total>` line into its two counts.
+pub fn parse_progress(line: &str) -> Option<(u64, u64)> {
+    let rest = line.strip_prefix("PROGRESS ")?;
+    let (a, b) = rest.split_once('/')?;
+    Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -120,5 +167,41 @@ mod tests {
     #[test]
     fn a_line_of_pure_control_bytes_becomes_empty_not_garbage() {
         assert_eq!(sanitize_line("\u{1b}[2J\u{1b}[H"), "");
+    }
+
+    #[test]
+    fn a_progress_line_is_read_as_progress() {
+        assert_eq!(classify("PROGRESS 42/100"), Some(ChildLine::Progress(42, 100)));
+    }
+
+    #[test]
+    fn a_launcher_prompt_carries_the_binaries_that_were_found() {
+        assert_eq!(
+            classify("PROMPT_LAUNCHER_CHOICE:vim:vim,vimdiff"),
+            Some(ChildLine::NoLauncher {
+                pkg: "vim".to_string(),
+                bins: vec!["vim".to_string(), "vimdiff".to_string()],
+            })
+        );
+        // A package that installed nothing at all still names itself.
+        assert_eq!(
+            classify("PROMPT_LAUNCHER_CHOICE:foo:"),
+            Some(ChildLine::NoLauncher { pkg: "foo".to_string(), bins: Vec::new() })
+        );
+    }
+
+    #[test]
+    fn an_outdated_prompt_names_the_package() {
+        assert_eq!(
+            classify("PROMPT_OUTDATED_PACKAGES:gtk3"),
+            Some(ChildLine::OutdatedPackages { pkg: "gtk3".to_string() })
+        );
+    }
+
+    #[test]
+    fn ordinary_output_is_not_a_protocol_line() {
+        for line in ["installing gtk3", "PROGRESS abc/100", "PROMPT_LAUNCHER_CHOICE:novalue", ""] {
+            assert_eq!(classify(line), None, "{line}");
+        }
     }
 }

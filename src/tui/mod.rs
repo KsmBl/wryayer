@@ -586,7 +586,7 @@ impl App {
             app_sizes,
             du_apparent,
             du_actual,
-            running_instances: scan_running_instances(),
+            running_instances: crate::commands::run::running_instances(),
             last_instance_scan: Instant::now(),
             screen: Screen::Main,
             status: String::new(),
@@ -631,7 +631,7 @@ impl App {
             self.du_apparent = apparent;
             self.du_actual = actual;
         }
-        self.running_instances = scan_running_instances();
+        self.running_instances = crate::commands::run::running_instances();
         self.last_instance_scan = Instant::now();
         // Package versions may have changed (install/update/remove); re-check so
         // stale update dots clear and new ones appear.
@@ -644,7 +644,7 @@ impl App {
     /// 50 ms redraw.
     fn refresh_running_instances(&mut self) {
         if self.last_instance_scan.elapsed() >= Duration::from_secs(1) {
-            self.running_instances = scan_running_instances();
+            self.running_instances = crate::commands::run::running_instances();
             // Piggy-backed on the same throttle: listing mounted volumes forks
             // `veracrypt --list`, which must never run per-frame from the
             // renderer. Cached here and read by draw_installed.
@@ -691,98 +691,6 @@ impl App {
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
-/// Count running sandboxes per app by scanning /proc for the bwrap monitor
-/// process of each launch.  Every wryayer sandbox runs `bwrap --bind <app_root>
-/// / …`, and only the outer monitor keeps that argv (the inner process is
-/// exec'd into the app), so one match == one running instance.
-///
-/// The result is keyed by `app.name`.  Programs installed with `--into <parent>`
-/// share the parent's sandbox root, so the `--bind <root> /` triple only names
-/// the parent; counting by root alone would attribute a running child to its
-/// parent and show the same total on both rows.  We instead disambiguate by the
-/// binary the sandbox is actually running (`bwrap … -- <binary> …`), which is
-/// each program's own `main_binary`, and fall back to the root's own app when a
-/// launch used a binary that matches no manifest (e.g. a `run --bin` override).
-fn scan_running_instances() -> HashMap<String, usize> {
-    let mut map: HashMap<String, usize> = HashMap::new();
-    let Ok(root) = crate::manifest::wryayer_root() else { return map };
-    let root_prefix = format!("{}/", root.to_string_lossy());
-
-    // (fs_root dir name, main-binary basename) -> app.name, plus the non-alias
-    // owner of each root as the fallback attribution.
-    let manifests = crate::manifest::list_all_apps().unwrap_or_default();
-    let mut by_bin: HashMap<(String, String), String> = HashMap::new();
-    let mut root_owner: HashMap<String, String> = HashMap::new();
-    for m in &manifests {
-        let fs_root = m.app.alias_of.clone().unwrap_or_else(|| m.app.name.clone());
-        let bin = std::path::Path::new(&m.app.main_binary)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or(m.app.main_binary.as_str())
-            .to_string();
-        by_bin.insert((fs_root.clone(), bin), m.app.name.clone());
-        if m.app.alias_of.is_none() {
-            root_owner.insert(fs_root, m.app.name.clone());
-        }
-    }
-
-    let Ok(entries) = std::fs::read_dir("/proc") else { return map };
-    for entry in entries.flatten() {
-        let fname = entry.file_name();
-        // Only numeric PID directories.
-        if !fname.to_str().map(|s| s.bytes().all(|b| b.is_ascii_digit())).unwrap_or(false) {
-            continue;
-        }
-        // Count only the actual bwrap monitor.  When ram_limit is set the launch
-        // is `systemd-run … bwrap --bind <root> / …`, so systemd-run's cmdline
-        // carries the same triple; filtering by the real executable (bwrap is
-        // exec'd through a symlink, but /proc/<pid>/exe still resolves to it)
-        // avoids double-counting that wrapper.
-        let is_bwrap = std::fs::read_link(entry.path().join("exe"))
-            .ok()
-            .as_deref()
-            .and_then(std::path::Path::file_name)
-            .map(|n| n == "bwrap")
-            .unwrap_or(false);
-        if !is_bwrap {
-            continue;
-        }
-        let Ok(raw) = std::fs::read(entry.path().join("cmdline")) else { continue };
-        let args: Vec<&str> = raw
-            .split(|&b| b == 0)
-            .filter_map(|s| std::str::from_utf8(s).ok())
-            .filter(|s| !s.is_empty())
-            .collect();
-
-        // The binary bwrap execs sits right after the `--` command separator.
-        let run_bin = args
-            .iter()
-            .position(|&a| a == "--")
-            .and_then(|i| args.get(i + 1))
-            .and_then(|p| std::path::Path::new(p).file_name())
-            .and_then(|n| n.to_str());
-
-        // Look for the `--bind <app_root> /` triple that mounts the sandbox root.
-        for w in args.windows(3) {
-            if w[0] == "--bind" && w[2] == "/" && w[1].starts_with(&root_prefix) {
-                if let Some(rest) = w[1].strip_prefix(&root_prefix) {
-                    let fs_root = rest.split('/').next().unwrap_or("");
-                    if !fs_root.is_empty() {
-                        // Attribute to the program whose main_binary is running in
-                        // this shared root; fall back to the root's own app.
-                        let key = run_bin
-                            .and_then(|b| by_bin.get(&(fs_root.to_string(), b.to_string())).cloned())
-                            .or_else(|| root_owner.get(fs_root).cloned())
-                            .unwrap_or_else(|| fs_root.to_string());
-                        *map.entry(key).or_insert(0) += 1;
-                    }
-                }
-                break;
-            }
-        }
-    }
-    map
-}
 
 /// Kick off an update check on a background thread; the result map is sent back
 /// over `tx` and drained into `App::update_available` by the event loop.
@@ -814,21 +722,14 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(
             loop {
                 match rx.try_recv() {
                     Ok(Msg::Line(l)) => {
-                        if let Some(rest) = l.strip_prefix("PROMPT_LAUNCHER_CHOICE:") {
-                            if let Some((pkg, bins_str)) = rest.split_once(':') {
-                                let bins: Vec<String> = if bins_str.is_empty() {
-                                    vec![]
-                                } else {
-                                    bins_str.split(',').map(str::to_string).collect()
-                                };
-                                *launcher_choice = Some((pkg.to_string(), bins));
+                        use crate::child_output::ChildLine;
+                        match crate::child_output::classify(&l) {
+                            Some(ChildLine::Progress(done, total)) => *progress = Some((done, total)),
+                            Some(ChildLine::NoLauncher { pkg, bins }) => {
+                                *launcher_choice = Some((pkg, bins))
                             }
-                        } else if let Some(rest) = l.strip_prefix("PROMPT_OUTDATED_PACKAGES:") {
-                            *outdated_pkg = Some(rest.to_string());
-                        } else if let Some(p) = parse_progress(&l) {
-                            *progress = Some(p);
-                        } else {
-                            log.push(l);
+                            Some(ChildLine::OutdatedPackages { pkg }) => *outdated_pkg = Some(pkg),
+                            None => log.push(l),
                         }
                     }
                     Ok(Msg::Done(ok)) => { *done = true; *success = ok; }
@@ -1618,50 +1519,27 @@ fn on_installed(app: &mut App, code: KeyCode) {
 /// A shortcut lands in a system directory, so the confirmation names every file
 /// before anything is written rather than afterwards in a log.
 pub fn shortcut_plan(app_name: &str) -> Vec<String> {
-    use crate::launcher;
-
-    let Ok(manifest) = crate::manifest::read_manifest_or_marker(app_name) else {
-        return vec![
-            "Could not read this app's manifest.".into(),
-            String::new(),
-            "Press n or Esc to go back.".into(),
-        ];
-    };
-    if manifest.app.launchers.is_empty() {
-        return vec![
-            format!("'{app_name}' records no launcher binary, so there is no"),
-            "command name to create. Run it with `wryayer run` instead.".into(),
-            String::new(),
-            "Press n or Esc to go back.".into(),
-        ];
-    }
-
-    let dir = launcher::launchers_dir().unwrap_or_else(|_| launcher::SYSTEM_LAUNCHER_DIR.into());
-    let mut creates: Vec<String> = Vec::new();
-    let mut skips: Vec<String> = Vec::new();
-    for bin in &manifest.app.launchers {
-        if let Some((path, owner)) = launcher::foreign_owner(app_name, bin) {
-            skips.push(format!("  {} — belongs to '{owner}'", path.display()));
-        } else if let Some(path) = launcher::blocked_by(bin) {
-            skips.push(format!("  {} — not wryayer's to replace", path.display()));
-        } else {
-            creates.push(format!("  {}", dir.join(bin).display()));
-        }
+    let plan = crate::launcher::shortcut_plan(app_name);
+    if let Some(problem) = plan.problem {
+        let mut body: Vec<String> = problem.lines().map(str::to_string).collect();
+        body.push(String::new());
+        body.push("Press n or Esc to go back.".into());
+        return body;
     }
 
     let mut body = Vec::new();
-    if !creates.is_empty() {
+    if !plan.creates.is_empty() {
         body.push("Creates:".into());
-        body.extend(creates);
+        body.extend(plan.creates.iter().map(|p| format!("  {p}")));
         body.push("plus a desktop entry, if the app ships one — so menus".into());
         body.push("and other applications can reach it.".into());
     }
-    if !skips.is_empty() {
+    if !plan.skips.is_empty() {
         if !body.is_empty() {
             body.push(String::new());
         }
         body.push("Left alone:".into());
-        body.extend(skips);
+        body.extend(plan.skips.iter().map(|p| format!("  {p}")));
     }
     body.push(String::new());
     body.push("Writing to a system directory needs your sudo password.".into());
@@ -4773,11 +4651,7 @@ fn launch_op_with_stdin(
 }
 
 /// Parse `PROGRESS <done>/<total>` lines emitted by subprocess commands.
-pub fn parse_progress(line: &str) -> Option<(u64, u64)> {
-    let rest = line.strip_prefix("PROGRESS ")?;
-    let (a, b) = rest.split_once('/')?;
-    Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
-}
+pub use crate::child_output::parse_progress;
 
 /// The canonical konami code: ↑↑↓↓←→←→BA.
 pub const KONAMI: &[KeyCode] = &[
