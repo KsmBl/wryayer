@@ -1109,7 +1109,7 @@ fn draw_install(f: &mut Frame, app: &mut App, area: Rect) {
 
 fn draw_import(f: &mut Frame, app: &App, area: Rect) {
     let block = Block::default().borders(Borders::ALL).border_type(c_border_type())
-        .title(" Import Backup ").title_style(Style::default().fg(c_accent()).add_modifier(Modifier::BOLD));
+        .title(" Import / setup list ").title_style(Style::default().fg(c_accent()).add_modifier(Modifier::BOLD));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -1126,12 +1126,12 @@ fn draw_import(f: &mut Frame, app: &App, area: Rect) {
         .split(inner);
 
     f.render_widget(
-        Paragraph::new("  Type or paste the path to a .zip backup file, then press Enter.")
+        Paragraph::new("  Type or paste the path to a .zip backup — or a .toml setup list — then press Enter.")
             .style(Style::default().fg(c_dim())),
         chunks[0],
     );
     f.render_widget(
-        Paragraph::new("  ~ is expanded automatically.  Press Esc to clear.")
+        Paragraph::new("  ~ is expanded automatically.  [F1] Browse  [F3] Export this machine's setup list  [Esc] Clear")
             .style(Style::default().fg(c_dim())),
         chunks[1],
     );
@@ -1158,7 +1158,7 @@ fn draw_statusbar(f: &mut Frame, app: &App, area: Rect) {
         Tab::Installed if app.detail_focused => "[↑↓] Scroll  [←/Esc] Back  [q] Quit",
         Tab::Installed => "[Tab] Switch  [→] Details  [r] Run  [d] Delete  [e] Export  [p] Snapshots  [c] Check  [u] Update  [U] Update all  [s] Config  [S] Shortcut  [n] Rename  [?] Help  [q] Quit",
         Tab::Install   => "[Tab] Switch  Type to search  [↓] Select  [Enter] Install/Uninstall  [q] Quit",
-        Tab::Import    => "[Tab] Switch  Type zip path  [Enter] Import  [Esc] Clear  [Shift+Q] Quit",
+        Tab::Import    => "[Tab] Switch  Type a .zip or .toml path  [Enter] Import  [F3] Export setup list  [Esc] Clear  [Shift+Q] Quit",
         Tab::Games     => "[Tab] Switch  [↑↓] Navigate  [Enter/r] Run  [s] Settings  [d] Delete  [i/a] Import  [q] Quit",
         Tab::Space     => "[Tab] Switch  [r] Run dedup  [q] Quit",
         Tab::Settings  => "[Tab] Switch  [↑↓] Navigate  [←/→] Cycle  [Enter] Edit  [?] Help  [q] Quit",
@@ -2380,6 +2380,7 @@ fn draw_key_help(f: &mut Frame, area: Rect) {
         ("s",          "Open per-app settings (incl. game exe/prefix for wine games)"),
         ("S",          "Create the app's /usr/bin shortcut and desktop entry"),
         ("n",          "Rename app (set display name)"),
+        ("F3",         "Import tab: write this machine's setup list"),
         ("Tab",        "Switch between tabs"),
         ("↑ / k",      "Move selection up"),
         ("↓ / j",      "Move selection down"),

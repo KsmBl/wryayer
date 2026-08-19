@@ -893,7 +893,114 @@ fn build_import_tab(ctx: &Ctx) -> gtk::Box {
         let ctx = ctx.clone();
         game_btn.connect_clicked(move |_| install::open_game_wizard(&ctx));
     }
+
+    vbox.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+
+    // ── Moving the whole setup ──────────────────────────────────────────
+    // Not a backup: a list of what is installed and how it is configured,
+    // which is what a *different* machine can act on. Its packages come from
+    // whatever package manager that machine has.
+    let setup_lbl = gtk::Label::new(Some(
+        "Take this machine's app list — and every app's settings — to another          machine, even one with a different package manager.",
+    ));
+    setup_lbl.set_xalign(0.0);
+    setup_lbl.set_wrap(true);
+    vbox.append(&setup_lbl);
+
+    let export_setup_btn = gtk::Button::with_label("Export setup list (.toml)…");
+    export_setup_btn.set_halign(gtk::Align::Start);
+    let import_setup_btn = gtk::Button::with_label("Recreate from a setup list…");
+    import_setup_btn.set_halign(gtk::Align::Start);
+    vbox.append(&export_setup_btn);
+    vbox.append(&import_setup_btn);
+
+    {
+        let ctx = ctx.clone();
+        export_setup_btn.connect_clicked(move |_| export_setup_list(&ctx));
+    }
+    {
+        let ctx = ctx.clone();
+        import_setup_btn.connect_clicked(move |_| import_setup_list(&ctx));
+    }
     vbox
+}
+
+/// Write the list of installed apps and their settings to a file.
+fn export_setup_list(ctx: &Ctx) {
+    let today = chrono::Local::now().format("%Y-%m-%d");
+    let dialog = gtk::FileDialog::builder()
+        .title("Export setup list")
+        .initial_name(format!("wryayer-setup-{today}.toml"))
+        .build();
+    let ctx = ctx.clone();
+    dialog.save(Some(&ctx.window.clone()), gtk::gio::Cancellable::NONE, move |res| {
+        if let Ok(file) = res {
+            if let Some(path) = file.path() {
+                op::run_operation(
+                    &ctx.window,
+                    "Export setup list",
+                    vec!["setup".into(), "export".into(), "-o".into(), path.to_string_lossy().into()],
+                    |_| {},
+                );
+            }
+        }
+    });
+}
+
+/// Install what a setup list names, and apply the settings it records.
+///
+/// The plan is shown first — as a dry run in the same console the install will
+/// use — because a list from another machine can name packages this one spells
+/// differently, and that is worth seeing before anything is downloaded.
+fn import_setup_list(ctx: &Ctx) {
+    let filter = gtk::FileFilter::new();
+    filter.add_pattern("*.toml");
+    filter.set_name(Some("wryayer setup list (*.toml)"));
+    let filters = gtk::gio::ListStore::new::<gtk::FileFilter>();
+    filters.append(&filter);
+
+    let dialog = gtk::FileDialog::builder()
+        .title("Recreate from a setup list")
+        .filters(&filters)
+        .build();
+    let ctx = ctx.clone();
+    dialog.open(Some(&ctx.window.clone()), gtk::gio::Cancellable::NONE, move |res| {
+        let Ok(file) = res else { return };
+        let Some(path) = file.path() else { return };
+        let path = path.to_string_lossy().into_owned();
+
+        let ctx2 = ctx.clone();
+        let path2 = path.clone();
+        op::run_operation(
+            &ctx.window,
+            "Setup list — what it would do",
+            vec!["setup".into(), "import".into(), path.clone(), "--dry-run".into()],
+            move |ok| {
+                if !ok {
+                    return;
+                }
+                let ctx3 = ctx2.clone();
+                let path3 = path2.clone();
+                ask(
+                    &ctx2,
+                    "Install everything on that list?",
+                    "The console above shows what it would do. Packages are downloaded \
+                     and installed from this machine's package manager; anything it \
+                     cannot install is reported at the end.",
+                    "Install",
+                    move || {
+                        let ctx = ctx3.clone();
+                        op::run_operation(
+                            &ctx3.window,
+                            "Recreate setup",
+                            vec!["setup".into(), "import".into(), path3.clone()],
+                            move |_| ctx.refresh(),
+                        );
+                    },
+                );
+            },
+        );
+    });
 }
 
 // ── Space tab ──────────────────────────────────────────────────────────────────

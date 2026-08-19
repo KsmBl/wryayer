@@ -1977,14 +1977,43 @@ fn on_import(app: &mut App, code: KeyCode) {
         KeyCode::F(1) | KeyCode::F(2) => {
             open_file_browser(app, BrowserMode::ImportZip);
         }
+        KeyCode::F(3) => {
+            // Writing the list needs no path from the user, so it does not go
+            // through the input: it lands in their home directory, named for
+            // the day.
+            let home = std::env::var("HOME").unwrap_or_default();
+            let path = format!(
+                "{home}/wryayer-setup-{}.toml",
+                chrono::Local::now().format("%Y-%m-%d")
+            );
+            launch_op(
+                app,
+                format!("Setup list — {path}"),
+                vec!["setup".into(), "export".into(), "-o".into(), path],
+                None,
+                false,
+            );
+        }
         KeyCode::Enter => {
             let raw = app.import_input.trim().to_string();
             if raw.is_empty() {
                 return;
             }
             let path = shellexpand::tilde(&raw).into_owned();
-            let zip_bytes = std::fs::metadata(&path).ok().map(|m| m.len());
-            launch_op(app, format!("Import — {path}"), vec!["import".into(), path], zip_bytes, true);
+            // A setup list is not an app: it names what to install rather than
+            // carrying it, so it goes to the command that acts on a list.
+            if path.ends_with(".toml") {
+                launch_op(
+                    app,
+                    format!("Recreate setup — {path}"),
+                    vec!["setup".into(), "import".into(), path],
+                    None,
+                    true,
+                );
+            } else {
+                let zip_bytes = std::fs::metadata(&path).ok().map(|m| m.len());
+                launch_op(app, format!("Import — {path}"), vec!["import".into(), path], zip_bytes, true);
+            }
             app.import_input.clear();
         }
         _ => {}
