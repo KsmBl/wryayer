@@ -675,6 +675,16 @@ apps there are), `password_source`, `apps_relying_on_the_store`. The TUI's
 the TUI would have its layout wrecked by a stray carriage return and the GUI would
 render mojibake, but the fix is identical.
 
+The same rule holds outside encryption, and for the same reason — two
+front-ends that answer a question differently are two chances to be wrong:
+
+| Shared | What both front-ends get from it |
+|---|---|
+| `child_output::classify` | The `PROGRESS` / `PROMPT_*` protocol a child speaks. A child has no terminal, so where the CLI would ask, it prints a line and exits; both front-ends put the question to the user and re-run the command with the answer folded in |
+| `commands::run::running_instances` | How many sandboxes of each app are up, from one walk of `/proc` |
+| `commands::run::sandbox_ram` | A ram-limited sandbox's live usage, read from the `/proc/meminfo` overlay the launcher maintains |
+| `launcher::shortcut_plan` | Which `/usr/bin` paths a relink would write, and which it would leave alone with the reason — shown before the password is asked for, not after the fact |
+
 What differs is only presentation. The TUI walks its password prompts one screen
 at a time because it has one screen; the GUI shows the same set as a single form
 (`gui::encryption::Needs` decides which fields appear, by the same rules as

@@ -320,20 +320,20 @@ README-CODE.md for the diagram version.
 | `manifest.rs` | `.manifest.toml` read/write, `app_dir`/`wryayer_root` path helpers, `list_all_apps`, `tree_order`, the alias/merge model. |
 | `cpu.rs` | Built-in CPU profiles + the `CustomCpu` type; renders `/proc/cpuinfo`, and provides `cpuid_spoof_for` / `topology_for` for the launcher and shim. |
 | `distro.rs` | Detects the host distro and selects the package backend (pacman/apt/dnf); downloads packages and **verifies their signatures before extraction** (`gpg`/`rpmkeys`/apt auth). |
-| `launcher.rs` | Creates/removes the `/usr/bin/<app>` shell wrapper, escalating through sudo when it has to. |
+| `launcher.rs` | Creates/removes the `/usr/bin/<app>` shell wrapper, escalating through sudo when it has to; `shortcut_plan` says what a relink would write and what it would leave alone, for both front-ends to show first. |
 | `desktop.rs` | Publishes an app's packaged `.desktop` files to `/usr/share/applications`, rewritten to run through its shortcut — and generates the entries a sandbox gets for its bound apps, pointed at their portal shims. |
 | `veracrypt.rs` | Per-app VeraCrypt containers: create/mount/unmount, `--list` parsing, container sizing, and the `.encrypted.toml` locked-state marker. |
 | `secrets.rs` | The master password store — Argon2id → AES-256-GCM, plus the per-boot derived-key cache in `$XDG_RUNTIME_DIR` and the no-echo password prompts. |
 | `entropy.rs` | Multi-source entropy pool (urandom, sensors, mouse, RAM, IRQs, clock) and the password generator built on it. |
 | `avahi_stub.rs` | Config/data for the in-sandbox Avahi stub bus. |
-| `child_output.rs` | Sanitises a subprocess's output before a front-end draws it. |
+| `child_output.rs` | Sanitises a subprocess's output before a front-end draws it, and reads the `PROGRESS` / `PROMPT_*` lines a child uses to ask the front-end something (`classify`). |
 | `test_support.rs` | The one `HOME` lock and temp-root sandbox every test that touches the filesystem takes. |
 
 **`commands/` — one file per subcommand**
 
 | File | Responsibility |
 |---|---|
-| `run/mod.rs` | **The sandbox launcher.** `bwrap_cmd` assembles the bwrap command line (all binds, spoofs, env, portal, CPU); `launch_bwrap` spawns it, runs updater threads, waits, tears down. The biggest and most important runtime file. |
+| `run/mod.rs` | **The sandbox launcher.** Also `running_instances` and `sandbox_ram`, which both front-ends read to show what is up and how much of its RAM cap it uses. `bwrap_cmd` assembles the bwrap command line (all binds, spoofs, env, portal, CPU); `launch_bwrap` spawns it, runs updater threads, waits, tears down. The biggest and most important runtime file. |
 | `run/bus.rs` | The D-Bus filter proxy, the Avahi stub bus, the portal listener, and the desktop entries a sandbox needs to find its bound apps. |
 | `run/spoof.rs` | The `/proc`, `/sys` and DMI overlays behind identity/CPU spoofing, plus the device and socket masks. |
 | `install.rs` | resolve → download → extract → write manifest → dedup. |

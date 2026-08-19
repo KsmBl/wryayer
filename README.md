@@ -166,11 +166,24 @@ wryayer gui
 - **Multi-select install** — search the official repos and the AUR, then **tick a
   checkbox** on every package you want and install them all in one go (no per-item
   key presses). You can also type an exact package name to add it directly.
+  Choose whether they become apps of their own or are merged **into** an existing
+  app's tree, and whether each gets a `/usr/bin` shortcut.
+- **Live list** — a dot marks an app with an update waiting (checked in the
+  background, as in the TUI), and a count marks one whose sandboxes are running;
+  the details panel names the new version and, for a ram-limited app, how much of
+  its cap it is using.
+- **Shortcut** — write an app's `/usr/bin` launcher and desktop entry, after
+  showing exactly which paths that touches and which it will leave alone.
 - **Per-app settings** — a proper preferences page with switches, drop-downs and a
   folder picker for shared directories; writes the same `~/.wryayer/<app>/config.ini`
   the CLI uses.
 - **Live console** — installs, updates and removals stream their output into a page
-  you can close when done.
+  you can close when done, with a progress bar for the operations that report one.
+  When a child stops to ask something — a package that installed no launcher, or
+  package databases older than the mirror — the question is put in a dialog and
+  answering it re-runs the install with the answer folded in.
+- **Wine games** — a game container's `.exe` and `WINEPREFIX` are editable in its
+  settings, next to the sandbox options.
 - **Encryption** — the same markers as the TUI in the app list (🔒 / 🔓 / 🔑), the
   container's fill level in the details panel, and buttons in an app's settings to
   encrypt it, lock, unlock, grow or decrypt it. The Settings tab manages the master
@@ -720,9 +733,9 @@ wryayer config firefox share list
 | `lock-on-exit` | `on` `off` | `on` | Unmount an encrypted app's container when the app exits. `off` keeps it mounted until locked by hand — no sudo prompt per launch, but the files stay readable |
 
 `avahi`, `portal_filter` and `bind_app` have no `wryayer config` subcommand yet:
-set them in the TUI (`s` on an app), in the GUI's settings page, or by editing
-`~/.wryayer/<app>/config.ini` directly — the key names in the table are the ones
-the file uses. The install-behaviour keys (`create_shortcut`, `confirm_install`,
+set them in the GUI's per-app settings, in the TUI (`s` on an app — which covers
+`avahi` and `bind_app`), or by editing `~/.wryayer/<app>/config.ini` directly —
+the key names in the table are the ones the file uses. The install-behaviour keys (`create_shortcut`, `confirm_install`,
 `ask_shortcut`, `clean_cache`) and the TUI's `theme` / `layout` are written into
 every generated `config.ini`, but only ever read from the global
 `~/.wryayer/defaults.ini` — set them in the Settings tab.
