@@ -13,6 +13,7 @@ mod install;
 mod op;
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::process::{Command, Stdio};
 use std::rc::Rc;
 use std::sync::mpsc;
@@ -31,12 +32,33 @@ use crate::manifest::{list_all_apps, read_manifest, tree_order, write_manifest, 
 /// callbacks can refresh after an operation.
 pub type Refresh = Rc<RefCell<Option<Box<dyn Fn()>>>>;
 
+/// What the manifests cannot say: which apps have a newer version waiting, and
+/// how many sandboxes of each are running right now.
+///
+/// Both answers cost something to get — one is a network round trip per app,
+/// the other a walk of `/proc` — so they are gathered on their own cadence and
+/// read from here by whatever draws next, exactly as the TUI does.
+#[derive(Default)]
+pub struct Live {
+    /// App name → the version an update would install.
+    pub updates: HashMap<String, String>,
+    /// App name → how many of its sandboxes are up.
+    pub instances: HashMap<String, usize>,
+}
+
 /// Shared handles threaded through every screen.
 #[derive(Clone)]
 pub struct Ctx {
     pub window: gtk::ApplicationWindow,
     pub status: gtk::Label,
+    /// Re-read everything and rebuild the lists — what an operation calls when
+    /// it has changed what is installed.
     pub refresh: Refresh,
+    /// Rebuild the lists from what is already known. Used by the timers, which
+    /// have just gathered the one fact that changed and must not start the
+    /// whole cycle over.
+    pub repopulate: Refresh,
+    pub live: Rc<RefCell<Live>>,
 }
 
 impl Ctx {
@@ -45,9 +67,16 @@ impl Ctx {
         self.status.set_text(msg);
     }
 
-    /// Rebuild the Installed and Games lists.
+    /// Re-read the world and rebuild the Installed and Games lists.
     pub fn refresh(&self) {
         if let Some(f) = self.refresh.borrow().as_ref() {
+            f();
+        }
+    }
+
+    /// Rebuild the lists from what is already known, without re-checking.
+    pub fn repopulate(&self) {
+        if let Some(f) = self.repopulate.borrow().as_ref() {
             f();
         }
     }
@@ -113,12 +142,14 @@ fn build_ui(app: &gtk::Application) {
         window: window.clone(),
         status,
         refresh: Rc::new(RefCell::new(None)),
+        repopulate: Rc::new(RefCell::new(None)),
+        live: Rc::new(RefCell::new(Live::default())),
     };
 
     // Build the six tabs.
     let (installed_tab, populate_installed) = build_app_list_tab(&ctx, false);
     let (games_tab, populate_games) = build_app_list_tab(&ctx, true);
-    let install_tab = install::build_tab(&ctx);
+    let (install_tab, refresh_install_targets) = install::build_tab(&ctx);
     let import_tab = build_import_tab(&ctx);
     let space_tab = build_space_tab(&ctx);
     let settings_tab = config::build_settings_tab(&ctx);
@@ -130,15 +161,28 @@ fn build_ui(app: &gtk::Application) {
     add_tab(&notebook, &space_tab, "Space");
     add_tab(&notebook, &settings_tab, "Settings");
 
-    // Wire the refresh closure to repopulate both app lists.
+    // Wire the refresh closure to repopulate both app lists. Anything that
+    // rebuilt them changed what is installed, so the update check runs again:
+    // an app just updated must lose its marker, a new one may arrive with hers.
     {
-        let refresh = ctx.refresh.clone();
-        *refresh.borrow_mut() = Some(Box::new(move || {
-            populate_installed();
-            populate_games();
+        let installed = populate_installed.clone();
+        let games = populate_games.clone();
+        *ctx.repopulate.borrow_mut() = Some(Box::new(move || {
+            installed();
+            games();
+        }));
+    }
+    {
+        let ctx2 = ctx.clone();
+        *ctx.refresh.borrow_mut() = Some(Box::new(move || {
+            ctx2.live.borrow_mut().instances = crate::commands::run::running_instances();
+            ctx2.repopulate();
+            refresh_install_targets();
+            check_for_updates(&ctx2);
         }));
     }
     ctx.refresh();
+    watch_running_instances(&ctx);
 
     window.present();
 
@@ -146,6 +190,54 @@ fn build_ui(app: &gtk::Application) {
         ctx.status("wryayer cannot use ~/.wryayer — see the dialog.");
         report_root_problem(&window, &problem);
     }
+}
+
+/// Ask every app whether it has a newer version, off the main thread, and
+/// redraw the lists when the answer arrives.
+///
+/// One check covers every app — it is a single `check_all_updates` — and it can
+/// take seconds against a slow mirror, which is exactly why it does not run on
+/// the thread painting the window.
+fn check_for_updates(ctx: &Ctx) {
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = tx.send(crate::commands::update::check_all_updates());
+    });
+
+    let ctx = ctx.clone();
+    glib::timeout_add_local(Duration::from_millis(250), move || match rx.try_recv() {
+        Ok(updates) => {
+            let changed = ctx.live.borrow().updates != updates;
+            ctx.live.borrow_mut().updates = updates;
+            // Repopulating from here would re-enter the refresh closure that
+            // started this check, and with it another check; only the lists are
+            // rebuilt, not the whole cycle.
+            if changed {
+                ctx.repopulate();
+            }
+            glib::ControlFlow::Break
+        }
+        Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+        Err(mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
+    });
+}
+
+/// Keep the running-instance counts live, at the cadence the TUI uses.
+///
+/// A sandbox starting or exiting is not something wryayer is told about — the
+/// count comes from walking `/proc` — so it is re-read on a timer, and the
+/// lists are only rebuilt when the answer actually changed.
+fn watch_running_instances(ctx: &Ctx) {
+    let ctx = ctx.clone();
+    glib::timeout_add_local(Duration::from_secs(2), move || {
+        let fresh = crate::commands::run::running_instances();
+        let changed = ctx.live.borrow().instances != fresh;
+        if changed {
+            ctx.live.borrow_mut().instances = fresh;
+            ctx.repopulate();
+        }
+        glib::ControlFlow::Continue
+    });
 }
 
 /// Put an unusable root in front of the user, in full.
@@ -275,7 +367,7 @@ fn build_app_list_tab(ctx: &Ctx, games: bool) -> (gtk::Box, Rc<dyn Fn()>) {
     details.set_margin_end(10);
     let det_scroll = gtk::ScrolledWindow::new();
     det_scroll.set_child(Some(&details));
-    render_details(&details, "");
+    render_details(&details, "", &ctx.live.borrow());
 
     let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
     paned.set_start_child(Some(&tree_scroll));
@@ -301,11 +393,13 @@ fn build_app_list_tab(ctx: &Ctx, games: bool) -> (gtk::Box, Rc<dyn Fn()>) {
     bar.append(&config_btn);
     let rename_btn = gtk::Button::with_label("Rename");
     let into_btn = gtk::Button::with_label("Install into…");
+    let shortcut_btn = gtk::Button::with_label("Shortcut");
     let snapshot_btn = gtk::Button::with_label("Snapshot");
     let rollback_btn = gtk::Button::with_label("Snapshots…");
     let export_btn = gtk::Button::with_label("Export");
     if !games {
         bar.append(&rename_btn);
+        bar.append(&shortcut_btn);
         bar.append(&into_btn);
         bar.append(&snapshot_btn);
         bar.append(&rollback_btn);
@@ -330,9 +424,12 @@ fn build_app_list_tab(ctx: &Ctx, games: bool) -> (gtk::Box, Rc<dyn Fn()>) {
     // Selecting a row shows its details — clicking never runs the app.
     {
         let details = details.clone();
+        let live = ctx.live.clone();
         tree.selection().connect_changed(move |sel| match sel.selected() {
-            Some((model, iter)) => render_details(&details, &model.get::<String>(&iter, 1)),
-            None => render_details(&details, ""),
+            Some((model, iter)) => {
+                render_details(&details, &model.get::<String>(&iter, 1), &live.borrow())
+            }
+            None => render_details(&details, "", &live.borrow()),
         });
     }
 
@@ -382,12 +479,21 @@ fn build_app_list_tab(ctx: &Ctx, games: bool) -> (gtk::Box, Rc<dyn Fn()>) {
             if pkg.is_empty() {
                 return;
             }
-            op::run_operation(&ctx_op.window, "Install into", vec!["install".into(), pkg, "--into".into(), target.clone()], {
-                let ctx = ctx_op.clone();
-                move |_| ctx.refresh()
-            });
+            let args = vec!["install".into(), pkg, "--into".into(), target.clone()];
+            op::run_jobs_answering(
+                &ctx_op.window,
+                "Install into",
+                vec![(String::new(), args)],
+                None,
+                {
+                    let ctx = ctx_op.clone();
+                    move |_| ctx.refresh()
+                },
+                install::prompt_handler(&ctx_op),
+            );
         });
     });
+    act!(shortcut_btn, |ctx: &Ctx, name: &str| make_shortcut(ctx, name));
     act!(snapshot_btn, |ctx: &Ctx, name: &str| {
         op::run_operation(&ctx.window, "Snapshot", vec!["snapshot".into(), name.into()], {
             let ctx = ctx.clone();
@@ -414,9 +520,10 @@ fn build_app_list_tab(ctx: &Ctx, games: bool) -> (gtk::Box, Rc<dyn Fn()>) {
         let tree = tree.clone();
         let details = details.clone();
         let compact = compact.clone();
+        let live = ctx.live.clone();
         Rc::new(move || {
             store.clear();
-            render_details(&details, "");
+            render_details(&details, "", &live.borrow());
 
             // tree_order keeps each `--into` child directly after its parent, so
             // by the time a child is seen its parent iter already exists.
@@ -450,7 +557,8 @@ fn build_app_list_tab(ctx: &Ctx, games: bool) -> (gtk::Box, Rc<dyn Fn()>) {
                     .as_ref()
                     .map(|t| parent_iters.contains_key(t))
                     .unwrap_or(false);
-                let markup = row_markup(m, is_child, encryption.get(&m.app.name).copied());
+                let markup =
+                    row_markup(m, is_child, encryption.get(&m.app.name).copied(), &live.borrow());
                 let parent = m.app.alias_of.as_ref().and_then(|t| parent_iters.get(t)).cloned();
                 let iter = store.append(parent.as_ref());
                 store.set_value(&iter, 0, &markup.to_value());
@@ -490,8 +598,10 @@ fn build_app_list_tab(ctx: &Ctx, games: bool) -> (gtk::Box, Rc<dyn Fn()>) {
     (vbox, populate)
 }
 
-/// One tree-row label: bold for a parent, dimmed for a child.
-fn row_markup(m: &Manifest, is_child: bool, enc: Option<AppEncryption>) -> String {
+/// One tree-row label: bold for a parent, dimmed for a child, followed by what
+/// is true of the app right now — a dot when an update is waiting, a count when
+/// sandboxes of it are running. Same vocabulary as the TUI's list.
+fn row_markup(m: &Manifest, is_child: bool, enc: Option<AppEncryption>, live: &Live) -> String {
     let title = match &m.app.display_name {
         Some(d) => format!("{d}  [{}]", m.app.name),
         None => match &m.app.pkg_name {
@@ -505,9 +615,21 @@ fn row_markup(m: &Manifest, is_child: bool, enc: Option<AppEncryption>) -> Strin
     } else {
         format!("<b>{esc}</b>")
     };
-    match enc {
-        Some(state) => format!("{name}  <span alpha='70%'>{}</span>", encryption_badges(state)),
-        None => name,
+    let mut markers = String::new();
+    if let Some(state) = enc {
+        markers.push_str(&encryption_badges(state));
+    }
+    if live.updates.contains_key(&m.app.name) {
+        markers.push('●');
+    }
+    match live.instances.get(&m.app.name).copied().unwrap_or(0) {
+        0 => {}
+        n => markers.push_str(&format!(" {n}▶")),
+    }
+    if markers.is_empty() {
+        name
+    } else {
+        format!("{name}  <span alpha='70%'>{markers}</span>")
     }
 }
 
@@ -528,7 +650,7 @@ fn encryption_badges(state: AppEncryption) -> String {
 }
 
 /// Rebuild the right-hand details panel for `name` (empty = nothing selected).
-fn render_details(container: &gtk::Box, name: &str) {
+fn render_details(container: &gtk::Box, name: &str, live: &Live) {
     while let Some(child) = container.first_child() {
         container.remove(&child);
     }
@@ -565,11 +687,26 @@ fn render_details(container: &gtk::Box, name: &str) {
         .map(|p| p.version.as_str())
         .unwrap_or("?");
     detail_line(container, "Version", ver);
+    if let Some(newer) = live.updates.get(name) {
+        let line = detail_line(container, "Update", &format!("{newer} available"));
+        line.add_css_class("fill-warn");
+    }
     detail_line(container, "Installed", m.app.installed_at.get(..10).unwrap_or(&m.app.installed_at));
     let launchers = if m.app.launchers.is_empty() { "none".to_string() } else { m.app.launchers.join(", ") };
     detail_line(container, "Launchers", &launchers);
     if let Some(g) = &m.app.wine_game {
         detail_line(container, "Wine exe", &g.exe);
+    }
+
+    // What is running right now, and — for a ram-limited sandbox — how close to
+    // its cap it is. The overlay only exists while such a sandbox is up, so a
+    // reading doubles as proof the limit is in force.
+    if let Some(n) = live.instances.get(name).copied().filter(|n| *n > 0) {
+        let fs_root = m.app.alias_of.as_deref().unwrap_or(name);
+        let ram = crate::commands::run::sandbox_ram(fs_root)
+            .map(|(used, total)| format!("   RAM {used} / {total} MiB"))
+            .unwrap_or_default();
+        detail_line(container, "Running", &format!("{n} instance(s){ram}"));
     }
 
     // Size — computed off-thread so a big app can't freeze the panel.
@@ -919,6 +1056,48 @@ fn launch_detached(ctx: &Ctx, name: &str) {
     }
 }
 
+/// Write an app's `/usr/bin` shortcut and desktop entry, after showing exactly
+/// which paths that touches.
+///
+/// The plan is worth showing because two of its outcomes surprise people: a
+/// command name another app already owns is left alone, and so is one that
+/// belongs to the system — a sandboxed `bash` must not become `/usr/bin/bash`.
+fn make_shortcut(ctx: &Ctx, name: &str) {
+    let plan = crate::launcher::shortcut_plan(name);
+    if let Some(problem) = plan.problem {
+        ctx.status(&problem);
+        return;
+    }
+
+    let mut body = String::new();
+    if !plan.creates.is_empty() {
+        body.push_str("Creates:\n");
+        for path in &plan.creates {
+            body.push_str(&format!("  {path}\n"));
+        }
+        body.push_str("plus a desktop entry, if the app ships one — so menus and other \
+                       applications can reach it.\n");
+    }
+    if !plan.skips.is_empty() {
+        body.push_str("\nLeft alone:\n");
+        for skip in &plan.skips {
+            body.push_str(&format!("  {skip}\n"));
+        }
+    }
+    body.push_str("\nWriting to a system directory needs your sudo password.");
+
+    let ctx2 = ctx.clone();
+    let name = name.to_string();
+    ask(ctx, &format!("Create the shortcut for “{name}”?"), &body, "Create", move || {
+        encryption::run_as_root(
+            &ctx2,
+            &format!("Shortcut — {name}"),
+            vec!["relink".into(), name.clone()],
+            "Shortcuts and desktop entries live in system directories.",
+        );
+    });
+}
+
 /// Rename an app's display name (a manifest edit, done in-process).
 fn rename_app(ctx: &Ctx, name: &str) {
     let manifest = match read_manifest(name) {
@@ -1151,7 +1330,16 @@ pub fn confirm<F>(ctx: &Ctx, title: &str, body: &str, danger: bool, on_confirm: 
 where
     F: Fn() + 'static,
 {
-    let action = if danger { "Remove" } else { "OK" };
+    ask(ctx, title, body, if danger { "Remove" } else { "OK" }, on_confirm);
+}
+
+/// As [`confirm`], but the accepting button says what it will do — for the
+/// questions a child asked, where "OK" would not say which of two courses is
+/// being taken.
+pub fn ask<F>(ctx: &Ctx, title: &str, body: &str, action: &str, on_confirm: F)
+where
+    F: Fn() + 'static,
+{
     let dialog = gtk::AlertDialog::builder()
         .modal(true)
         .message(title)
@@ -1241,12 +1429,11 @@ mod badge_tests {
         assert_eq!(encryption_badges(state(false, true)), "🔓🔑");
     }
 
-    #[test]
-    fn a_plain_app_gets_no_badge_at_all() {
-        let m = Manifest {
+    fn manifest(name: &str) -> Manifest {
+        Manifest {
             app: crate::manifest::AppMeta {
-                name: "plain".into(),
-                main_binary: "plain".into(),
+                name: name.into(),
+                main_binary: name.into(),
                 installed_at: "2026-01-01".into(),
                 launchers: vec![],
                 alias_of: None,
@@ -1255,10 +1442,37 @@ mod badge_tests {
                 wine_game: None,
             },
             packages: vec![],
-        };
-        let markup = row_markup(&m, false, None);
+        }
+    }
+
+    #[test]
+    fn a_plain_app_gets_no_badge_at_all() {
+        let markup = row_markup(&manifest("plain"), false, None, &Live::default());
         assert!(!markup.contains('🔒'), "{markup}");
         assert!(!markup.contains('🔓'), "{markup}");
         assert!(markup.contains("plain"), "{markup}");
+    }
+
+    #[test]
+    fn an_app_with_an_update_is_marked() {
+        let live = Live {
+            updates: HashMap::from([("plain".to_string(), "2.0-1".to_string())]),
+            ..Default::default()
+        };
+        assert!(row_markup(&manifest("plain"), false, None, &live).contains('●'));
+        // …and one without it is not.
+        assert!(!row_markup(&manifest("other"), false, None, &live).contains('●'));
+    }
+
+    #[test]
+    fn running_sandboxes_are_counted_on_the_row() {
+        let live = Live {
+            instances: HashMap::from([("plain".to_string(), 2)]),
+            ..Default::default()
+        };
+        assert!(row_markup(&manifest("plain"), false, None, &live).contains("2▶"));
+        // Zero is not worth a marker.
+        let idle = Live { instances: HashMap::from([("plain".to_string(), 0)]), ..Default::default() };
+        assert!(!row_markup(&manifest("plain"), false, None, &idle).contains('▶'));
     }
 }

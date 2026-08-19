@@ -16,9 +16,22 @@ use gtk4 as gtk;
 use gtk::prelude::*;
 use gtk::glib;
 
+use crate::child_output::ChildLine;
+
 pub enum OpMsg {
     Line(String),
     Done(bool),
+}
+
+/// A question one of the jobs' children asked on its output stream, together
+/// with the arguments that produced it.
+///
+/// A child has no terminal to ask on, so it prints a `PROMPT_*` line and exits;
+/// the front-end puts the question to the user and re-runs the same command
+/// with the answer folded in — which is why the arguments travel with it.
+pub struct Prompt {
+    pub line: crate::child_output::ChildLine,
+    pub args: Vec<String>,
 }
 
 /// Spawn `wryayer <args>` and stream its stdout+stderr, line by line, over the
@@ -89,7 +102,7 @@ pub fn run_operation<F>(parent: &gtk::ApplicationWindow, title: &str, args: Vec<
 where
     F: Fn(bool) + 'static,
 {
-    run_queue(parent, title, vec![Job { label: String::new(), args, stdin: None }], on_done);
+    run_queue(parent, title, vec![Job { label: String::new(), args, stdin: None }], on_done, None);
 }
 
 /// As [`run_operation`], but hands the child `stdin_data` — the collected
@@ -109,45 +122,35 @@ pub fn run_operation_with_stdin<F>(
         title,
         vec![Job { label: String::new(), args, stdin: Some(stdin_data) }],
         on_done,
+        None,
     );
 }
 
-/// Open a console window and run each job in `jobs` sequentially, streaming all
-/// their output into the same view. Each job is `(label, args)`; a non-empty
-/// label is printed as a separator header. `on_done(all_ok)` fires when done.
-pub fn run_jobs<F>(
-    parent: &gtk::ApplicationWindow,
-    title: &str,
-    jobs: Vec<(String, Vec<String>)>,
-    on_done: F,
-) where
-    F: Fn(bool) + 'static,
-{
-    let jobs = jobs
-        .into_iter()
-        .map(|(label, args)| Job { label, args, stdin: None })
-        .collect();
-    run_queue(parent, title, jobs, on_done);
-}
 
-/// As [`run_jobs`], but every job is handed the same `stdin_data`.
+/// Run each job in `jobs` sequentially, streaming all of them into one console.
+/// Each job is `(label, args)`; a non-empty label is printed as a separator.
+/// `stdin_data` — the collected passwords — is handed to every child, since each
+/// job is its own process and reads them for itself.
 ///
-/// A batch of encrypted installs needs the same sudo and master password for
-/// each; the child re-reads them per job because each is its own process.
-pub fn run_jobs_with_stdin<F>(
+/// A child that asks something rather than finishing — no launcher found,
+/// package databases behind the mirror — has its question handed to `on_prompt`
+/// once the queue is done, for the caller to put to the user and answer by
+/// re-running the install.
+pub fn run_jobs_answering<F>(
     parent: &gtk::ApplicationWindow,
     title: &str,
     jobs: Vec<(String, Vec<String>)>,
-    stdin_data: String,
+    stdin_data: Option<String>,
     on_done: F,
+    on_prompt: Rc<dyn Fn(Prompt)>,
 ) where
     F: Fn(bool) + 'static,
 {
     let jobs = jobs
         .into_iter()
-        .map(|(label, args)| Job { label, args, stdin: Some(stdin_data.clone()) })
+        .map(|(label, args)| Job { label, args, stdin: stdin_data.clone() })
         .collect();
-    run_queue(parent, title, jobs, on_done);
+    run_queue(parent, title, jobs, on_done, Some(on_prompt));
 }
 
 fn run_queue<F>(
@@ -155,6 +158,7 @@ fn run_queue<F>(
     title: &str,
     jobs: Vec<Job>,
     on_done: F,
+    on_prompt: Option<Rc<dyn Fn(Prompt)>>,
 ) where
     F: Fn(bool) + 'static,
 {
@@ -183,6 +187,13 @@ fn run_queue<F>(
     scroller.set_child(Some(&text));
     vbox.append(&scroller);
 
+    // Hidden until a child reports progress: most operations never do, and an
+    // empty bar sitting there reads as "stuck at zero".
+    let progress = gtk::ProgressBar::new();
+    progress.set_show_text(true);
+    progress.set_visible(false);
+    vbox.append(&progress);
+
     let bottom = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     let status = gtk::Label::new(Some("Working…"));
     status.set_xalign(0.0);
@@ -206,6 +217,10 @@ fn run_queue<F>(
     let multi = jobs.len() > 1;
     let jobs = Rc::new(RefCell::new(VecDeque::from(jobs)));
     let rx_cell: Rc<RefCell<Option<Receiver<OpMsg>>>> = Rc::new(RefCell::new(None));
+    // The arguments of the job currently running, so a prompt it raises can be
+    // answered by re-running the same command.
+    let current_args: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    let prompts: Rc<RefCell<Vec<Prompt>>> = Rc::new(RefCell::new(Vec::new()));
     let overall_ok = Rc::new(Cell::new(true));
     let on_done = Rc::new(on_done);
 
@@ -221,11 +236,13 @@ fn run_queue<F>(
         let jobs = jobs.clone();
         let rx_cell = rx_cell.clone();
         let append = append.clone();
+        let current_args = current_args.clone();
         move || -> bool {
             if let Some(job) = jobs.borrow_mut().pop_front() {
                 if multi && !job.label.is_empty() {
                     append(&format!("── {} ──", job.label));
                 }
+                *current_args.borrow_mut() = job.args.clone();
                 *rx_cell.borrow_mut() = Some(spawn(job.args, job.stdin));
                 true
             } else {
@@ -244,7 +261,21 @@ fn run_queue<F>(
                 break;
             };
             match msg {
-                Ok(OpMsg::Line(line)) => append(&line),
+                // Protocol lines drive the bar or become a question for the
+                // user; only real output is printed.
+                Ok(OpMsg::Line(line)) => match crate::child_output::classify(&line) {
+                    Some(ChildLine::Progress(done, total)) => {
+                        progress.set_visible(true);
+                        let fraction = if total > 0 { done as f64 / total as f64 } else { 0.0 };
+                        progress.set_fraction(fraction.clamp(0.0, 1.0));
+                        progress.set_text(Some(&format!("{}%", (fraction * 100.0).round() as u64)));
+                    }
+                    Some(other) => prompts.borrow_mut().push(Prompt {
+                        line: other,
+                        args: current_args.borrow().clone(),
+                    }),
+                    None => append(&line),
+                },
                 Ok(OpMsg::Done(ok)) => {
                     if !ok {
                         overall_ok.set(false);
@@ -273,8 +304,15 @@ fn run_queue<F>(
         if finished_all {
             let ok = overall_ok.get();
             status.set_text(if ok { "Done." } else { "Failed." });
+            progress.set_visible(false);
             close.set_sensitive(true);
             on_done(ok);
+            // Answering a prompt starts a fresh operation with its own console,
+            // so only the first is put to the user; the rest stay in the log.
+            let first = prompts.borrow_mut().drain(..).next();
+            if let (Some(handler), Some(prompt)) = (&on_prompt, first) {
+                handler(prompt);
+            }
             return glib::ControlFlow::Break;
         }
         glib::ControlFlow::Continue

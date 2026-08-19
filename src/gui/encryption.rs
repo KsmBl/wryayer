@@ -27,6 +27,10 @@ use super::{op, Ctx};
 #[derive(Clone, Copy, Default)]
 struct Needs {
     sudo: bool,
+    /// What the root password is for, when it is not a container — the entry's
+    /// caption says so, since "sudo" alone does not tell the user what they are
+    /// about to authorise.
+    sudo_for: &'static str,
     /// The store does not exist yet: ask twice and create it.
     master_new: bool,
     /// The store exists but is locked this boot.
@@ -146,7 +150,12 @@ fn collect(ctx: &Ctx, title: &str, needs: Needs, on_ok: Rc<dyn Fn(Secrets)>) {
     form.set_margin_end(10);
 
     let sudo = needs.sudo.then(|| {
-        secret_entry(&form, "Your sudo password", Some("VeraCrypt needs root to mount the container."))
+        let why = if needs.sudo_for.is_empty() {
+            "VeraCrypt needs root to mount the container."
+        } else {
+            needs.sudo_for
+        };
+        secret_entry(&form, "Your sudo password", Some(why))
     });
     let master_new = needs.master_new.then(|| {
         (
@@ -575,15 +584,54 @@ fn run_install_jobs(ctx: &Ctx, jobs: Vec<(String, Vec<String>)>, needs: Needs) {
                 })
                 .collect();
             let ctx3 = ctx2.clone();
-            op::run_jobs_with_stdin(
+            op::run_jobs_answering(
                 &ctx2.window,
                 "Install",
                 jobs,
-                secrets.payload(),
+                Some(secrets.payload()),
                 move |_| ctx3.refresh(),
+                super::install::prompt_handler(&ctx2),
             );
         }),
     );
+}
+
+/// Run an operation that needs root but no passwords of its own — writing the
+/// `/usr/bin` shortcuts and desktop entries.
+///
+/// The child cannot ask for the password itself: it is streamed into a console,
+/// with no terminal to prompt on. So sudo is primed from a dialog first, and
+/// then the operation runs as an ordinary one.
+pub fn run_as_root(ctx: &Ctx, title: &str, args: Vec<String>, sudo_for: &'static str) {
+    let ctx2 = ctx.clone();
+    let title_owned = title.to_string();
+    collect(
+        ctx,
+        title,
+        Needs { sudo: !crate::veracrypt::sudo_is_primed(), sudo_for, ..Default::default() },
+        Rc::new(move |_| run_plain(&ctx2, &title_owned, args.clone())),
+    );
+}
+
+/// Re-run an install the user has just answered a question about — no launcher
+/// found, or package databases behind the mirror.
+///
+/// The original arguments are kept, so a retry installs into the same target
+/// and into the same kind of container the user asked for the first time; only
+/// the stdin marker is dropped, because the passwords are collected again here
+/// rather than carried over.
+pub fn rerun_install(ctx: &Ctx, title: String, args: Vec<String>) {
+    let use_master = args.iter().any(|a| a == "--encrypt-master");
+    let generate = args.iter().any(|a| a == "--encrypt-generate");
+    let encrypted = args.iter().any(|a| a == "--encrypt");
+    let args: Vec<String> =
+        args.into_iter().filter(|a| a != "--encrypt-secrets-stdin").collect();
+
+    if !encrypted {
+        run_plain(ctx, &title, args);
+        return;
+    }
+    run_install_jobs(ctx, vec![(title, args)], Needs::for_new_container(use_master, generate));
 }
 
 // ── The master password store ─────────────────────────────────────────────────

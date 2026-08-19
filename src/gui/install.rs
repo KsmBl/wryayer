@@ -13,7 +13,8 @@ use gtk::prelude::*;
 use gtk::glib;
 
 use super::{confirm, encryption, op, text_prompt, Ctx};
-use crate::manifest::read_manifest;
+use crate::child_output::ChildLine;
+use crate::manifest::{list_all_apps, read_manifest};
 
 struct PkgResult {
     name: String,
@@ -24,7 +25,7 @@ struct PkgResult {
 /// Currently ticked package names, in the order they were ticked.
 type Selection = Rc<RefCell<Vec<String>>>;
 
-pub fn build_tab(ctx: &Ctx) -> gtk::Box {
+pub fn build_tab(ctx: &Ctx) -> (gtk::Box, Rc<dyn Fn()>) {
     let vbox = gtk::Box::new(gtk::Orientation::Vertical, 6);
     vbox.set_margin_top(6);
     vbox.set_margin_bottom(6);
@@ -61,13 +62,84 @@ pub fn build_tab(ctx: &Ctx) -> gtk::Box {
     scroller.set_child(Some(&list));
     vbox.append(&scroller);
 
+    // Where the packages land. A merge target puts them in an existing app's
+    // tree (`--into`), sharing everything already extracted there, and gives
+    // each its own thin alias entry — the TUI asks the same question per
+    // package; here it is one choice for the batch.
+    let merge_targets: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+
     // Bottom bar.
     let bottom = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    let target_model = gtk::StringList::new(&[]);
+    let target = gtk::DropDown::new(Some(target_model.clone()), gtk::Expression::NONE);
+    target.set_tooltip_text(Some(
+        "Install each package as its own app, or merge it into an existing app's \
+         tree — for plugins and tool bundles that belong with something already \
+         installed.",
+    ));
+    let target_caption = gtk::Label::new(Some("Install as"));
+    bottom.append(&target_caption);
+    bottom.append(&target);
+
+    // Filled now and again after every operation, since installing or removing
+    // an app changes what there is to merge into. The chosen target is kept
+    // across a rebuild when it is still installed.
+    let refresh_targets: Rc<dyn Fn()> = {
+        let merge_targets = merge_targets.clone();
+        let target = target.clone();
+        let target_model = target_model.clone();
+        let target_caption = target_caption.clone();
+        Rc::new(move || {
+            let chosen = match target.selected() {
+                0 => None,
+                n => merge_targets.borrow().get((n - 1) as usize).cloned(),
+            };
+            let fresh: Vec<String> = list_all_apps()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|m| m.app.alias_of.is_none() && m.app.wine_game.is_none())
+                .map(|m| m.app.name)
+                .collect();
+
+            while target_model.n_items() > 0 {
+                target_model.remove(0);
+            }
+            target_model.append("a new app of its own");
+            for name in &fresh {
+                target_model.append(&format!("into {name}"));
+            }
+            let restored = chosen
+                .and_then(|c| fresh.iter().position(|n| *n == c))
+                .map(|i| i as u32 + 1)
+                .unwrap_or(0);
+            target.set_selected(restored);
+
+            // Nothing to merge into on a fresh machine — then the choice is not
+            // a choice, and the row would only be in the way.
+            let any = !fresh.is_empty();
+            target.set_visible(any);
+            target_caption.set_visible(any);
+            *merge_targets.borrow_mut() = fresh;
+        })
+    };
+    refresh_targets();
     let count_label = gtk::Label::new(Some("0 selected"));
     count_label.set_xalign(0.0);
     count_label.set_hexpand(true);
     let install_btn = gtk::Button::with_label("Install selected");
     install_btn.set_sensitive(false);
+
+    // Whether to put the app on the PATH, starting from the Settings-tab
+    // default. The TUI asks this per install; a checkbox says the same thing
+    // without a dialog in the way of a batch.
+    let shortcut_check = gtk::CheckButton::with_label("Shortcut");
+    shortcut_check.set_active(crate::config::read_global_config().create_shortcut);
+    shortcut_check.set_tooltip_text(Some(
+        "Create /usr/bin/<name> (and a desktop entry) so the app can be started \
+         by name. Without it the app is still installed — run it with \
+         `wryayer run <name>`.",
+    ));
+    bottom.append(&shortcut_check);
 
     // Encryption is offered here rather than after the fact, mirroring the TUI's
     // install-time prompt: the container is sized from what the app actually
@@ -196,6 +268,9 @@ pub fn build_tab(ctx: &Ctx) -> gtk::Box {
     {
         let ctx = ctx.clone();
         let selection = selection.clone();
+        let target = target.clone();
+        let merge_targets = merge_targets.clone();
+        let shortcut_check = shortcut_check.clone();
         install_btn.connect_clicked(move |_| {
             let names = selection.borrow().clone();
             if names.is_empty() {
@@ -214,6 +289,11 @@ pub fn build_tab(ctx: &Ctx) -> gtk::Box {
                 _ => (true, true),
             };
             let mut extra: Vec<String> = Vec::new();
+            // The same flag the TUI's "no shortcut" answer passes: it keeps the
+            // files without putting a command name on the PATH.
+            if !shortcut_check.is_active() {
+                extra.push("--keep-without-launcher".into());
+            }
             if encrypt {
                 extra.push("--encrypt".into());
                 if use_master {
@@ -223,27 +303,104 @@ pub fn build_tab(ctx: &Ctx) -> gtk::Box {
                     extra.push("--encrypt-generate".into());
                 }
             }
+            // Row 0 is "a new app of its own"; the rest name a merge target.
+            let into = match target.selected() {
+                0 => None,
+                n => merge_targets.borrow().get((n - 1) as usize).cloned(),
+            };
             let jobs: Vec<(String, Vec<String>)> = names
                 .iter()
                 .map(|n| {
                     let mut args = vec!["install".to_string(), n.clone()];
+                    if let Some(t) = &into {
+                        args.extend(["--into".to_string(), t.clone()]);
+                    }
                     args.extend(extra.iter().cloned());
                     (format!("install {n}"), args)
                 })
                 .collect();
 
             if !encrypt {
-                op::run_jobs(&ctx.window, "Install", jobs, {
-                    let ctx = ctx.clone();
-                    move |_| ctx.refresh()
-                });
+                op::run_jobs_answering(
+                    &ctx.window,
+                    "Install",
+                    jobs,
+                    None,
+                    {
+                        let ctx = ctx.clone();
+                        move |_| ctx.refresh()
+                    },
+                    prompt_handler(&ctx),
+                );
                 return;
             }
             encryption::install_encrypted(&ctx, jobs, use_master, generate, names.len());
         });
     }
 
-    vbox
+    (vbox, refresh_targets)
+}
+
+/// A handler for the questions an install's child asks — put to the user as a
+/// dialog, and answered by re-running the same install with one more flag.
+///
+/// The TUI answers these the same way; both have to, because the child cannot
+/// ask for itself: it has no terminal, so it prints the question and exits.
+pub fn prompt_handler(ctx: &Ctx) -> Rc<dyn Fn(op::Prompt)> {
+    let ctx = ctx.clone();
+    Rc::new(move |prompt: op::Prompt| match prompt.line {
+        ChildLine::NoLauncher { pkg, bins } => no_launcher_dialog(&ctx, &pkg, &bins, prompt.args),
+        ChildLine::OutdatedPackages { pkg } => outdated_dialog(&ctx, &pkg, prompt.args),
+        // Progress never reaches a handler — the console draws it.
+        ChildLine::Progress(..) => {}
+    })
+}
+
+/// The package installed nothing wryayer would call a launcher, so it kept
+/// nothing. Offer to install it regardless.
+fn no_launcher_dialog(ctx: &Ctx, pkg: &str, bins: &[String], args: Vec<String>) {
+    let body = if bins.is_empty() {
+        format!(
+            "“{pkg}” installed no program at all, so there is nothing to run \
+             it with and nothing was kept.\n\n\
+             Install it anyway? Its files stay in their own tree — which is what a \
+             library, a plugin or a data package is for — but no shortcut is created."
+        )
+    } else {
+        format!(
+            "“{pkg}” installed no program named after it, so nothing was \
+             kept.\n\n\
+             It does install: {}\n\n\
+             Install it anyway (no shortcut), or cancel and install it again picking one \
+             of those as the launcher.",
+            bins.join(", ")
+        )
+    };
+    let ctx2 = ctx.clone();
+    let pkg = pkg.to_string();
+    super::ask(ctx, &format!("No launcher in “{pkg}”"), &body, "Install anyway", move || {
+        let mut args = args.clone();
+        args.push("--keep-without-launcher".into());
+        encryption::rerun_install(&ctx2, format!("Install — {pkg} (no launcher)"), args);
+    });
+}
+
+/// A download 404'd because the local package databases are older than the
+/// mirror. Offer the refresh that fixes it.
+fn outdated_dialog(ctx: &Ctx, pkg: &str, args: Vec<String>) {
+    let body = format!(
+        "“{pkg}” could not be downloaded: your local package databases are \
+         older than the mirror, so they name versions that are no longer there.\n\n\
+         Refreshing them needs root — the install runs `sudo pacman -Sy` first, then \
+         tries again."
+    );
+    let ctx2 = ctx.clone();
+    let pkg = pkg.to_string();
+    super::ask(ctx, "Package databases are out of date", &body, "Refresh and retry", move || {
+        let mut args = args.clone();
+        args.push("--sync-db".into());
+        encryption::rerun_install(&ctx2, format!("Install — {pkg} (refreshed sources)"), args);
+    });
 }
 
 /// Shown when a package to install is already installed: offer to install a

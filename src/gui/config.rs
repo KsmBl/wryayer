@@ -25,7 +25,7 @@ pub fn build_settings_tab(ctx: &Ctx) -> gtk::Box {
     form.set_margin_bottom(8);
     form.set_margin_start(8);
     form.set_margin_end(8);
-    let gather = build_form(&form, read_global_config(), true, None, ctx);
+    let gather = build_form(&form, read_global_config(), true, None, ctx).gather;
 
     let scroller = gtk::ScrolledWindow::new();
     scroller.set_vexpand(true);
@@ -71,7 +71,7 @@ pub fn open(ctx: &Ctx, app_name: &str) {
     form.set_margin_bottom(8);
     form.set_margin_start(8);
     form.set_margin_end(8);
-    let gather = build_form(&form, cfg, false, Some(app_name), ctx);
+    let Form { gather, save_manifest } = build_form(&form, cfg, false, Some(app_name), ctx);
 
     let scroller = gtk::ScrolledWindow::new();
     scroller.set_vexpand(true);
@@ -103,12 +103,14 @@ pub fn open(ctx: &Ctx, app_name: &str) {
         let ctx = ctx.clone();
         let win = win.clone();
         let app_name = app_name.to_string();
-        save.connect_clicked(move |_| match write_config(&app_name, &gather()) {
-            Ok(_) => {
-                ctx.status(&format!("Saved settings for {app_name}."));
-                win.close();
+        save.connect_clicked(move |_| {
+            match write_config(&app_name, &gather()).and_then(|_| save_manifest()) {
+                Ok(_) => {
+                    ctx.status(&format!("Saved settings for {app_name}."));
+                    win.close();
+                }
+                Err(e) => ctx.status(&format!("Failed to save: {e}")),
             }
-            Err(e) => ctx.status(&format!("Failed to save: {e}")),
         });
     }
 }
@@ -305,9 +307,19 @@ fn open_cpu_configurator(parent: &impl IsA<gtk::Window>, initial: crate::cpu::Cu
     win.present();
 }
 
-/// Build the form widgets into `form` and return a closure that reconstructs an
-/// `AppConfig` from them (carrying over anything not shown from the original).
-fn build_form(form: &gtk::Box, cfg: AppConfig, is_global: bool, app_name: Option<&str>, ctx: &Ctx) -> Rc<dyn Fn() -> AppConfig> {
+/// What a built form hands back.
+struct Form {
+    /// Reconstructs an `AppConfig` from the widgets, carrying over anything not
+    /// shown from the original.
+    gather: Rc<dyn Fn() -> AppConfig>,
+    /// Applies the edits that do not belong in `config.ini`. A wine game's exe
+    /// and prefix live in the manifest — the launcher reads them from there —
+    /// so they are saved alongside the settings rather than with them.
+    save_manifest: Rc<dyn Fn() -> anyhow::Result<()>>,
+}
+
+/// Build the form widgets into `form` and return the pair above.
+fn build_form(form: &gtk::Box, cfg: AppConfig, is_global: bool, app_name: Option<&str>, ctx: &Ctx) -> Form {
     // Only present for an app in an unlocked container.
     let mut encryption_widgets: Option<(gtk::DropDown, gtk::CheckButton)> = None;
     // Sections mirror the TUI: Hardware (CPU/RAM), Privacy (access), Environment
@@ -429,6 +441,11 @@ fn build_form(form: &gtk::Box, cfg: AppConfig, is_global: bool, app_name: Option
     // host-delegated launchers inside this app's sandbox.
     let mut bound_checks: Vec<(String, gtk::CheckButton)> = Vec::new();
 
+    // Read once: the wine-game section and the encryption rows both ask about
+    // the same manifest.
+    let manifest = app_name.and_then(|n| crate::manifest::read_manifest(n).ok());
+    let mut wine_entries: Option<(gtk::Entry, gtk::Entry)> = None;
+
     // Shared dirs (per-app only).
     let shared_state: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(cfg.shared_dirs.clone()));
     if !is_global {
@@ -504,9 +521,7 @@ fn build_form(form: &gtk::Box, cfg: AppConfig, is_global: bool, app_name: Option
         // neither: its files live in the target's tree, so sealing its own
         // directory would protect nothing.
         let name = app_name.unwrap_or("");
-        let is_alias = crate::manifest::read_manifest(name)
-            .map(|m| m.app.alias_of.is_some())
-            .unwrap_or(false);
+        let is_alias = manifest.as_ref().map(|m| m.app.alias_of.is_some()).unwrap_or(false);
         let states = crate::commands::encrypt::scan([name]);
         let enc_state = states.get(name).copied();
 
@@ -562,6 +577,22 @@ fn build_form(form: &gtk::Box, cfg: AppConfig, is_global: bool, app_name: Option
             action_button(form, ctx, "Encrypt this app…", name, |ctx, n| {
                 encryption::encrypt_app(ctx, n)
             });
+        }
+
+        // A wine container's exe and prefix — the two things about it that are
+        // worth changing after the import guessed them.
+        if let Some(game) = manifest.as_ref().and_then(|m| m.app.wine_game.as_ref()) {
+            header(form, "Wine game");
+            let hint = gtk::Label::new(Some(
+                "The .exe is relative to the game folder inside the container; the \
+                 prefix is the WINEPREFIX the game runs against.",
+            ));
+            hint.set_xalign(0.0);
+            hint.set_wrap(true);
+            form.append(&hint);
+            let exe = entry(form, "Game .exe", &game.exe);
+            let prefix = entry(form, "WINEPREFIX", &game.prefix);
+            wine_entries = Some((exe, prefix));
         }
 
         header(form, "Bound apps");
@@ -640,7 +671,26 @@ fn build_form(form: &gtk::Box, cfg: AppConfig, is_global: bool, app_name: Option
         None
     };
 
-    Rc::new(move || {
+    let save_manifest: Rc<dyn Fn() -> anyhow::Result<()>> = {
+        let name = app_name.map(str::to_string);
+        let wine_entries = wine_entries.clone();
+        Rc::new(move || {
+            let (Some(name), Some((exe, prefix))) = (name.as_deref(), wine_entries.as_ref()) else {
+                return Ok(());
+            };
+            // Re-read rather than reusing the copy taken when the form opened:
+            // an operation may have rewritten the manifest while it was up.
+            let mut m = crate::manifest::read_manifest(name)?;
+            if let Some(game) = m.app.wine_game.as_mut() {
+                game.exe = exe.text().trim().to_string();
+                game.prefix = prefix.text().trim().to_string();
+                crate::manifest::write_manifest(name, &m)?;
+            }
+            Ok(())
+        })
+    };
+
+    let gather: Rc<dyn Fn() -> AppConfig> = Rc::new(move || {
         let mut c = cfg.clone();
         c.network = network.is_active();
         c.camera = camera.is_active();
@@ -713,5 +763,7 @@ fn build_form(form: &gtk::Box, cfg: AppConfig, is_global: bool, app_name: Option
             };
         }
         c
-    })
+    });
+
+    Form { gather, save_manifest }
 }
