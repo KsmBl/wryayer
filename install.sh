@@ -53,7 +53,7 @@ info "Detected distro: $DISTRO"
 heading "Which interfaces should be built?"
 echo -e "  1) both  — terminal UI (TUI) + desktop GUI   ${BOLD}(default)${NC}"
 echo "  2) tui   — terminal UI only"
-echo "  3) gui   — desktop GUI only (GTK4 + libadwaita)"
+echo "  3) gui   — desktop GUI only (GTK4)"
 echo "  4) none  — command-line only"
 
 choice=""
@@ -164,11 +164,19 @@ heading "Checking Rust toolchain..."
 
 RUST_MIN="1.88"
 
-# Parse "x.y.z" → integer xxyyzz for numeric comparison
+# Parse "x.y.z" → integer xxyyzz for numeric comparison.
+#
+# Always prints a number: a cargo that is on the PATH but cannot run — a rustup
+# shim with no toolchain behind it is the usual way — prints nothing, and an
+# empty string here made the `-lt` below fail with "integer expression
+# expected", which under `set -e` ended the install with no explanation. 0 sorts
+# below every real version, so it takes the "too old, install rustup" path.
 rust_version_int() {
-    "$1" --version 2>/dev/null \
+    local parsed
+    parsed="$("$1" --version 2>/dev/null \
         | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1 \
-        | awk -F. '{ printf "%d%02d%02d", $1, $2, ($3+0) }'
+        | awk -F. '{ printf "%d%02d%02d", $1, $2, ($3+0) }')" || parsed=""
+    echo "${parsed:-0}"
 }
 
 MIN_INT="$(echo "$RUST_MIN" | awk -F. '{ printf "%d%02d%02d", $1, $2, ($3+0) }')"
@@ -275,15 +283,32 @@ else
     warn "fish not found — skipping fish completions."
 fi
 
-if command -v bash &>/dev/null && [ -f "${HOME}/.bashrc" ]; then
-    "$BIN_DIR/wryayer" completions bash >> "${HOME}/.bashrc"
-    info "Added bash completions to ~/.bashrc"
-fi
+# The completion script goes in its own file and the rc file only sources it.
+# Appending the script itself is not repeatable: every run added another ~3000
+# lines, and no run ever replaced an older copy — one installation here had
+# eight of them in an 800 KB .bashrc. A file is overwritten instead, so a
+# re-install always leaves exactly one copy, and it is the current one.
+COMP_DIR="${HOME}/.local/share/wryayer"
 
-if command -v zsh &>/dev/null && [ -f "${HOME}/.zshrc" ]; then
-    "$BIN_DIR/wryayer" completions zsh >> "${HOME}/.zshrc"
-    info "Added zsh completions to ~/.zshrc"
-fi
+install_rc_completions() {
+    local shell="$1" rc="$2"
+    command -v "$shell" &>/dev/null || return 0
+    [ -f "$rc" ] || return 0
+
+    mkdir -p "$COMP_DIR"
+    "$BIN_DIR/wryayer" completions "$shell" > "${COMP_DIR}/completions.${shell}"
+
+    local line="[ -f \"\$HOME/.local/share/wryayer/completions.${shell}\" ] && . \"\$HOME/.local/share/wryayer/completions.${shell}\""
+    if grep -qF "$line" "$rc"; then
+        info "${shell} completions updated (${rc} already sources them)"
+    else
+        printf '\n# wryayer shell completion\n%s\n' "$line" >> "$rc"
+        info "Added ${shell} completions to ${rc}"
+    fi
+}
+
+install_rc_completions bash "${HOME}/.bashrc"
+install_rc_completions zsh  "${HOME}/.zshrc"
 
 # ── Done ──────────────────────────────────────────────────────────────────────
 
@@ -297,5 +322,10 @@ else
 fi
 echo "  then try:  wryayer --help"
 echo "             wryayer install jq"
-[ "$BUILD_TUI" = 1 ] && echo "             wryayer tui"
-[ "$BUILD_GUI" = 1 ] && echo "             wryayer gui"
+if [ "$BUILD_TUI" = 1 ]; then echo "             wryayer tui"; fi
+if [ "$BUILD_GUI" = 1 ]; then echo "             wryayer gui"; fi
+
+# The script's status is whatever ran last, and the two lines above are
+# conditional — a TUI-only install left a false `[ "$BUILD_GUI" = 1 ]` as the
+# last thing evaluated and exited 1, having succeeded completely. Say so.
+exit 0
