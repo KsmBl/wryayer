@@ -394,6 +394,12 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             let selected = *selected;
             draw_outdated_packages(f, area, &pkg, selected);
         }
+        Screen::BuildDeps { pkg, deps, selected, .. } => {
+            let pkg = pkg.clone();
+            let deps = deps.clone();
+            let selected = *selected;
+            draw_build_deps(f, area, &pkg, &deps, selected);
+        }
         Screen::AskShortcut { pkg, selected, .. } => {
             let pkg = pkg.clone();
             let selected = *selected;
@@ -2850,6 +2856,74 @@ fn draw_already_installed(f: &mut Frame, area: Rect, pkg: &str, selected: usize)
 }
 
 // ── No-launcher choice overlay ────────────────────────────────────────────────
+
+/// The build-dependency popup.
+///
+/// Named in full rather than counted: which packages are about to be installed
+/// on the *host* — outside any sandbox — is the whole of what the user is being
+/// asked to agree to.
+fn draw_build_deps(f: &mut Frame, area: Rect, pkg: &str, deps: &[String], selected: usize) {
+    let inner = popup_frame(f, area, 66, 50, "Build dependencies needed", c_yellow());
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .split(inner);
+
+    let mut items: Vec<ListItem> = vec![
+        ListItem::new(Line::from(vec![
+            Span::styled("  ", Style::default().fg(c_dim())),
+            Span::styled(pkg, Style::default().fg(c_fg())),
+            Span::styled(" is built from source, and the build needs", Style::default().fg(c_dim())),
+        ])),
+        ListItem::new(Line::from(vec![Span::styled(
+            "  these packages on the host first:",
+            Style::default().fg(c_dim()),
+        )])),
+        ListItem::new(Line::raw("")),
+        ListItem::new(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(deps.join(", "), Style::default().fg(c_yellow())),
+        ])),
+        ListItem::new(Line::raw("")),
+    ];
+    let info_rows = items.len();
+
+    let choices: &[(&str, &str, &str, Color)] = &[
+        ("↻", "Authenticate & retry", "install them as root, then build", c_green()),
+        ("✕", "Cancel", "return to main screen", c_red()),
+    ];
+
+    for (i, (icon, label, desc, color)) in choices.iter().enumerate() {
+        let is_sel = i == selected;
+        let label_style = if is_sel {
+            Style::default().fg(*color).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(c_dim())
+        };
+        items.push(ListItem::new(Line::from(vec![
+            Span::styled(if is_sel { " ▶ " } else { "   " }, Style::default().fg(c_yellow())),
+            Span::styled(*icon, Style::default().fg(*color)),
+            Span::raw(" "),
+            Span::styled(*label, label_style),
+            Span::styled(format!("  — {desc}"), Style::default().fg(c_dim())),
+        ])));
+    }
+
+    let mut list_state = ListState::default();
+    list_state.select(Some(info_rows + selected));
+
+    let list = List::new(items).highlight_style(Style::default().bg(c_select()));
+    f.render_stateful_widget(list, chunks[0], &mut list_state);
+
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            " [↑↓/jk] Navigate  [Enter] Select  [Esc/q] Cancel",
+            Style::default().fg(c_dim()),
+        )),
+        chunks[1],
+    );
+}
 
 fn draw_outdated_packages(f: &mut Frame, area: Rect, pkg: &str, selected: usize) {
     let inner = popup_frame(f, area, 62, 40, "Package databases may be out of date", c_yellow());

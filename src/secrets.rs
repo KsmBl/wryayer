@@ -467,9 +467,26 @@ fn load_cached_key() -> Result<Option<CachedKey>> {
 
 /// Prompt for a password with echo disabled.
 ///
-/// Fails with a clear message when there is no terminal, which is what happens
-/// if a caller forgets to suspend the TUI before asking.
+/// Refuses outright in a process that has no terminal of its own — a front-end
+/// child, or a command run from a script. `rpassword` reads `/dev/tty`
+/// directly, so without this check a TUI-spawned child would write its prompt
+/// onto the alternate screen, where the next frame paints over it, and then sit
+/// competing with the TUI for keystrokes that never arrive. See
+/// [`crate::prompt`].
 pub fn prompt_password(prompt: &str) -> Result<Zeroizing<String>> {
+    if !crate::prompt::allowed() {
+        // The prompt string is the only description of the password there is
+        // ("Master password: ", "Password for 'vault': "), so it is what the
+        // refusal names — trimmed of its separator, and lowercased at the front
+        // so it reads as part of the sentence.
+        let name = prompt.trim().trim_end_matches(':').trim();
+        let mut chars = name.chars();
+        let name = match chars.next() {
+            Some(first) => first.to_lowercase().chain(chars).collect::<String>(),
+            None => "a password".to_string(),
+        };
+        return Err(crate::prompt::refused(&name));
+    }
     let pw = rpassword::prompt_password(prompt).context(
         "failed to read a password from the terminal — this needs an interactive terminal",
     )?;
@@ -726,6 +743,38 @@ mod tests {
                 first, second,
                 "identical content must still re-encrypt under a new nonce"
             );
+        });
+    }
+
+    /// A front-end child asked for a password gets an error, not a prompt.
+    ///
+    /// The whole point of the marker: `rpassword` reads `/dev/tty`, so without
+    /// this the child would write its prompt onto the screen the TUI is drawing
+    /// and then block on keystrokes the TUI is already consuming.
+    #[test]
+    fn a_front_end_child_is_refused_rather_than_prompted() {
+        with_temp_env(|| {
+            std::env::set_var(crate::prompt::NO_TTY_ENV, "1");
+            let err = prompt_password("Master password: ").unwrap_err();
+            std::env::remove_var(crate::prompt::NO_TTY_ENV);
+
+            let msg = format!("{err:#}");
+            assert!(msg.contains("master password"), "{msg}");
+            assert!(msg.contains("terminal"), "{msg}");
+        });
+    }
+
+    /// The pair-entry helper is refused at its first half, so a forbidden
+    /// process never gets as far as "Repeat to confirm".
+    #[test]
+    fn a_new_password_is_refused_the_same_way() {
+        with_temp_env(|| {
+            std::env::set_var(crate::prompt::NO_TTY_ENV, "1");
+            let err = prompt_new_password("New master password: ").unwrap_err();
+            std::env::remove_var(crate::prompt::NO_TTY_ENV);
+
+            let msg = format!("{err:#}");
+            assert!(msg.contains("new master password"), "{msg}");
         });
     }
 }

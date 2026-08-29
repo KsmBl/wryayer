@@ -351,6 +351,7 @@ pub fn prompt_handler(ctx: &Ctx) -> Rc<dyn Fn(op::Prompt)> {
     Rc::new(move |prompt: op::Prompt| match prompt.line {
         ChildLine::NoLauncher { pkg, bins } => no_launcher_dialog(&ctx, &pkg, &bins, prompt.args),
         ChildLine::OutdatedPackages { pkg } => outdated_dialog(&ctx, &pkg, prompt.args),
+        ChildLine::BuildDeps { pkg, deps } => build_deps_dialog(&ctx, &pkg, &deps, prompt.args),
         // Progress never reaches a handler — the console draws it.
         ChildLine::Progress(..) => {}
     })
@@ -381,7 +382,32 @@ fn no_launcher_dialog(ctx: &Ctx, pkg: &str, bins: &[String], args: Vec<String>) 
     super::ask(ctx, &format!("No launcher in “{pkg}”"), &body, "Install anyway", move || {
         let mut args = args.clone();
         args.push("--keep-without-launcher".into());
-        encryption::rerun_install(&ctx2, format!("Install — {pkg} (no launcher)"), args);
+        encryption::rerun_install(&ctx2, format!("Install — {pkg} (no launcher)"), args, false);
+    });
+}
+
+/// A source build wanted packages installed on the host, and the install had no
+/// root to install them with. Offer to authenticate and build again.
+///
+/// The dependencies are named in full: they go on the *host*, outside any
+/// sandbox, which is the whole of what the user is being asked to agree to.
+fn build_deps_dialog(ctx: &Ctx, pkg: &str, deps: &[String], args: Vec<String>) {
+    let body = format!(
+        "“{pkg}” is built from source, and the build needs these packages \
+         installed on your system first:\n\n{}\n\n\
+         They are installed with pacman, on the host rather than in the sandbox, so \
+         this needs root. The build then carries on from where it stopped.",
+        deps.join(", ")
+    );
+    let ctx2 = ctx.clone();
+    let pkg = pkg.to_string();
+    super::ask(ctx, "Build dependencies needed", &body, "Authenticate and build", move || {
+        encryption::rerun_install(
+            &ctx2,
+            format!("Install — {pkg} (with build dependencies)"),
+            args.clone(),
+            true,
+        );
     });
 }
 
@@ -399,7 +425,12 @@ fn outdated_dialog(ctx: &Ctx, pkg: &str, args: Vec<String>) {
     super::ask(ctx, "Package databases are out of date", &body, "Refresh and retry", move || {
         let mut args = args.clone();
         args.push("--sync-db".into());
-        encryption::rerun_install(&ctx2, format!("Install — {pkg} (refreshed sources)"), args);
+        encryption::rerun_install(
+            &ctx2,
+            format!("Install — {pkg} (refreshed sources)"),
+            args,
+            false,
+        );
     });
 }
 

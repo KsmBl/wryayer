@@ -525,7 +525,7 @@ fn mount_at(container: &Path, mount_point: &Path, password: &str) -> Result<()> 
 /// Unmount by container path (used for volumes not tied to an app directory).
 fn dismount_path(container: &Path) -> Result<()> {
     let c = container.to_string_lossy().into_owned();
-    let status = Command::new("sudo")
+    let status = crate::prompt::sudo()
         .arg("veracrypt")
         .args(["--text", "--dismount", &c, "--non-interactive"])
         .status()
@@ -709,7 +709,7 @@ pub fn keep_sudo_alive() {
 /// appears in `/proc/<pid>/cmdline`, where any process on the system could read
 /// it.
 fn run_with_password(args: &[&str], password: &str, what: &str) -> Result<()> {
-    let mut child = Command::new("sudo")
+    let mut child = crate::prompt::sudo()
         .arg("veracrypt")
         .args(args)
         .stdin(Stdio::piped())
@@ -752,7 +752,7 @@ fn run_with_password(args: &[&str], password: &str, what: &str) -> Result<()> {
 fn chown_to_user(path: &Path) -> Result<()> {
     let uid = unsafe { libc::getuid() };
     let gid = unsafe { libc::getgid() };
-    let status = Command::new("sudo")
+    let status = crate::prompt::sudo()
         .arg("chown")
         .arg(format!("{uid}:{gid}"))
         .arg(path)
@@ -820,7 +820,7 @@ pub fn create(path: &Path, size_bytes: u64, password: &str) -> Result<()> {
         // isn't blocked by the "container already exists" check above. It may
         // be root-owned, so remove it with the same privileges that made it.
         if path.exists() {
-            let _ = Command::new("sudo").arg("rm").arg("-f").arg(path).status();
+            let _ = crate::prompt::sudo().arg("rm").arg("-f").arg(path).status();
         }
     })?;
 
@@ -899,7 +899,7 @@ pub fn dismount(app_name: &str) -> Result<()> {
     let container = container_path(app_name)?;
     let container_str = container.to_string_lossy().into_owned();
     // Unmounting needs root for the same reason mounting does.
-    let status = Command::new("sudo")
+    let status = crate::prompt::sudo()
         .arg("veracrypt")
         .args(["--text", "--dismount", &container_str, "--non-interactive"])
         .status()

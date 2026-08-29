@@ -16,7 +16,6 @@
 
 use anyhow::{bail, Context, Result};
 use std::fs;
-use std::io::IsTerminal;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -373,7 +372,7 @@ fn sudo() -> Option<Command> {
         cmd.arg("-n").stdin(Stdio::null());
         return Some(cmd);
     }
-    if std::io::stdin().is_terminal() {
+    if crate::prompt::allowed() {
         return Some(Command::new("sudo"));
     }
     None

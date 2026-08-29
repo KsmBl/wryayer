@@ -83,6 +83,10 @@ impl Ctx {
 }
 
 pub fn run() -> Result<()> {
+    // The GUI has no terminal to ask on — its children's output goes to a
+    // TextView, and its own calls into `commands` have nowhere to print. Every
+    // password is collected in a dialog instead; see `encryption`.
+    crate::prompt::forbid_here();
     let app = gtk::Application::builder()
         .application_id("de.synthelicz.Wryayer")
         .build();
@@ -1148,9 +1152,28 @@ fn spawn_usage() -> mpsc::Receiver<Vec<(String, u64)>> {
 // ── App actions ────────────────────────────────────────────────────────────────
 
 /// Launch an installed app detached — it runs independently of the GUI.
+///
+/// A locked app is unlocked through the dialog first. `wryayer run` would mount
+/// the container itself, but it is started detached with its output discarded,
+/// so a password prompt in there would be a launch that silently never happens.
 fn launch_detached(ctx: &Ctx, name: &str) {
+    if crate::veracrypt::is_locked(name) {
+        let ctx2 = ctx.clone();
+        let name = name.to_string();
+        encryption::unlock_then(
+            ctx,
+            &name.clone(),
+            Rc::new(move || spawn_run(&ctx2, &name)),
+        );
+        return;
+    }
+    spawn_run(ctx, name);
+}
+
+/// Start `wryayer run <name>` and forget about it.
+fn spawn_run(ctx: &Ctx, name: &str) {
     let exe = std::env::current_exe().unwrap_or_else(|_| "wryayer".into());
-    match Command::new(&exe)
+    match crate::prompt::forbid_prompts(&mut Command::new(&exe))
         .arg("run")
         .arg(name)
         .stdin(Stdio::null())

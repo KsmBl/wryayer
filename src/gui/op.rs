@@ -45,7 +45,7 @@ fn spawn(args: Vec<String>, stdin_data: Option<String>) -> Receiver<OpMsg> {
     let (tx, rx) = mpsc::channel();
     let exe = std::env::current_exe().unwrap_or_else(|_| "wryayer".into());
     thread::spawn(move || {
-        let mut child = match Command::new(&exe)
+        let mut child = match crate::prompt::forbid_prompts(&mut Command::new(&exe))
             .args(&args)
             .stdin(if stdin_data.is_some() { Stdio::piped() } else { Stdio::null() })
             .stdout(Stdio::piped())

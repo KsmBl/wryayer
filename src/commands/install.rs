@@ -53,6 +53,19 @@ pub fn run(
         crate::commands::encrypt::SuppliedSecrets::default()
     };
 
+    // Cache the root password in *this* process, not only in the front-end that
+    // collected it. Every path below that needs root — refreshing the package
+    // databases, installing a source build's dependencies on the host, writing
+    // the /usr/bin shortcut — runs here, and this child has no terminal to be
+    // asked on. Relying on the front-end's own ticket would work only while
+    // sudo's `timestamp_type` keeps sharing one across a terminal.
+    if let Some(sudo) = &supplied.sudo {
+        crate::veracrypt::prime_sudo(sudo)?;
+        // An AUR build can outlast a sudo ticket; hold it open until this
+        // process exits.
+        crate::veracrypt::keep_sudo_alive();
+    }
+
     // Installing into an app that already lives in a container: the container
     // must be mounted first, or every extracted file would land in the hidden
     // directory *under* the mount point and vanish the moment it is mounted.
@@ -122,13 +135,20 @@ fn run_inner(
 ) -> Result<()> {
     if sync_db {
         eprintln!("  Updating package databases...");
-        let ok = std::process::Command::new("sudo")
+        let ok = crate::prompt::sudo()
             .args(["pacman", "-Sy"])
             .status()
             .map(|s| s.success())
             .unwrap_or(false);
         if !ok {
-            eprintln!("  warning: 'sudo pacman -Sy' failed — proceeding with existing databases");
+            eprintln!(
+                "  warning: 'sudo pacman -Sy' failed — proceeding with existing databases"
+            );
+            if !crate::prompt::allowed() && !crate::veracrypt::sudo_is_primed() {
+                eprintln!(
+                    "  (it needed root, and this ran with no terminal to ask for a password on)"
+                );
+            }
         }
     }
 

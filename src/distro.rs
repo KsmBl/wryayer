@@ -450,7 +450,7 @@ mod arch {
                 let ans = ans.trim().to_ascii_lowercase();
                 if ans.is_empty() || ans == "y" || ans == "yes" {
                     eprintln!("  Syncing package databases...");
-                    let ok = Command::new("sudo")
+                    let ok = crate::prompt::sudo()
                         .args(["pacman", "-Sy"])
                         .status()
                         .map(|s| s.success())

@@ -68,6 +68,9 @@ pub enum Screen {
         /// Set when the subprocess emits `PROMPT_OUTDATED_PACKAGES:<pkg>`.
         /// Triggers the OutdatedPackages popup once the operation finishes.
         outdated_pkg: Option<String>,
+        /// Set when the subprocess emits `PROMPT_BUILD_DEPS:<pkg>:<deps>`.
+        /// Triggers the BuildDeps popup once the operation finishes.
+        build_deps: Option<(String, Vec<String>)>,
         /// The args originally passed to launch_op — stored so the OutdatedPackages
         /// popup can relaunch the same operation with --sync-db appended.
         original_args: Vec<String>,
@@ -191,6 +194,18 @@ pub enum Screen {
         /// The original install args; retry appends --sync-db to these.
         install_args: Vec<String>,
         selected: usize, // 0 = update & retry, 1 = cancel
+    },
+    /// Shown when a source build needs packages installed on the host and the
+    /// install had no root to install them with. User picks "Authenticate &
+    /// retry" or "Cancel".
+    BuildDeps {
+        pkg: String,
+        /// The build dependencies `pacman -T` reported missing.
+        deps: Vec<String>,
+        /// The original install args; the retry runs them again with sudo
+        /// cached first.
+        install_args: Vec<String>,
+        selected: usize, // 0 = authenticate & retry, 1 = cancel
     },
     /// Ask whether to create a /usr/bin/<pkg> shortcut before starting the install.
     AskShortcut {
@@ -701,6 +716,10 @@ fn spawn_update_check(tx: Sender<HashMap<String, String>>) {
 }
 
 pub fn run() -> Result<()> {
+    // From here on this terminal belongs to the TUI: nothing running under it
+    // may prompt on it, in this process or any child. The one exception is the
+    // inline launch, which hands the terminal back first.
+    crate::prompt::forbid_here();
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     stdout.execute(EnterAlternateScreen)?;
@@ -718,7 +737,10 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(
 
     loop {
         // Drain op channel
-        if let Screen::Operation { rx, log, done, success, progress, launcher_choice, outdated_pkg, .. } = &mut app.screen {
+        if let Screen::Operation {
+            rx, log, done, success, progress, launcher_choice, outdated_pkg, build_deps, ..
+        } = &mut app.screen
+        {
             loop {
                 match rx.try_recv() {
                     Ok(Msg::Line(l)) => {
@@ -729,6 +751,9 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(
                                 *launcher_choice = Some((pkg, bins))
                             }
                             Some(ChildLine::OutdatedPackages { pkg }) => *outdated_pkg = Some(pkg),
+                            Some(ChildLine::BuildDeps { pkg, deps }) => {
+                                *build_deps = Some((pkg, deps))
+                            }
                             None => log.push(l),
                         }
                     }
@@ -752,6 +777,16 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(
             let screen = std::mem::replace(&mut app.screen, Screen::Main);
             if let Screen::Operation { outdated_pkg: Some(pkg), original_args, .. } = screen {
                 app.screen = Screen::OutdatedPackages { pkg, install_args: original_args, selected: 0 };
+                app.needs_clear = true;
+            }
+        }
+
+        // Auto-transition to BuildDeps popup when op finishes with the marker set.
+        if let Screen::Operation { done: true, success: false, build_deps: Some(_), .. } = &app.screen {
+            let screen = std::mem::replace(&mut app.screen, Screen::Main);
+            if let Screen::Operation { build_deps: Some((pkg, deps)), original_args, .. } = screen {
+                app.screen =
+                    Screen::BuildDeps { pkg, deps, install_args: original_args, selected: 0 };
                 app.needs_clear = true;
             }
         }
@@ -824,8 +859,10 @@ fn run_app_inline(
     terminal.backend_mut().execute(LeaveAlternateScreen)?;
     terminal.show_cursor()?;
 
+    // The terminal is a plain one again, so this child may ask for a container
+    // password or for root the ordinary way — the user can see it and answer.
     let exe = std::env::current_exe().unwrap_or_else(|_| "wryayer".into());
-    let status = Command::new(&exe)
+    let status = crate::prompt::allow_prompts(&mut Command::new(&exe))
         .args(["run", app_name])
         .status();
 
@@ -1008,6 +1045,7 @@ fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
         Screen::AlreadyInstalled { .. } => on_already_installed(app, code),
         Screen::NoLauncherChoice { .. } => on_no_launcher_choice(app, code),
         Screen::OutdatedPackages { .. } => on_outdated_packages(app, code),
+        Screen::BuildDeps { .. } => on_build_deps(app, code),
         Screen::AskShortcut { .. } => on_ask_shortcut(app, code),
         Screen::AskEncrypt { .. } => on_ask_encrypt(app, code),
         Screen::EncryptSecrets { .. } => on_encrypt_secrets(app, code),
@@ -1765,8 +1803,50 @@ fn on_outdated_packages(app: &mut App, code: KeyCode) {
                     // Update sources and retry: append --sync-db so the install
                     // command runs 'sudo pacman -Sy' before downloading.
                     args.push("--sync-db".into());
-                    launch_op(app, format!("Install — {pkg} (update sources)"), args, None, true);
+                    relaunch_install(
+                        app,
+                        format!("Install — {pkg} (update sources)"),
+                        args,
+                        false,
+                    );
                 }
+                _ => {
+                    app.screen = Screen::Main;
+                    app.needs_clear = true;
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The build-dependencies popup: authenticate and retry, or give up.
+///
+/// The retry is the same install over again, only with sudo cached first, so
+/// `ensure_makedepends` can install what the PKGBUILD asks for. The clone and
+/// anything already downloaded are still on disk, so the second attempt picks
+/// up where this one stopped rather than starting from nothing.
+fn on_build_deps(app: &mut App, code: KeyCode) {
+    let Screen::BuildDeps { selected, install_args, pkg, .. } = &mut app.screen else { return };
+    if list_nav(selected, 2, code) {
+        return;
+    }
+    match code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            app.screen = Screen::Main;
+            app.needs_clear = true;
+        }
+        KeyCode::Enter | KeyCode::Char(' ') => {
+            let s = *selected;
+            let pkg = pkg.clone();
+            let args = install_args.clone();
+            match s {
+                0 => relaunch_install(
+                    app,
+                    format!("Install — {pkg} (with build dependencies)"),
+                    args,
+                    true,
+                ),
                 _ => {
                     app.screen = Screen::Main;
                     app.needs_clear = true;
@@ -2603,6 +2683,60 @@ fn launch_op_with_sudo(app: &mut App, title: String, args: Vec<String>) {
     };
     app.input_cursor = 0;
     app.needs_clear = true;
+}
+
+/// Which secrets a *re-run* of an install still has to collect.
+///
+/// A retry starts from the arguments of the attempt that failed, and those say
+/// what the install was going to do — encrypt into a new container, refresh the
+/// package databases as root. What they cannot carry is the passwords: those
+/// went to the first child on its stdin and are gone. So they are read back out
+/// of the arguments and asked for again, because the retrying child has no
+/// terminal to ask on either.
+fn retry_stages(args: &[String], force_sudo: bool) -> Vec<SecretStage> {
+    let mut stages = Vec::new();
+    if retry_needs_root(args, force_sudo) && !crate::veracrypt::sudo_is_primed() {
+        stages.push(SecretStage::Sudo);
+    }
+    if is_encrypting(args) {
+        let has = |flag: &str| args.iter().any(|a| a == flag);
+        stages.extend(build_secret_stages(has("--encrypt-master"), has("--encrypt-generate")));
+    }
+    stages
+}
+
+/// Whether an install's arguments say it will create a container.
+fn is_encrypting(args: &[String]) -> bool {
+    args.iter().any(|a| a == "--encrypt" || a == "--encrypt-master" || a == "--encrypt-generate")
+}
+
+/// Whether a retry of these arguments will need root.
+///
+/// `--sync-db` runs `sudo pacman -Sy`, and a new container needs root to be
+/// made. `force_sudo` is the build-dependency case, which the arguments cannot
+/// show: only the child that tried to build knows a PKGBUILD wanted packages
+/// installed on the host.
+fn retry_needs_root(args: &[String], force_sudo: bool) -> bool {
+    force_sudo || is_encrypting(args) || args.iter().any(|a| a == "--sync-db")
+}
+
+/// Re-run an install the user has just answered a question about.
+///
+/// The original arguments are kept so the retry installs into the same target,
+/// with the same encryption, as the attempt it replaces — only the stdin marker
+/// is dropped, since [`retry_stages`] collects the passwords again rather than
+/// carrying them over.
+fn relaunch_install(app: &mut App, title: String, args: Vec<String>, force_sudo: bool) {
+    let stages = retry_stages(&args, force_sudo);
+    begin_op_with_stages(app, title, without_stdin_marker(args), stages);
+}
+
+/// Drop `--encrypt-secrets-stdin` from a set of arguments being re-run.
+///
+/// The passwords it referred to went to the first child on its stdin and are
+/// gone; the collection about to happen adds the flag back with the new ones.
+fn without_stdin_marker(args: Vec<String>) -> Vec<String> {
+    args.into_iter().filter(|a| a != "--encrypt-secrets-stdin").collect()
 }
 
 /// Launch the operation, handing the collected passwords to the child on
@@ -4675,6 +4809,7 @@ fn launch_op_with_stdin(
         launcher_choice: None,
         into_target,
         outdated_pkg: None,
+        build_deps: None,
         original_args,
     };
 }
@@ -4735,7 +4870,7 @@ pub fn konami_status_for_toggle(now_active: bool) -> String {
 fn spawn_wryayer(args: Vec<String>, tx: mpsc::Sender<Msg>, stdin_data: Option<String>) {
     let exe = std::env::current_exe().unwrap_or_else(|_| "wryayer".into());
     thread::spawn(move || {
-        let mut child = match Command::new(&exe)
+        let mut child = match crate::prompt::forbid_prompts(&mut Command::new(&exe))
             .args(&args)
             .stdin(if stdin_data.is_some() { Stdio::piped() } else { Stdio::null() })
             .stdout(Stdio::piped())
@@ -5037,6 +5172,7 @@ mod op_log_tests {
             launcher_choice: None,
             into_target: None,
             outdated_pkg: None,
+            build_deps: None,
             original_args: vec![],
         };
         (screen, tx)
@@ -5896,5 +6032,50 @@ mod readme_screenshots {
         app.tab = Tab::Settings;
         app.screen = Screen::Main;
         dump_grid(&mut app, COLS, 44, "settings");
+    }
+
+    fn argv(args: &[&str]) -> Vec<String> {
+        args.iter().map(|a| a.to_string()).collect()
+    }
+
+    #[test]
+    fn a_plain_retry_needs_nothing_from_root() {
+        assert!(!retry_needs_root(&argv(&["install", "htop"]), false));
+    }
+
+    #[test]
+    fn refreshing_the_databases_needs_root() {
+        // 'sudo pacman -Sy' inside the child, which has no terminal to be
+        // asked on — so the overlay has to cache sudo before it starts.
+        assert!(retry_needs_root(&argv(&["install", "htop", "--sync-db"]), false));
+    }
+
+    #[test]
+    fn a_container_install_needs_root() {
+        assert!(retry_needs_root(&argv(&["install", "htop", "--encrypt"]), false));
+        assert!(retry_needs_root(&argv(&["install", "htop", "--encrypt-master"]), false));
+    }
+
+    #[test]
+    fn build_dependencies_need_root_the_arguments_cannot_show() {
+        // Nothing in the argument list says a PKGBUILD wants packages on the
+        // host; the child that tried to build it is the only thing that knows.
+        assert!(retry_needs_root(&argv(&["install", "ayugram-desktop-git"]), true));
+    }
+
+    #[test]
+    fn an_encrypting_retry_is_recognised_by_any_of_its_flags() {
+        assert!(!is_encrypting(&argv(&["install", "htop", "--keep-without-launcher"])));
+        for flag in ["--encrypt", "--encrypt-master", "--encrypt-generate"] {
+            assert!(is_encrypting(&argv(&["install", "htop", flag])), "{flag}");
+        }
+    }
+
+    #[test]
+    fn a_retry_drops_the_stdin_marker_it_can_no_longer_honour() {
+        // The passwords went to the first child and are gone. Left in place the
+        // flag would be passed twice, since the fresh collection adds it back.
+        let args = argv(&["install", "htop", "--encrypt", "--encrypt-secrets-stdin"]);
+        assert_eq!(without_stdin_marker(args), argv(&["install", "htop", "--encrypt"]));
     }
 }

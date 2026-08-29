@@ -425,6 +425,44 @@ pub fn unlock_container(ctx: &Ctx, app_name: &str) {
     );
 }
 
+/// Mount `app_name`'s container and then do something with it open.
+///
+/// For an action that cannot ask for the password itself. Launching an app is
+/// the one that matters: `wryayer run` would mount the container on its own,
+/// but the GUI starts it detached with its output thrown away, so a prompt
+/// there would be a launch that silently never happens. `then` runs only if the
+/// unlock succeeded.
+pub fn unlock_then(ctx: &Ctx, app_name: &str, then: Rc<dyn Fn()>) {
+    let ctx2 = ctx.clone();
+    let title = format!("Unlock — {app_name}");
+    let name = app_name.to_string();
+    collect(
+        ctx,
+        &title.clone(),
+        Needs::for_existing_container(app_name),
+        Rc::new(move |secrets: Secrets| {
+            let args =
+                vec!["unlock".to_string(), name.clone(), "--encrypt-secrets-stdin".to_string()];
+            let ctx3 = ctx2.clone();
+            let then = then.clone();
+            op::run_operation_with_stdin(
+                &ctx2.window,
+                &title,
+                args,
+                secrets.payload(),
+                move |ok| {
+                    ctx3.refresh();
+                    if ok {
+                        then();
+                    } else {
+                        ctx3.status("Could not unlock — see the console.");
+                    }
+                },
+            );
+        }),
+    );
+}
+
 /// Unmount `app_name`'s container so its files stop being readable.
 ///
 /// Needs no password — only root, to unmount.
@@ -620,17 +658,29 @@ pub fn run_as_root(ctx: &Ctx, title: &str, args: Vec<String>, sudo_for: &'static
 /// and into the same kind of container the user asked for the first time; only
 /// the stdin marker is dropped, because the passwords are collected again here
 /// rather than carried over.
-pub fn rerun_install(ctx: &Ctx, title: String, args: Vec<String>) {
+pub fn rerun_install(ctx: &Ctx, title: String, args: Vec<String>, force_sudo: bool) {
     let use_master = args.iter().any(|a| a == "--encrypt-master");
     let generate = args.iter().any(|a| a == "--encrypt-generate");
     let encrypted = args.iter().any(|a| a == "--encrypt");
+    // `--sync-db` makes the child run `sudo pacman -Sy`, which would have no
+    // terminal to ask for a password on. Root has to be cached from here.
+    // `force_sudo` is the build-dependency case: the arguments cannot show it,
+    // because only the child that tried to build knows a PKGBUILD wanted host
+    // packages installed.
+    let needs_root = force_sudo || args.iter().any(|a| a == "--sync-db");
     let args: Vec<String> =
         args.into_iter().filter(|a| a != "--encrypt-secrets-stdin").collect();
 
     if !encrypted {
-        run_plain(ctx, &title, args);
+        if needs_root {
+            run_as_root(ctx, &title, args, "Installing packages on the host needs root.");
+        } else {
+            run_plain(ctx, &title, args);
+        }
         return;
     }
+    // A new container already needs root, so an encrypted retry asks for
+    // nothing extra when it also has to install something on the host.
     run_install_jobs(ctx, vec![(title, args)], Needs::for_new_container(use_master, generate));
 }
 

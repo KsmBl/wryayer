@@ -11,6 +11,7 @@ pub mod gui;
 pub mod launcher;
 pub mod manifest;
 pub mod package;
+pub mod prompt;
 pub mod secrets;
 #[cfg(test)]
 mod test_support;

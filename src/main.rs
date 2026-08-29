@@ -225,11 +225,20 @@ enum Commands {
     Unlock {
         /// The app name as shown by `wryayer list`
         app_name: String,
+        /// Read the container/master/sudo passwords from stdin as key=value
+        /// lines. Used internally by the front-ends, which collect them
+        /// themselves.
+        #[arg(long, hide = true)]
+        encrypt_secrets_stdin: bool,
     },
     /// Lock (unmount) an encrypted app's container
     Lock {
         /// The app name as shown by `wryayer list`
         app_name: String,
+        /// Read the sudo password from stdin as a key=value line. Used
+        /// internally by the front-ends, which collect it themselves.
+        #[arg(long, hide = true)]
+        encrypt_secrets_stdin: bool,
     },
     /// Enlarge an encrypted app's container, keeping its contents
     Grow {
@@ -595,8 +604,14 @@ fn main() {
             commands::encrypt::supplied_secrets(encrypt_secrets_stdin)
                 .and_then(|s| commands::encrypt::decrypt_with(&app_name, &s))
         }
-        Commands::Unlock { app_name } => commands::encrypt::unlock(&app_name),
-        Commands::Lock { app_name } => commands::encrypt::lock(&app_name),
+        Commands::Unlock { app_name, encrypt_secrets_stdin } => {
+            commands::encrypt::supplied_secrets(encrypt_secrets_stdin)
+                .and_then(|s| commands::encrypt::unlock_with(&app_name, &s))
+        }
+        Commands::Lock { app_name, encrypt_secrets_stdin } => {
+            commands::encrypt::supplied_secrets(encrypt_secrets_stdin)
+                .and_then(|s| commands::encrypt::lock_with(&app_name, &s))
+        }
         Commands::Grow { app_name, to } => commands::encrypt::grow(&app_name, to.as_deref()),
         Commands::Encryption => commands::encrypt::status(),
         Commands::Master { action } => match action {

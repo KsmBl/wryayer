@@ -74,6 +74,10 @@ pub enum ChildLine {
     /// `PROMPT_OUTDATED_PACKAGES:<pkg>` — a download 404'd because the local
     /// package databases are behind the mirror.
     OutdatedPackages { pkg: String },
+    /// `PROMPT_BUILD_DEPS:<pkg>:<dep>,<dep>` — a source build needs packages
+    /// installed on the host first, and installing them needs root that this
+    /// child has no way to ask for.
+    BuildDeps { pkg: String, deps: Vec<String> },
 }
 
 /// Read one line as a protocol line, or None when it is ordinary output.
@@ -92,6 +96,15 @@ pub fn classify(line: &str) -> Option<ChildLine> {
     }
     if let Some(pkg) = line.strip_prefix("PROMPT_OUTDATED_PACKAGES:") {
         return Some(ChildLine::OutdatedPackages { pkg: pkg.to_string() });
+    }
+    if let Some(rest) = line.strip_prefix("PROMPT_BUILD_DEPS:") {
+        let (pkg, deps) = rest.split_once(':')?;
+        let deps = if deps.is_empty() {
+            Vec::new()
+        } else {
+            deps.split(',').map(str::to_string).collect()
+        };
+        return Some(ChildLine::BuildDeps { pkg: pkg.to_string(), deps });
     }
     None
 }
@@ -203,5 +216,31 @@ mod tests {
         for line in ["installing gtk3", "PROGRESS abc/100", "PROMPT_LAUNCHER_CHOICE:novalue", ""] {
             assert_eq!(classify(line), None, "{line}");
         }
+    }
+
+    #[test]
+    fn a_build_deps_line_carries_every_dependency() {
+        assert_eq!(
+            classify("PROMPT_BUILD_DEPS:ayugram-desktop-git:cmake,ninja,extra-cmake-modules"),
+            Some(ChildLine::BuildDeps {
+                pkg: "ayugram-desktop-git".into(),
+                deps: vec!["cmake".into(), "ninja".into(), "extra-cmake-modules".into()],
+            })
+        );
+    }
+
+    #[test]
+    fn a_build_deps_line_with_no_dependencies_is_still_a_prompt() {
+        // Never emitted in practice, but an empty list must not read as a
+        // single dependency named "".
+        assert_eq!(
+            classify("PROMPT_BUILD_DEPS:pkg:"),
+            Some(ChildLine::BuildDeps { pkg: "pkg".into(), deps: vec![] })
+        );
+    }
+
+    #[test]
+    fn ordinary_output_mentioning_the_marker_word_is_left_alone() {
+        assert_eq!(classify("  Installing makedepends for pkg: cmake"), None);
     }
 }

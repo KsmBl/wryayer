@@ -466,6 +466,15 @@ pub fn decrypt_with(app_name: &str, supplied: &SuppliedSecrets) -> Result<()> {
 
 /// Mount `app_name`'s container, asking for or looking up its password.
 pub fn unlock(app_name: &str) -> Result<()> {
+    unlock_with(app_name, &SuppliedSecrets::default())
+}
+
+/// [`unlock`], using secrets a front-end already collected.
+///
+/// Mounting needs both root and the container's own password, and neither can
+/// be asked for in a child a front-end is streaming — so when this is reached
+/// from the TUI or the GUI, both arrive on stdin instead.
+pub fn unlock_with(app_name: &str, supplied: &SuppliedSecrets) -> Result<()> {
     if !veracrypt::is_encrypted(app_name) {
         bail!("'{app_name}' is not stored in an encrypted container");
     }
@@ -473,13 +482,23 @@ pub fn unlock(app_name: &str) -> Result<()> {
         println!("'{app_name}' is already unlocked.");
         return Ok(());
     }
-    ensure_unlocked(app_name)?;
+    ensure_unlocked_with(app_name, supplied)?;
     println!("'{app_name}' is unlocked.");
     Ok(())
 }
 
 /// Unmount `app_name`'s container so its files are inaccessible again.
 pub fn lock(app_name: &str) -> Result<()> {
+    lock_with(app_name, &SuppliedSecrets::default())
+}
+
+/// [`lock`], using the root password a front-end already collected.
+///
+/// Unmounting needs no container password, only root.
+pub fn lock_with(app_name: &str, supplied: &SuppliedSecrets) -> Result<()> {
+    if let Some(sudo) = &supplied.sudo {
+        veracrypt::prime_sudo(sudo)?;
+    }
     if !veracrypt::is_encrypted(app_name) {
         bail!("'{app_name}' is not stored in an encrypted container");
     }
@@ -498,10 +517,18 @@ pub fn lock(app_name: &str) -> Result<()> {
 /// This is the single entry point used by `wryayer run`, so every launch path
 /// gets the same behaviour.
 pub fn ensure_unlocked(app_name: &str) -> Result<()> {
+    ensure_unlocked_with(app_name, &SuppliedSecrets::default())
+}
+
+/// [`ensure_unlocked`], preferring secrets the caller already collected.
+pub fn ensure_unlocked_with(app_name: &str, supplied: &SuppliedSecrets) -> Result<()> {
     if !veracrypt::is_encrypted(app_name) || veracrypt::is_mounted(app_name)? {
         return Ok(());
     }
-    let password = resolve_password(app_name)?;
+    if let Some(sudo) = &supplied.sudo {
+        veracrypt::prime_sudo(sudo)?;
+    }
+    let password = resolve_password_with(app_name, supplied)?;
     veracrypt::mount(app_name, &password)
 }
 
@@ -603,12 +630,8 @@ pub fn can_open_unattended(app_name: &str) -> bool {
             .is_some_and(|store| store.get(app_name).is_some())
 }
 
-/// Look up or ask for `app_name`'s container password.
-fn resolve_password(app_name: &str) -> Result<Zeroizing<String>> {
-    resolve_password_with(app_name, &SuppliedSecrets::default())
-}
-
-/// [`resolve_password`], preferring anything the caller already collected.
+/// Look up or ask for `app_name`'s container password, preferring anything the
+/// caller already collected.
 ///
 /// A supplied master password is used to *open* the store rather than as the
 /// answer itself, which also caches this boot's key — so nothing further down
