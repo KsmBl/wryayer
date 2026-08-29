@@ -550,12 +550,16 @@ location is still read, so containers made before the move keep working.
 
 VeraCrypt needs root to attach a loop device, and its own escalation path is
 unusable here: with `--non-interactive` it cannot ask for an admin password and
-just fails, and without it, it prompts on a terminal a TUI-spawned process does
-not have. So wryayer invokes `sudo veracrypt` itself. sudo reads its own password
-from `/dev/tty` or a cached ticket, leaving stdin free for the volume password —
-the two secrets never contend for the same channel. `prime_sudo` (`sudo -S -v`)
-lets the TUI cache credentials from a password typed in an overlay, so the
-install subprocess runs with fully piped stdio and its log stays in the TUI.
+just fails, and without it, it prompts on whatever terminal it finds. So wryayer
+invokes `sudo veracrypt` itself. sudo reads its own password from `/dev/tty` or a
+cached ticket, leaving stdin free for the volume password — the two secrets never
+contend for the same channel. `prime_sudo` (`sudo -S -v`) lets a front-end cache
+credentials from a password typed in an overlay, so the install subprocess runs
+with fully piped stdio and its log stays in the TUI.
+
+The terminal sudo would fall back to is the one the TUI is drawing on, which is
+why priming is not merely a convenience — see *Nobody prompts on a terminal a
+front-end owns*, below.
 
 Running veracrypt as root means the container file and the freshly formatted
 filesystem come out root-owned, so `create` chowns the file back and
@@ -711,7 +715,7 @@ front-ends that answer a question differently are two chances to be wrong:
 
 | Shared | What both front-ends get from it |
 |---|---|
-| `child_output::classify` | The `PROGRESS` / `PROMPT_*` protocol a child speaks. A child has no terminal, so where the CLI would ask, it prints a line and exits; both front-ends put the question to the user and re-run the command with the answer folded in |
+| `child_output::classify` | The `PROGRESS` / `PROMPT_*` protocol a child speaks — no launcher found, package databases behind the mirror, build dependencies missing. A child may not prompt (see below), so where the CLI would ask, it prints a line and exits; both front-ends put the question to the user and re-run the command with the answer folded in |
 | `commands::run::running_instances` | How many sandboxes of each app are up, from one walk of `/proc` |
 | `commands::run::sandbox_ram` | A ram-limited sandbox's live usage, read from the `/proc/meminfo` overlay the launcher maintains |
 | `launcher::shortcut_plan` | Which `/usr/bin` paths a relink would write, and which it would leave alone with the reason — shown before the password is asked for, not after the fact |
@@ -721,6 +725,39 @@ at a time because it has one screen; the GUI shows the same set as a single form
 (`gui::encryption::Needs` decides which fields appear, by the same rules as
 `tui::build_secret_stages`). Both end at the same place: `--encrypt-secrets-stdin`
 on the child, because neither has a terminal a child could prompt on.
+
+### Nobody prompts on a terminal a front-end owns (`prompt.rs`)
+
+Collecting passwords up front is the plan; `prompt.rs` is what makes it the only
+possibility. Two things read a password straight from `/dev/tty` rather than
+stdin — `rpassword`, and `sudo` — so redirecting a child's stdin does not stop
+either of them, and a TUI-spawned child *does* have a terminal: the one the TUI
+is drawing on. A prompt there is written into a frame that is repainted 50 ms
+later, turns echo off on a terminal already in raw mode, and then competes with
+the TUI for every keystroke. What the user sees is an operation that has stopped,
+with no way to tell it anything.
+
+So:
+
+* `prompt::allowed()` is false when the `WRYAYER_NO_TTY` marker is set, or when
+  there is no `/dev/tty` to open. Deliberately **not** a test of stdin:
+  `wryayer install … | tee log` has a pipe on stdin and a perfectly good
+  terminal, and both tools would have used it.
+* `prompt::sudo()` returns `sudo -n` when prompting is out, so sudo fails with
+  "a password is required" — one line in the operation log — instead of opening
+  `/dev/tty`. Every escalation goes through it; the three exceptions
+  (`sudo_is_primed`, `prime_sudo`, `keep_sudo_alive`) already pass `-n` or `-S`.
+* `secrets::prompt_password` refuses outright, naming the password it wanted, so
+  a path nobody collected for fails visibly rather than hanging.
+* Both front-ends call `prompt::forbid_here()` as they take over, which covers
+  their own in-process calls as well as every child. The TUI's inline app launch
+  is the single exception — it leaves raw mode and the alternate screen first, so
+  it hands the terminal back with `prompt::allow_prompts`.
+
+Two tests in `prompt.rs` scan the crate's sources and fail on a `Command::new(
+"sudo")` that is not immediately made non-interactive, or a second caller of
+`rpassword`. The property is one careless call site away from being lost, so it
+is checked rather than trusted.
 
 ### Converting an installed app from the TUI
 
@@ -818,6 +855,21 @@ touching can never stall generation.
 - **`makepkg -df`** — `-f` overwrites a `.pkg.tar.zst` left in the clone dir by
   a prior build, so rebuilds don't abort with *"A package has already been
   built."*
+- **`-d` and `ensure_build_deps`** — `-d` skips makepkg's own dependency check,
+  because wryayer resolves runtime dependencies into the sandbox rather than
+  onto the host. A *source build* still needs them on the host, though: a C++
+  package configures and links against its libraries' headers. So
+  `ensure_build_deps` reads both `makedepends` **and** `depends` out of the
+  PKGBUILD, asks `pacman -T` which are missing, and installs only those. Reading
+  `makedepends` alone was a real bug: `ayugram-desktop-git` builds its tools
+  fine and then dies at `find_package(ada)`, with nothing in the log connecting
+  that to the `depends` array.
+- **Build dependencies are asked about, not assumed** — installing on the host
+  needs root, which a front-end child cannot ask for. Rather than build for
+  minutes and fail at configure, the child prints
+  `PROMPT_BUILD_DEPS:<pkg>:<deps>` and stops; the front-end names the packages,
+  collects sudo, and re-runs. The clone is still on disk, so the retry resumes
+  rather than starting over.
 - **debug subpackage** — split debug packages are named
   `<pkgbase>-debug-<ver>-<arch>.pkg.tar.zst`, with `-debug-` in the middle.
   `find_pkg_tarball` excludes any name containing `-debug-`, otherwise readdir

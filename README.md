@@ -1242,6 +1242,8 @@ The config is stored as a human-readable INI file at `~/.wryayer/<app>/config.in
 
 **AUR builds run makepkg as your user.** This is the same trust model as using yay directly. Build scripts execute arbitrary code, and the locally-built package has no repository signature to verify. Only install from AUR packages you trust.
 
+**AUR builds install their build dependencies on the host.** A package built from source has to compile and link against its libraries' headers, so those have to be on the real system — the sandbox is where the *result* goes, not where the build happens. Before building, wryayer works out which of the PKGBUILD's `makedepends` and `depends` are missing and installs those with pacman — nothing that is already there is touched. On the command line it names them and runs `sudo pacman -S`; in the TUI and the desktop app a dialog names them and asks first, since the child has no terminal to type a password on. Decline and nothing is installed; a `-bin` variant of the package, where one exists, avoids the build entirely.
+
 **Wayland socket not isolated.** The Wayland display socket (`$XDG_RUNTIME_DIR/wayland-0`) is accessible inside the sandbox via `/run`. Apps have full Wayland access.
 
 **No SETUID/SETCAP binaries.** bwrap drops most capabilities. Apps that rely on setuid helpers (e.g., some network tools) will fail unless you add the helper to your system installation.

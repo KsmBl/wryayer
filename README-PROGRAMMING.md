@@ -289,6 +289,7 @@ otherwise teaches the wrong thing.
 |---|---|
 | a config field | `config.rs` → `commands/run/mod.rs` → `main.rs`/`commands/config.rs` → `tui/` → `gui/config.rs` |
 | an encryption behaviour | `veracrypt.rs` (container ops) / `secrets.rs` (passwords) → `commands/encrypt.rs` → `main.rs` → `tui/` |
+| anything that needs root, or a password | `prompt.rs` first — use `prompt::sudo()`, never `Command::new("sudo")` |
 | how an app is sandboxed | `commands/run/` (`mod.rs`: `bwrap_cmd`, `launch_bwrap`) |
 | CPU / topology spoofing | `cpu.rs` (data) + `csrc/cpuid_spoof.c` (CPUID/affinity) + `commands/run/spoof.rs` (`/proc`, `/sys`) |
 | cross-container app binding | `csrc/portal_client.c` + `commands/portal.rs` + `commands/run/bus.rs` + `desktop.rs` (the entries the sandbox looks up) |
@@ -325,6 +326,7 @@ README-CODE.md for the diagram version.
 | `desktop.rs` | Publishes an app's packaged `.desktop` files to `/usr/share/applications`, rewritten to run through its shortcut — and generates the entries a sandbox gets for its bound apps, pointed at their portal shims. |
 | `veracrypt.rs` | Per-app VeraCrypt containers: create/mount/unmount, `--list` parsing, container sizing, and the `.encrypted.toml` locked-state marker. |
 | `secrets.rs` | The master password store — Argon2id → AES-256-GCM, plus the per-boot derived-key cache in `$XDG_RUNTIME_DIR` and the no-echo password prompts. |
+| `prompt.rs` | Whether this process may ask for a password at all. `sudo()` and `secrets::prompt_password` go through it, so nothing can prompt on a terminal a front-end is drawing on. |
 | `entropy.rs` | Multi-source entropy pool (urandom, sensors, mouse, RAM, IRQs, clock) and the password generator built on it. |
 | `avahi_stub.rs` | Config/data for the in-sandbox Avahi stub bus. |
 | `child_output.rs` | Sanitises a subprocess's output before a front-end draws it, and reads the `PROGRESS` / `PROMPT_*` lines a child uses to ask the front-end something (`classify`). |
