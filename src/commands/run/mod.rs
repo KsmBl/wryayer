@@ -180,6 +180,9 @@ pub fn run(app_name: &str, bin: Option<&str>, args: &[String]) -> Result<()> {
     // again now that those binaries exist, install any missing packages, and
     // retry automatically so the user doesn't have to re-launch manually.
     let repaired = !status.success() && fix_home_sonames(&app_root);
+    if !status.success() && !repaired {
+        explain_missing_libraries(&app_root);
+    }
 
     if let Some(cleanup_path) = cleanup {
         if repaired {
@@ -1422,6 +1425,34 @@ fn fix_home_sonames(app_root: &Path) -> bool {
         run_ldconfig(app_root);
     }
     any_installed
+}
+
+/// Say why the app would not start, when it did not and nothing could be
+/// installed to change that.
+///
+/// The home-tree scan above looks only where a self-updating app writes its new
+/// binaries, so an app whose *own* `/usr/bin` executable is missing a library
+/// gets no diagnosis from it at all — and its "scanned N files, 0 distinct
+/// libraries required" reads as if nothing were wrong. This scans the tree the
+/// binary actually lives in and names what is missing.
+///
+/// Only reached on a failed launch, so the cost of the walk is paid exactly
+/// when there is something to explain.
+fn explain_missing_libraries(app_root: &Path) {
+    let Ok(missing) = crate::package::find_missing_sonames(app_root) else { return };
+    let unresolved: Vec<String> = missing
+        .into_iter()
+        .filter(|s| !matches!(crate::distro::soname_owner(s), Ok(Some(_))))
+        .collect();
+    if unresolved.is_empty() {
+        return;
+    }
+    eprintln!(
+        "\n{} needs shared libraries that are not installed and that no package \
+         provides:{}",
+        app_root.file_name().unwrap_or_default().to_string_lossy(),
+        crate::package::describe_unresolved(&unresolved)
+    );
 }
 
 // ── Terminal detection helpers ────────────────────────────────────────────────

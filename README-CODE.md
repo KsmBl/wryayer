@@ -877,6 +877,16 @@ touching can never stall generation.
   never be extracted.
 - **nw-builder proxy patch** — `nw-builder 3.8.3` forces a proxy tunnel; the
   build retries with `--noextract` after patching `rq.proxy = false`.
+- **A stale `-bin` package cannot be repaired** — `soname_check` resolves a
+  missing library by finding the package that owns a file of that exact name.
+  That fails by design for a prebuilt package compiled against an older system:
+  `ayugram-desktop-bin` asks for `libabsl_strings.so.2605.0.0` while the repos
+  have moved to `.2608.0.0`, so no package owns what it wants and none ever
+  will. `host_alternative` spots it — same stem, different version — and
+  `describe_unresolved` says so, because "install this" is not the answer;
+  building from source is. The unresolved list is printed unconditionally for
+  the same reason: it is the only thing that predicts an app which installs
+  cleanly and then refuses to start.
 
 ---
 

@@ -36,6 +36,87 @@ impl Ticker {
     }
 }
 
+// ── Reporting what could not be resolved ─────────────────────────────────────
+
+/// Where the host keeps its shared libraries, most likely first.
+const HOST_LIB_DIRS: &[&str] = &["/usr/lib", "/usr/lib64", "/lib", "/lib64"];
+
+/// Split `libfoo.so.1.2.3` into its stem (`libfoo.so`) and version (`1.2.3`).
+///
+/// Returns None for an unversioned name, which cannot go stale the way a
+/// versioned one does.
+pub fn split_soname_version(soname: &str) -> Option<(&str, &str)> {
+    let idx = soname.find(".so.")?;
+    let (stem, rest) = soname.split_at(idx + 3); // keep ".so" on the stem
+    Some((stem, rest.trim_start_matches('.')))
+}
+
+/// A library with the same stem as `soname` that the host actually has, when it
+/// carries a *different* version.
+///
+/// This is the whole diagnosis for a stale prebuilt package. A `-bin` package
+/// from the AUR is compiled against whatever the maintainer had; when the
+/// library later bumps its soname, the binary keeps asking for a version that
+/// no longer exists in any repository. Nothing can be installed to fix it —
+/// which is why the resolver gives up — but the system sitting there with a
+/// newer copy of the same library says exactly what happened.
+pub fn host_alternative(soname: &str) -> Option<String> {
+    let (stem, version) = split_soname_version(soname)?;
+    let prefix = format!("{stem}.");
+    for dir in HOST_LIB_DIRS {
+        let Ok(entries) = std::fs::read_dir(dir) else { continue };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if let Some(found) = name.strip_prefix(&prefix) {
+                if found != version && !found.is_empty() {
+                    return Some(name.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Turn the sonames nothing could provide into something worth reading.
+///
+/// Always names them, however many there are. They were behind `WRYAYER_VERBOSE`
+/// before, which meant the one piece of output that predicts "this app will not
+/// start" was the piece nobody saw — an install would report success and the
+/// app would then die on a loader error with no connection back to it.
+pub fn describe_unresolved(unresolved: &[String]) -> String {
+    /// Beyond this the list stops being a diagnosis and starts being a wall.
+    const MAX_NAMED: usize = 8;
+
+    let mut names: Vec<&String> = unresolved.iter().collect();
+    names.sort_unstable();
+
+    let mut out = String::new();
+    let mut stale = false;
+    for soname in names.iter().take(MAX_NAMED) {
+        match host_alternative(soname) {
+            Some(have) => {
+                stale = true;
+                out.push_str(&format!("\n    {soname} — your system has {have}"));
+            }
+            None => out.push_str(&format!("\n    {soname}")),
+        }
+    }
+    if names.len() > MAX_NAMED {
+        out.push_str(&format!("\n    … and {} more", names.len() - MAX_NAMED));
+    }
+    if stale {
+        out.push_str(
+            "\n  Those are the same libraries at a different version: this package was \
+             built\n  against an older system than yours, so nothing in the repositories \
+             can supply\n  what it asks for. A prebuilt (-bin) package goes stale this way. \
+             Building from\n  source instead links it against the libraries you actually \
+             have.",
+        );
+    }
+    out
+}
+
 /// Walk `app_dir`, find every ELF NEEDED soname that is absent from the tree,
 /// and extract the owning package for each one. Loops until convergence so that
 /// transitive deps of newly added packages are also satisfied.
@@ -67,8 +148,10 @@ fn satisfy_missing_sonames_impl(
     seed_paths: Option<&[PathBuf]>,
     space: Option<&crate::veracrypt::SpaceGuard>,
 ) -> Result<Vec<String>> {
-    // Per-soname progress/warnings are a wall of output on big apps (Steam et al).
-    // Off by default: collapse to a one-line summary, full detail behind the env.
+    // Per-soname *lookup failures* are a wall of output on big apps (Steam et
+    // al) and say nothing a user can act on. The final unresolved list is
+    // different and is always shown: it is the one thing that predicts an app
+    // that installs cleanly and then refuses to start.
     let verbose = std::env::var_os("WRYAYER_VERBOSE").is_some();
     let mut installed: Vec<String> = Vec::new();
     let mut visited: HashSet<String> = HashSet::new();
@@ -150,16 +233,9 @@ fn satisfy_missing_sonames_impl(
     if !installed.is_empty() || !unresolved.is_empty() {
         let mut msg = format!("  sonames: installed {} package(s)", installed.len());
         if !unresolved.is_empty() {
-            let mut names: Vec<&str> = unresolved.iter().map(String::as_str).collect();
-            names.sort_unstable();
-            if verbose {
-                msg.push_str(&format!(", {} unresolved: {}", names.len(), names.join(", ")));
-            } else {
-                msg.push_str(&format!(
-                    ", {} unresolved (set WRYAYER_VERBOSE=1 for the list)",
-                    names.len()
-                ));
-            }
+            let names: Vec<String> = unresolved.iter().cloned().collect();
+            msg.push_str(&format!(", {} unresolved:", names.len()));
+            msg.push_str(&describe_unresolved(&names));
         }
         eprintln!("{msg}");
     }
@@ -380,7 +456,10 @@ pub(crate) fn soname_in_app(app_dir: &Path, soname: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::is_versioned_soname;
+    use super::{
+        describe_unresolved, host_alternative, is_versioned_soname, split_soname_version,
+        HOST_LIB_DIRS,
+    };
     #[test]
     fn accepts_typical_sonames() {
         assert!(is_versioned_soname("libsndfile.so.1"));
@@ -398,5 +477,88 @@ mod tests {
         assert!(!is_versioned_soname("libsndfile.so.1 not found"));
         assert!(!is_versioned_soname("foo.so.1"));
         assert!(!is_versioned_soname(""));
+    }
+
+    #[test]
+    fn a_versioned_soname_splits_into_stem_and_version() {
+        assert_eq!(
+            split_soname_version("libabsl_strings.so.2605.0.0"),
+            Some(("libabsl_strings.so", "2605.0.0"))
+        );
+        assert_eq!(split_soname_version("libc.so.6"), Some(("libc.so", "6")));
+    }
+
+    #[test]
+    fn an_unversioned_soname_has_no_version_to_go_stale() {
+        // ld.so names like these carry no ABI version, so "the system has a
+        // different one" is not a thing that can be said about them.
+        assert_eq!(split_soname_version("libfoo.so"), None);
+        assert_eq!(split_soname_version("ld-linux-x86-64.so.2").map(|(s, _)| s), Some("ld-linux-x86-64.so"));
+    }
+
+    #[test]
+    fn an_unresolved_soname_is_named_in_full() {
+        // It used to be hidden behind WRYAYER_VERBOSE, which meant the one line
+        // predicting an app that installs cleanly and then will not start was
+        // the line nobody read.
+        let out = describe_unresolved(&["libsomething_unlikely.so.99.0.0".to_string()]);
+        assert!(out.contains("libsomething_unlikely.so.99.0.0"), "{out}");
+    }
+
+    #[test]
+    fn a_long_list_stops_before_it_becomes_a_wall() {
+        let many: Vec<String> = (0..20).map(|i| format!("libx{i}.so.1")).collect();
+        let out = describe_unresolved(&many);
+        assert!(out.contains("and 12 more"), "{out}");
+    }
+
+    #[test]
+    fn unresolved_sonames_are_listed_in_a_stable_order() {
+        let out = describe_unresolved(&["libz.so.9".to_string(), "liba.so.9".to_string()]);
+        assert!(out.find("liba.so.9") < out.find("libz.so.9"), "{out}");
+    }
+
+    /// The host is asked, so this only asserts something when the host really
+    /// does have the library — which for libc it does, on every machine that
+    /// can run this test.
+    #[test]
+    fn a_library_the_host_has_at_another_version_is_reported_as_such() {
+        let real = HOST_LIB_DIRS
+            .iter()
+            .filter_map(|d| std::fs::read_dir(d).ok())
+            .flatten()
+            .flatten()
+            .find_map(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                name.starts_with("libc.so.").then_some(name)
+            });
+        let Some(real) = real else { return };
+
+        // Ask about a version that cannot exist, with the same stem.
+        let (stem, _) = split_soname_version(&real).expect("libc.so.N is versioned");
+        let bogus = format!("{stem}.999999");
+        assert_eq!(host_alternative(&bogus).as_deref(), Some(real.as_str()));
+
+        // And the real one is not reported as an alternative to itself.
+        assert_ne!(host_alternative(&real).as_deref(), Some(real.as_str()));
+    }
+
+    #[test]
+    fn a_stale_prebuilt_package_is_explained_not_just_listed() {
+        let real = HOST_LIB_DIRS
+            .iter()
+            .filter_map(|d| std::fs::read_dir(d).ok())
+            .flatten()
+            .flatten()
+            .find_map(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                name.starts_with("libc.so.").then_some(name)
+            });
+        let Some(real) = real else { return };
+        let (stem, _) = split_soname_version(&real).unwrap();
+
+        let out = describe_unresolved(&[format!("{stem}.999999")]);
+        assert!(out.contains(&real), "the version the system has is missing: {out}");
+        assert!(out.contains("built"), "no explanation of why: {out}");
     }
 }
