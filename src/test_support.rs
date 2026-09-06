@@ -74,7 +74,7 @@ pub fn test_home() -> TestHome {
 
     std::env::set_var("HOME", dir.path());
     std::env::set_var("XDG_RUNTIME_DIR", dir.path().join("run"));
-    // Keeps the root-is-mounted marker out of the developer's real state dir.
+    // Keeps any XDG state a test writes out of the developer's real state dir.
     std::env::set_var("XDG_STATE_HOME", dir.path().join("state"));
     // Shortcuts and desktop entries are system-wide in normal use. Under test
     // they must never be: writing them would need root, and asking for root is
