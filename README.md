@@ -851,10 +851,23 @@ reads its own variables, and the NVIDIA one only steps aside when told to.
 
 Environment variables are a request, though, and an app that opens `/dev/dri`
 itself (anything Chromium-based) can ignore them. So the render nodes of the
-other GPUs — `/dev/dri/renderD*` — are masked inside the sandbox, which is the
-part that makes the setting stick. Primary nodes (`/dev/dri/card*`) are left
-alone: that is how the display server hands out buffers, and an app rendering
-elsewhere still has to present through them.
+GPUs the app may not use are masked inside the sandbox, which is the part that
+makes the setting stick. Two things are never masked: primary nodes
+(`/dev/dri/card*`), which is how the display server hands out buffers, and **the
+card driving your screen**, which the app still allocates and shares buffers
+through — taking that away does not move work to the chosen GPU, it drops the
+app to software rendering.
+
+**NVIDIA userspace comes from the host.** An app tree is its own `/usr`, filled
+once at install time, which is right for Mesa and wrong for NVIDIA: its
+libraries have to match the running kernel module build exactly, and the module
+belongs to the host. An app installed before the last driver update carries a
+`libGLX_nvidia.so` that the module refuses, GL falls back to llvmpipe, and what
+you see is an idle GPU next to a pegged CPU. So on a machine with an NVIDIA
+card, wryayer binds the host's driver files — `libGLX_nvidia`, `libEGL_nvidia`,
+`libnvidia-*`, `libcuda`, the Vulkan ICD and the GLVND/EGL manifests — over
+whatever the tree holds, for every app. `wryayer gpu` reports how many it found,
+and says so when it finds none.
 
 If the pinned card isn't there at launch — an eGPU unplugged, a driver that
 failed to load — wryayer says so and falls back to `auto` rather than refusing

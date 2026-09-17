@@ -65,6 +65,10 @@ pub struct Gpu {
     /// `/dev/dri/renderDN` — the render node apps actually draw through.
     /// Absent for display-only devices.
     pub render: Option<PathBuf>,
+    /// Whether one of this card's connectors has a display plugged into it.
+    /// On a hybrid laptop that is the integrated GPU: it drives the panel, and
+    /// everything else presents through it.
+    pub drives_display: bool,
 }
 
 impl Gpu {
@@ -150,6 +154,7 @@ pub fn scan(drm_dir: &Path, dev_dir: &Path) -> Vec<Gpu> {
                     .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())),
                 primary: dev_dir.join(card),
                 render,
+                drives_display: has_connected_connector(drm_dir, card),
             })
         })
         .collect()
@@ -172,6 +177,23 @@ fn render_nodes(drm_dir: &Path) -> Vec<(String, Option<PathBuf>)> {
             Some((name, dev))
         })
         .collect()
+}
+
+/// Whether any of `card`'s connectors reports a display plugged in.
+///
+/// Connectors are sysfs siblings of the card named `<card>-<connector>`
+/// (`card0-eDP-1`), each with a `status` file reading `connected` or
+/// `disconnected`.
+fn has_connected_connector(drm_dir: &Path, card: &str) -> bool {
+    let Ok(entries) = std::fs::read_dir(drm_dir) else {
+        return false;
+    };
+    let prefix = format!("{card}-");
+    entries.flatten().any(|e| {
+        e.file_name().to_string_lossy().starts_with(&prefix)
+            && std::fs::read_to_string(e.path().join("status"))
+                .is_ok_and(|s| s.trim() == "connected")
+    })
 }
 
 /// Read a sysfs file holding `0x1002`-style hex.
@@ -276,7 +298,7 @@ pub fn menu_descriptions() -> &'static [&'static str] {
         ];
         v.extend(all().iter().map(|g| {
             let line = format!(
-                "{} — {}, driver {}. The app renders here; the other GPUs' render nodes are hidden from its sandbox.",
+                "{} — {}, driver {}. The app renders here; the render nodes of other GPUs are hidden from its sandbox, except the one driving your screen, which it still presents through.",
                 g.label(),
                 g.id,
                 g.driver.as_deref().unwrap_or("none"),
@@ -337,6 +359,12 @@ pub fn env_for(gpu: &Gpu, others: &[Gpu]) -> Vec<(String, String)> {
 /// Primary nodes (`cardN`) are deliberately left alone: they are how the
 /// display server hands out buffers, and an app that is merely rendering
 /// elsewhere still has to present through them.
+///
+/// Nor is a card that drives a display ever masked, even when the app renders
+/// on another one. A client on a hybrid machine allocates and shares buffers
+/// through the compositor's card — that is what dma-buf feedback names — and
+/// taking its render node away does not move the work to the chosen GPU, it
+/// drops the app to software rendering.
 pub fn nodes_to_mask(gpu: &Gpu, others: &[Gpu]) -> Vec<PathBuf> {
     if gpu.render.is_none() {
         // Nothing to pin to, so masking would only remove options.
@@ -344,9 +372,97 @@ pub fn nodes_to_mask(gpu: &Gpu, others: &[Gpu]) -> Vec<PathBuf> {
     }
     others
         .iter()
-        .filter(|g| g.id != gpu.id)
+        .filter(|g| g.id != gpu.id && !g.drives_display)
         .filter_map(|g| g.render.clone())
         .collect()
+}
+
+// ── The NVIDIA userspace stack ────────────────────────────────────────────────
+//
+// An app tree is its own /usr, filled once at install time. That is fine for
+// Mesa, whose drivers talk to a stable kernel interface, and wrong for NVIDIA:
+// its userspace libraries must match the running kernel module build exactly,
+// and the module belongs to the host. So an app installed before the last
+// driver update carries a libGLX_nvidia.so that refuses to initialise, GL falls
+// back to llvmpipe, and the symptom is an idle GPU next to a pegged CPU.
+//
+// The fix is the one Flatpak arrived at: take the userspace stack from the
+// host, next to the module it has to match, rather than from the tree.
+
+/// Directories a distribution keeps its shared libraries in.
+const LIB_DIRS: &[&str] = &[
+    "/usr/lib",
+    // 32-bit, for the wine games wryayer installs into their own containers.
+    "/usr/lib32",
+    // Debian/Ubuntu multiarch, which wryayer also installs onto.
+    "/usr/lib/x86_64-linux-gnu",
+    "/usr/lib/i386-linux-gnu",
+];
+
+/// Library name prefixes that belong to the NVIDIA driver.
+const NVIDIA_LIBS: &[&str] = &[
+    "libGLX_nvidia.so",
+    "libEGL_nvidia.so",
+    "libGLESv1_CM_nvidia.so",
+    "libGLESv2_nvidia.so",
+    "libnvidia-",
+    "libcuda.so",
+    "libnvcuvid.so",
+    "libnvoptix.so",
+    "libvdpau_nvidia.so",
+];
+
+/// Driver manifests: the files that tell libglvnd, the Vulkan loader and the
+/// EGL platform machinery that an NVIDIA driver exists at all.
+const NVIDIA_MANIFESTS: &[&str] = &[
+    "/usr/share/glvnd/egl_vendor.d/10_nvidia.json",
+    "/usr/share/vulkan/icd.d/nvidia_icd.json",
+    "/usr/share/vulkan/implicit_layer.d/nvidia_layers.json",
+    "/usr/share/egl/egl_external_platform.d/10_nvidia_wayland.json",
+    "/usr/share/egl/egl_external_platform.d/15_nvidia_gbm.json",
+    "/etc/OpenCL/vendors/nvidia.icd",
+];
+
+/// The host's NVIDIA driver files, to bind over whatever the app tree has.
+///
+/// Empty when the host has no NVIDIA driver installed — on such a machine there
+/// is nothing to match, and an app tree's nvidia libraries are dead weight
+/// either way.
+pub fn nvidia_host_files() -> &'static [PathBuf] {
+    static FILES: OnceLock<Vec<PathBuf>> = OnceLock::new();
+    FILES.get_or_init(|| nvidia_files_in(LIB_DIRS, NVIDIA_MANIFESTS))
+}
+
+/// The scan behind [`nvidia_host_files`], with its roots given so it can be
+/// tested against a fixture instead of the developer's own driver install.
+fn nvidia_files_in(lib_dirs: &[&str], manifests: &[&str]) -> Vec<PathBuf> {
+    let mut files: Vec<PathBuf> = Vec::new();
+    for dir in lib_dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else { continue };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            // Both the sonames and the versioned files behind them: a library
+            // is opened by soname, but its own DT_NEEDED entries name the
+            // versioned files, so binding one without the other loads nothing.
+            if NVIDIA_LIBS.iter().any(|p| name.starts_with(p)) {
+                files.push(entry.path());
+            }
+        }
+    }
+    files.sort();
+    files.extend(
+        manifests
+            .iter()
+            .map(PathBuf::from)
+            .filter(|p| p.exists()),
+    );
+    files
+}
+
+/// Whether this machine has an NVIDIA card at all.
+pub fn nvidia_present() -> bool {
+    all().iter().any(|g| g.vendor == Vendor::Nvidia)
 }
 
 #[cfg(test)]
@@ -372,6 +488,12 @@ mod tests {
             std::os::unix::fs::symlink(&pci, drm.join(r).join("device")).unwrap();
         }
         std::fs::create_dir_all(root.join("dev/dri")).unwrap();
+    }
+
+    /// Give `card` a connector, plugged in or not.
+    fn connector(root: &Path, card: &str, name: &str, status: &str) {
+        let dir = root.join("sys/class/drm").join(format!("{card}-{name}"));
+        write(&dir.join("status"), &format!("{status}\n"));
     }
 
     #[test]
@@ -441,11 +563,13 @@ mod tests {
             id: "pci-0000_00_02_0".into(), card: "card0".into(), name: "UHD".into(),
             vendor: Vendor::Intel, vendor_id: 0x8086, device_id: 0x3ea0,
             driver: None, primary: "/dev/dri/card0".into(), render: None,
+            drives_display: false,
         };
         let nvidia = Gpu {
             id: "pci-0000_01_00_0".into(), card: "card1".into(), name: "RTX".into(),
             vendor: Vendor::Nvidia, vendor_id: 0x10de, device_id: 0x2520,
             driver: None, primary: "/dev/dri/card1".into(), render: None,
+            drives_display: false,
         };
         let both = [intel.clone(), nvidia.clone()];
 
@@ -467,6 +591,7 @@ mod tests {
             id: "pci-0000_03_00_0".into(), card: "card0".into(), name: "RX".into(),
             vendor: Vendor::Amd, vendor_id: 0x1002, device_id: 0x73df,
             driver: None, primary: "/dev/dri/card0".into(), render: None,
+            drives_display: false,
         };
         let env = env_for(&amd, std::slice::from_ref(&amd));
         assert!(!env.iter().any(|(k, _)| k.starts_with("__")), "{env:?}");
@@ -479,6 +604,7 @@ mod tests {
             name: "GA107M [GeForce RTX 3050 Mobile]".into(),
             vendor: Vendor::Nvidia, vendor_id: 0x10de, device_id: 0x2520,
             driver: Some("nvidia".into()), primary: "/dev/dri/card1".into(), render: None,
+            drives_display: false,
         };
         for needle in ["pci-0000_01_00_0", "card1", "nvidia", "NVIDIA", "rtx 3050"] {
             assert!(g.matches(needle), "should match '{needle}'");
@@ -518,6 +644,71 @@ mod tests {
     fn an_unknown_card_still_gets_a_usable_name() {
         let name = model_name(0x8086, 0xfffe);
         assert!(name.contains("fffe"), "{name}");
+    }
+
+    #[test]
+    fn the_card_driving_the_screen_is_never_masked() {
+        // The regression this rule exists for: pinning a hybrid laptop to its
+        // discrete card masked the integrated one, which is the card the
+        // compositor allocates and shares buffers through — the app dropped to
+        // software rendering instead of moving to the dGPU.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        fixture(root, "card0", Some("renderD128"), "0000:00:02.0", "0x8086", "0x3ea0");
+        fixture(root, "card1", Some("renderD129"), "0000:01:00.0", "0x10de", "0x2520");
+        connector(root, "card0", "eDP-1", "connected");
+        connector(root, "card1", "DP-1", "disconnected");
+
+        let gpus = scan(&root.join("sys/class/drm"), &root.join("dev/dri"));
+        assert!(gpus[0].drives_display, "the panel is on card0");
+        assert!(!gpus[1].drives_display);
+        assert!(nodes_to_mask(&gpus[1], &gpus).is_empty(), "the display card must stay");
+        // The other direction still masks: nothing presents through card1.
+        assert_eq!(nodes_to_mask(&gpus[0], &gpus), vec![root.join("dev/dri/renderD129")]);
+    }
+
+    #[test]
+    fn the_nvidia_stack_is_collected_sonames_and_versioned_files_alike() {
+        // A library is opened by soname, but its own DT_NEEDED entries name the
+        // versioned files — bind one without the other and nothing loads.
+        let tmp = tempfile::tempdir().unwrap();
+        let lib = tmp.path().join("lib");
+        for f in [
+            "libGLX_nvidia.so.0",
+            "libGLX_nvidia.so.610.57.04",
+            "libnvidia-glcore.so.610.57.04",
+            "libcuda.so.1",
+            "libEGL_mesa.so.0",   // not NVIDIA's
+            "libfoo.so.1",
+        ] {
+            write(&lib.join(f), "");
+        }
+        let manifest = tmp.path().join("10_nvidia.json");
+        write(&manifest, "{}");
+
+        let found = nvidia_files_in(
+            &[lib.to_str().unwrap()],
+            &[manifest.to_str().unwrap(), "/nonexistent/nvidia_icd.json"],
+        );
+        let names: Vec<String> =
+            found.iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
+        assert!(names.contains(&"libGLX_nvidia.so.0".to_string()), "{names:?}");
+        assert!(names.contains(&"libGLX_nvidia.so.610.57.04".to_string()), "{names:?}");
+        assert!(names.contains(&"libnvidia-glcore.so.610.57.04".to_string()), "{names:?}");
+        assert!(names.contains(&"libcuda.so.1".to_string()), "{names:?}");
+        assert!(names.contains(&"10_nvidia.json".to_string()), "{names:?}");
+        assert!(!names.contains(&"libEGL_mesa.so.0".to_string()), "{names:?}");
+        assert!(!names.contains(&"libfoo.so.1".to_string()), "{names:?}");
+        // A manifest the host doesn't have is dropped, not bound as a hole.
+        assert!(!names.iter().any(|n| n == "nvidia_icd.json"), "{names:?}");
+    }
+
+    #[test]
+    fn a_host_without_the_nvidia_driver_yields_nothing_to_bind() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lib = tmp.path().join("lib");
+        write(&lib.join("libEGL_mesa.so.0"), "");
+        assert!(nvidia_files_in(&[lib.to_str().unwrap()], &[]).is_empty());
     }
 
     #[test]

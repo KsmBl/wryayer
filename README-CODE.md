@@ -291,9 +291,22 @@ Two things happen at launch, because one is not enough:
   unset: pointing libglvnd at a vendor library that isn't installed breaks GLX.
 - **Masking.** The other cards' `renderD*` nodes are bound over with
   `/dev/null`, so an app that enumerates `/dev/dri` itself — Chromium and
-  everything built on it — cannot pick one anyway. Primary nodes (`card*`) are
-  deliberately left alone: they are the display server's path, and an app
-  rendering on card B still presents through the card driving the screen.
+  everything built on it — cannot pick one anyway. Two exceptions, both learned
+  the hard way: primary nodes (`card*`) are the display server's path, and a
+  card that drives a connected display (`<card>-<connector>/status`) is what a
+  client allocates and shares buffers through — dma-buf feedback names it.
+  Masking either does not move work to the chosen GPU, it drops the app to
+  llvmpipe.
+- **The NVIDIA userspace stack.** An app tree is its own `/usr`, filled at
+  install time. Mesa survives that; NVIDIA does not — its libraries must match
+  the running kernel module build exactly, and the module is the host's. Three
+  apps installed on three different days carry three different
+  `libGLX_nvidia.so.<version>`, and every one of them stops working the day the
+  host driver updates: GL falls back to llvmpipe, which reads as "0% GPU, 100%
+  CPU". So whenever the machine has an NVIDIA card, `nvidia_host_files()` — the
+  driver's libraries plus the GLVND/Vulkan/EGL manifests — is bound read-only
+  over the tree's copies, for every app, pinned or not. This is the same
+  conclusion Flatpak's nvidia runtime extension reaches.
 
 A configured card that isn't present resolves to `None` and the launcher warns
 and carries on — an eGPU gets unplugged, and refusing to start the app would be

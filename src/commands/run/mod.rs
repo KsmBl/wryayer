@@ -663,6 +663,21 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
         mask_snd_devices(&mut cmd, Some('c'));
     }
 
+    // ── The host's NVIDIA driver ──────────────────────────────────────────────
+    // NVIDIA's userspace libraries must match the running kernel module build
+    // exactly, and the module is the host's. The app tree carries whatever
+    // version was current when the app was installed, so the first host driver
+    // update leaves it talking to a module it does not recognise: GL quietly
+    // falls back to llvmpipe, and the app renders on the CPU. Bind the host's
+    // copy over the tree's, next to the module it has to match.
+    if crate::gpu::nvidia_present() {
+        for file in crate::gpu::nvidia_host_files() {
+            if let Some(path) = file.to_str() {
+                cmd.args(["--ro-bind-try", path, path]);
+            }
+        }
+    }
+
     // ── GPU selection ─────────────────────────────────────────────────────────
     // The environment variables are a request — each driver stack reads its own,
     // which is why gpu::env_for sets several. Masking the render nodes of the
@@ -671,6 +686,18 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
     if config.gpu.is_some() {
         match crate::gpu::resolve(config.gpu.as_deref()) {
             Some(gpu) => {
+                // Pinned to a card whose driver is not installed on the host:
+                // the app tree's own copy cannot work on its own, so say so
+                // rather than let it fall back to software rendering silently.
+                if gpu.vendor == crate::gpu::Vendor::Nvidia
+                    && crate::gpu::nvidia_host_files().is_empty()
+                {
+                    eprintln!(
+                        "warning: no NVIDIA driver libraries on the host — '{}' will render in \n\
+                         software. Install the driver (e.g. nvidia-utils) to use this GPU.",
+                        gpu.label()
+                    );
+                }
                 for (key, value) in crate::gpu::env_for(gpu, crate::gpu::all()) {
                     cmd.args(["--setenv", &key, &value]);
                 }
