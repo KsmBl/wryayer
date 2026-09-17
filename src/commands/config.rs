@@ -178,6 +178,44 @@ pub fn password_source(app_name: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+/// Pin an app to one GPU, or hand the choice back to the driver.
+///
+/// Its own function rather than another parameter on `run`: the value has to be
+/// matched against the hardware that is actually present, and a typo is worth
+/// catching here — the alternative is an app that silently renders on the wrong
+/// card and a user with no way to tell.
+pub fn gpu(app_name: &str, value: &str) -> Result<()> {
+    read_manifest(app_name).with_context(|| format!("'{app_name}' is not installed"))?;
+    let mut config = read_config(app_name)?;
+
+    if matches!(value, "auto" | "off" | "system" | "") {
+        config.gpu = None;
+        write_config(app_name, &config)?;
+        eprintln!("{app_name}: gpu = auto");
+        return Ok(());
+    }
+
+    let gpus = crate::gpu::all();
+    let Some(gpu) = gpus.iter().find(|g| g.matches(value)) else {
+        let known: Vec<String> = gpus.iter().map(|g| format!("    {}  {}", g.id, g.label())).collect();
+        if known.is_empty() {
+            bail!("no GPU matches '{value}' — this machine reports none under /sys/class/drm");
+        }
+        bail!(
+            "no GPU matches '{value}'\n  available:\n{}\n  or 'auto' to let the driver choose",
+            known.join("\n")
+        );
+    };
+
+    config.gpu = Some(gpu.id.clone());
+    write_config(app_name, &config)?;
+    eprintln!("{app_name}: gpu = {} ({})", gpu.id, gpu.label());
+    if gpus.len() == 1 {
+        eprintln!("note: it is the only GPU on this machine, so nothing changes for now.");
+    }
+    Ok(())
+}
+
 /// Set whether an encrypted app's container is unmounted when the app exits.
 pub fn lock_on_exit(app_name: &str, value: &str) -> Result<()> {
     read_manifest(app_name).with_context(|| format!("'{app_name}' is not installed"))?;
@@ -249,6 +287,14 @@ fn print_config(app_name: &str, config: &AppConfig) {
     }
     eprintln!("  audio       = {}", b(config.audio));
     eprintln!("  usb         = {}", b(config.usb));
+    match config.gpu.as_deref() {
+        None => eprintln!("  gpu         = auto"),
+        Some(id) => match crate::gpu::resolve(Some(id)) {
+            Some(g) => eprintln!("  gpu         = {id} ({})", g.label()),
+            // Kept, not dropped: the card may be plugged back in.
+            None => eprintln!("  gpu         = {id} (not present right now)"),
+        },
+    }
     if config.shared_dirs.is_empty() {
         eprintln!("  shared dirs = (none)");
     } else {

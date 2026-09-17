@@ -1607,6 +1607,18 @@ fn fractional_bar(width: usize, fraction: f64) -> String {
 
 // ── Settings tab (global defaults) ───────────────────────────────────────────
 
+/// The GPU row's value as it appears in a settings list: "auto", the card's
+/// short name, or — for a card that has since gone away — the stored id, so a
+/// stale setting is visible instead of silently reading as "auto".
+fn gpu_label(cfg: &AppConfig, width: usize) -> String {
+    let Some(id) = cfg.gpu.as_deref() else { return "auto".to_string() };
+    let full = match crate::gpu::resolve(Some(id)) {
+        Some(g) => format!("{} {}", g.vendor.label(), g.name),
+        None => format!("{id} (gone)"),
+    };
+    full.chars().take(width).collect()
+}
+
 fn draw_settings_tab(f: &mut Frame, app: &mut App, area: Rect) {
     let config = &app.global_config;
     let selected = app.global_selected;
@@ -1713,10 +1725,11 @@ fn draw_settings_tab(f: &mut Frame, app: &mut App, area: Rect) {
         Some(604800)   => "1 week".to_string(),
         Some(secs)     => crate::config::format_uptime(secs),
     };
-    while rows.len() <= super::CFG_MASTER_FORGET {
+    while rows.len() < super::CFG_LEN {
         rows.push(("", String::new()));
     }
     rows[CFG_SPOOF_UPTIME] = ("Spoof uptime", uptime_val);
+    rows[super::CFG_GPU]   = ("GPU",          gpu_label(config, 12));
     rows[CFG_USB]          = ("USB devices",  b(config.usb).to_string());
     // An action row: its "value" reports the store's state instead of a setting.
     rows[super::CFG_MASTER_PASSWORD] = (
@@ -2050,10 +2063,11 @@ fn draw_config(
     // addresses rows by CFG index and silently drops any that sit past the end,
     // which is how the Encryption rows came to have a section header and no
     // rows under it.
-    while rows.len() <= super::CFG_ENCRYPT_ALIAS {
+    while rows.len() < super::CFG_LEN {
         rows.push(("", String::new()));
     }
     rows[CFG_SPOOF_UPTIME] = ("Spoof upt. ", uptime_val);
+    rows[super::CFG_GPU]   = ("GPU        ", format!(" {} ", gpu_label(config, 14)));
     rows[CFG_USB]          = ("USB devices", b(config.usb).to_string());
     rows[super::CFG_PASSWORD_SOURCE] = (
         "Password   ",
@@ -2078,7 +2092,7 @@ fn draw_config(
     );
 
     let has_wg = wine_game.is_some();
-    let save_idx = app_cfg_save_idx(has_wg, encryption);
+    let save_idx = app_cfg_save_idx();
 
     // Save is pinned to the bottom so it's always reachable on small terminals.
     let save_y = inner.y + inner.height.saturating_sub(2);

@@ -519,3 +519,48 @@ fn every_picker_row_is_cross_function_consistent() {
         }
     }
 }
+
+// ── GPU row ──────────────────────────────────────────────────────────────────
+
+#[test]
+fn gpu_row_offers_auto_plus_one_entry_per_card() {
+    let opts = setting_options(wryayer::tui::CFG_GPU);
+    assert_eq!(opts[0], "auto");
+    assert_eq!(opts.len(), 1 + wryayer::gpu::all().len());
+}
+
+#[test]
+fn gpu_choices_round_trip_through_the_config() {
+    let mut cfg = AppConfig::default();
+    assert_eq!(setting_current(&cfg, wryayer::tui::CFG_GPU), 0, "default is auto");
+    for (i, gpu) in wryayer::gpu::all().iter().enumerate() {
+        apply_setting(&mut cfg, wryayer::tui::CFG_GPU, i + 1);
+        assert_eq!(cfg.gpu.as_deref(), Some(gpu.id.as_str()));
+        assert_eq!(setting_current(&cfg, wryayer::tui::CFG_GPU), i + 1);
+    }
+    apply_setting(&mut cfg, wryayer::tui::CFG_GPU, 0);
+    assert_eq!(cfg.gpu, None);
+}
+
+#[test]
+fn a_gpu_that_is_no_longer_present_reads_as_auto() {
+    // The row can only show cards that exist; a stale id must not index past the
+    // end of the option list (which is what the picker would then try to draw).
+    let mut cfg = AppConfig::default();
+    cfg.gpu = Some("pci-0000_ff_00_0".to_string());
+    let cur = setting_current(&cfg, wryayer::tui::CFG_GPU);
+    assert_eq!(cur, 0);
+    assert!(cur < setting_options(wryayer::tui::CFG_GPU).len());
+}
+
+#[test]
+fn the_gpu_row_is_reachable_in_both_screens() {
+    use wryayer::tui::{config_nav_order, EncryptionRows};
+    for is_global in [true, false] {
+        assert!(
+            config_nav_order(is_global, false, EncryptionRows::Hidden).contains(&wryayer::tui::CFG_GPU),
+            "GPU row missing from {}",
+            if is_global { "Settings" } else { "Config" },
+        );
+    }
+}

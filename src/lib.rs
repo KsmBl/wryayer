@@ -6,6 +6,7 @@ pub mod cpu;
 pub mod desktop;
 pub mod distro;
 pub mod entropy;
+pub mod gpu;
 #[cfg(feature = "gui")]
 pub mod gui;
 pub mod launcher;

@@ -91,6 +91,10 @@ pub struct AppConfig {
     /// sandbox so USB drives — including ones mounted after launch — are
     /// visible to the app (default: false, for isolation).
     pub usb: bool,
+    /// Which GPU the app renders on, as a `crate::gpu::Gpu::id` (a PCI address
+    /// like `pci-0000_01_00_0`). None = whatever the driver picks by itself,
+    /// which on a hybrid machine is the integrated card.
+    pub gpu: Option<String>,
     /// Host directories bind-mounted read-write inside the sandbox (default: none)
     pub shared_dirs: Vec<String>,
     /// Override /etc/hostname and $HOSTNAME inside the sandbox
@@ -157,6 +161,7 @@ impl Default for AppConfig {
             microphone: true,
             audio: true,
             usb: false,
+            gpu: None,
             shared_dirs: Vec::new(),
             spoof_hostname: None,
             spoof_username: None,
@@ -283,6 +288,7 @@ fn sync_container_aliases(root_name: &str, root_config: &AppConfig) -> Result<()
         alias_cfg.microphone       = root_config.microphone;
         alias_cfg.audio            = root_config.audio;
         alias_cfg.usb              = root_config.usb;
+        alias_cfg.gpu              = root_config.gpu.clone();
         alias_cfg.shared_dirs      = root_config.shared_dirs.clone();
         alias_cfg.spoof_hostname   = root_config.spoof_hostname.clone();
         alias_cfg.spoof_username   = root_config.spoof_username.clone();
@@ -357,6 +363,13 @@ pub fn parse_ini(content: &str) -> Result<AppConfig> {
             ("usb", v) => {
                 config.usb = parse_bool(v)
                     .map_err(|_| anyhow::anyhow!("unknown usb value '{v}' — valid: on, off"))?;
+            }
+            ("gpu", v) => {
+                config.gpu = if v.is_empty() || v == "auto" || v == "system" {
+                    None
+                } else {
+                    Some(v.to_owned())
+                };
             }
             ("share_dir", v) if !v.is_empty() => {
                 config.shared_dirs.push(shellexpand::tilde(v).into_owned());
@@ -636,7 +649,11 @@ pub fn format_ini(config: &AppConfig) -> String {
          audio = {}\n\
          ; on = bind /run/media, /media and /mnt so USB drives (incl. ones\n\
          ; plugged in after launch) are visible; off = hide removable media\n\
-         usb = {}\n",
+         usb = {}\n\
+         ; Which GPU the app renders on. 'auto' lets the driver choose; any\n\
+         ; other value is a GPU id from `wryayer gpu` (e.g. pci-0000_01_00_0),\n\
+         ; and the other GPUs' render nodes are hidden from the sandbox.\n\
+         gpu = {}\n",
         b(config.network),
         match config.avahi {
             AvahiMode::Stub => "stub",
@@ -647,6 +664,7 @@ pub fn format_ini(config: &AppConfig) -> String {
         b(config.microphone),
         b(config.audio),
         b(config.usb),
+        config.gpu.as_deref().unwrap_or("auto"),
     );
     if !config.shared_dirs.is_empty() {
         s.push_str("\n[share]\n");

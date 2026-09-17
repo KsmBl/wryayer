@@ -168,6 +168,7 @@ fn round_trip_default_config() {
     assert_eq!(parsed.microphone,  original.microphone);
     assert_eq!(parsed.audio,       original.audio);
     assert_eq!(parsed.usb,         original.usb);
+    assert_eq!(parsed.gpu,         original.gpu);
     assert_eq!(parsed.shared_dirs, original.shared_dirs);
 }
 
@@ -181,6 +182,7 @@ fn round_trip_all_non_default_values() {
         microphone:          false,
         audio:               false,
         usb:                 true,
+        gpu:                 Some("pci-0000_01_00_0".to_string()),
         shared_dirs:         vec!["/tmp/foo".to_string(), "/opt/bar".to_string()],
         spoof_hostname:      None,
         spoof_username:      None,
@@ -220,6 +222,31 @@ fn round_trip_all_non_default_values() {
     assert_eq!(parsed.layout, Layout::Sidebar);
     assert!(!parsed.portal_filter);
     assert_eq!(parsed.bound_apps, vec!["firefox", "thunderbird"]);
+    assert_eq!(parsed.gpu.as_deref(), Some("pci-0000_01_00_0"));
+}
+
+// ── parse_ini — gpu ───────────────────────────────────────────────────────────
+
+#[test]
+fn parse_ini_gpu_absent_means_auto() {
+    assert_eq!(parse_ini("").unwrap().gpu, None);
+}
+
+#[test]
+fn parse_ini_gpu_auto_spellings_mean_no_pinning() {
+    // The file is always written with an explicit `gpu = auto`, so reading that
+    // back must not turn into "pin me to a card called auto".
+    for v in ["auto", "system", ""] {
+        assert_eq!(parse_ini(&format!("gpu = {v}\n")).unwrap().gpu, None, "'{v}'");
+    }
+}
+
+#[test]
+fn parse_ini_gpu_keeps_an_id_it_does_not_recognise() {
+    // The card may simply not be plugged in right now; dropping the value would
+    // silently un-pin the app.
+    let cfg = parse_ini("gpu = pci-0000_09_00_0\n").unwrap();
+    assert_eq!(cfg.gpu.as_deref(), Some("pci-0000_09_00_0"));
 }
 
 // ── parse_ini — avahi mode ────────────────────────────────────────────────────

@@ -272,6 +272,38 @@ required: without `MemorySwapMax=0` the kernel silently offloads pages to swap
 cgroup `memory.current` and rewrites a spoofed `/proc/meminfo` (bound into the
 sandbox) so the app sees `MemFree` shrink toward the configured ceiling.
 
+### GPU selection (`gpu.rs`)
+
+`gpu` names one card by PCI address (`pci-0000_01_00_0` — the spelling Mesa's
+`DRI_PRIME` parses, and stable across reboots in a way `cardN` is not). The
+scan reads `/sys/class/drm`: cards are `card` + digits only (`card1-HDMI-A-1` is
+a connector, not a device), each is paired with the render node whose `device`
+symlink canonicalises to the same PCI node, and the model name comes from
+`/usr/share/hwdata/pci.ids` when it is installed.
+
+Two things happen at launch, because one is not enough:
+
+- **Environment.** `DRI_PRIME` and `MESA_VK_DEVICE_SELECT` for Mesa;
+  `__NV_PRIME_RENDER_OFFLOAD`, `__GLX_VENDOR_LIBRARY_NAME` and
+  `__VK_LAYER_NV_optimus` when any NVIDIA card is present — that stack reads
+  none of the Mesa variables, and has to be told explicitly both to take over
+  and to step aside. On an all-Mesa machine the `__`-prefixed variables are left
+  unset: pointing libglvnd at a vendor library that isn't installed breaks GLX.
+- **Masking.** The other cards' `renderD*` nodes are bound over with
+  `/dev/null`, so an app that enumerates `/dev/dri` itself — Chromium and
+  everything built on it — cannot pick one anyway. Primary nodes (`card*`) are
+  deliberately left alone: they are the display server's path, and an app
+  rendering on card B still presents through the card driving the screen.
+
+A configured card that isn't present resolves to `None` and the launcher warns
+and carries on — an eGPU gets unplugged, and refusing to start the app would be
+a worse answer than rendering somewhere. For the same reason the value is kept
+in `config.ini` rather than cleared.
+
+`gpu::all()` caches the scan in a `OnceLock` (the TUI reads it per frame), and
+`menu_labels` / `menu_descriptions` leak their strings once so the settings
+screens, whose option lists are `&'static str`, can name real hardware.
+
 ### D-Bus portal filter (file pickers)
 
 `portal_filter` (default on) routes the sandbox's D-Bus **session** bus through

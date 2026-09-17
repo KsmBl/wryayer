@@ -125,6 +125,8 @@ enum Commands {
         #[command(subcommand)]
         setting: Option<ConfigSetting>,
     },
+    /// List the GPUs apps can be pinned to with `config <app> gpu`
+    Gpu,
     /// Create a zip export of an installed app
     Export {
         /// The app name as shown by `wryayer list`
@@ -444,6 +446,12 @@ enum ConfigSetting {
         /// prompt = ask before every launch, master = read from the master store
         value: String,
     },
+    /// Pick which GPU the app renders on (see `wryayer gpu` for the choices)
+    Gpu {
+        /// GPU id (pci-0000_01_00_0), card name, driver, vendor, part of the
+        /// model name, or "auto" to let the driver choose
+        value: String,
+    },
     /// Limit maximum RAM usage in MiB via systemd-run (0 or "none" = no limit)
     RamLimit {
         /// RAM limit in MiB (e.g. 2048 for 2 GiB), or "none" to disable
@@ -564,10 +572,14 @@ fn main() {
             Some(ConfigSetting::SpoofUptime { value }) => {
                 commands::config::run(&app_name, None, None, None, None, None, None, None, None, None, None, None, None, None, Some(&value), None)
             }
+            Some(ConfigSetting::Gpu { value }) => {
+                commands::config::gpu(&app_name, &value)
+            }
             Some(ConfigSetting::RamLimit { mib }) => {
                 commands::config::run(&app_name, None, None, None, None, None, None, None, None, None, None, None, None, None, None, Some(&mib))
             }
         },
+        Commands::Gpu => commands::gpu::list(),
         Commands::Export { app_name, output } => {
             commands::export::run(&app_name, output.as_ref())
         }

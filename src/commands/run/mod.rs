@@ -663,6 +663,34 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
         mask_snd_devices(&mut cmd, Some('c'));
     }
 
+    // ── GPU selection ─────────────────────────────────────────────────────────
+    // The environment variables are a request — each driver stack reads its own,
+    // which is why gpu::env_for sets several. Masking the render nodes of the
+    // cards the app may not use is what makes the request stick for an app that
+    // opens /dev/dri itself (anything Chromium-based does).
+    if config.gpu.is_some() {
+        match crate::gpu::resolve(config.gpu.as_deref()) {
+            Some(gpu) => {
+                for (key, value) in crate::gpu::env_for(gpu, crate::gpu::all()) {
+                    cmd.args(["--setenv", &key, &value]);
+                }
+                for node in crate::gpu::nodes_to_mask(gpu, crate::gpu::all()) {
+                    if let Some(path) = node.to_str() {
+                        cmd.args(["--bind", "/dev/null", path]);
+                    }
+                }
+            }
+            // A card that was there when the setting was made and isn't now — an
+            // eGPU unplugged, a driver that failed to load. Saying so beats
+            // silently rendering somewhere else and leaving the user to wonder.
+            None => eprintln!(
+                "warning: GPU '{}' is not present — rendering on whichever GPU the driver picks.\n\
+                 Run `wryayer gpu` to see what this machine has.",
+                config.gpu.as_deref().unwrap_or_default()
+            ),
+        }
+    }
+
     // ── Identity spoofing ─────────────────────────────────────────────────────────
     let spoof_dir = std::path::Path::new(app_root).join(".spoof");
     let _ = std::fs::create_dir_all(&spoof_dir);

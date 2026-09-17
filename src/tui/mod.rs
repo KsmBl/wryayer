@@ -3102,10 +3102,11 @@ fn on_op_done(app: &mut App, code: KeyCode) -> Result<()> {
 // Rows: 0=network 1=camera 2=microphone 3=audio 4=temp_mode 5=temp_delete 6=shared_dirs
 //       7=spoof_hostname 8=spoof_username 9=spoof_machine_id 10=spoof_cpuinfo 11=spoof_os
 //       12=spoof_terminal 13=ram_limit 14=avahi
-// Per-app Config (no wine_game):  15=bound_apps 16=Save
-// Per-app Config (wine_game):     15=bound_apps 16=game_exe 17=game_prefix 18=Save
+// Per-app Config:                 15=bound_apps 16=game_exe 17=game_prefix (wine only)
 // Global Settings:                15=create_shortcut 16=confirm_install 17=ask_shortcut
 //                                 18=clean_cache 19=theme 20=layout 21=Save
+// Rows added since are numbered from 22 up (see the constants below); a row's
+// number is storage only — SANDBOX_SECTIONS decides where it appears.
 // Named aliases for the boolean/temp rows so the section table and helpers can
 // refer to every row symbolically (the values match the historical literals).
 pub const CFG_NETWORK: usize = 0;
@@ -3130,8 +3131,9 @@ pub const CFG_BOUND: usize = 15;
 pub const CFG_GAME_EXE: usize = 16;
 pub const CFG_GAME_PREFIX: usize = 17;
 /// The following are only shown in the global Settings tab, not per-app Config.
-/// Their indices sit past the per-app rows (which top out at 17 = wine save), so
-/// the shared setting_* helpers never see them from a per-app screen.
+/// Their indices sit past the per-app rows (which top out at 17, the wine-game
+/// prefix), so the shared setting_* helpers never see them from a per-app
+/// screen.
 pub const CFG_CREATE_SHORTCUT: usize = 15;
 pub const CFG_CONFIRM_INSTALL: usize = 16;
 pub const CFG_ASK_SHORTCUT: usize = 17;
@@ -3166,7 +3168,18 @@ pub const CFG_ENCRYPT_APP: usize = 29;
 pub const CFG_DECRYPT_APP: usize = 30;
 /// Explains why an alias has no encryption of its own (per-app, inert).
 pub const CFG_ENCRYPT_ALIAS: usize = 31;
-pub const CFG_LEN: usize = 32;
+/// Which GPU the app renders on. Like the rows above it, its storage index sits
+/// past every other row so nothing needs renumbering; SANDBOX_SECTIONS puts it
+/// on screen next to the other hardware rows.
+pub const CFG_GPU: usize = 32;
+/// The Save button of the per-app Config screen. Not a row: an identity the
+/// key handler and the renderer compare against, exactly like [`CFG_SAVE`] on
+/// the global screen. It has to be a value no row can take, which is why it
+/// sits past every row index rather than being counted from the rows on screen
+/// — a counted index lands on a real row as soon as the row set changes, and
+/// then Enter on that row saves instead of opening its picker.
+pub const CFG_APP_SAVE: usize = 33;
+pub const CFG_LEN: usize = 34;
 
 /// Which encryption rows a per-app config screen offers.
 ///
@@ -3216,13 +3229,13 @@ impl EncryptionRows {
     }
 }
 
-/// Index of the Save button in the per-app Config screen. Shifts down as
-/// optional row groups (wine game, encryption) appear.
-pub fn app_cfg_save_idx(has_wine_game: bool, encryption: EncryptionRows) -> usize {
-    // The Save button is drawn right after the last selectable row, so its
-    // position is simply the number of navigable rows. Deriving it from
-    // config_nav_order keeps it correct as rows are added or removed.
-    config_nav_order(false, has_wine_game, encryption).len()
+/// Identity of the Save button in the per-app Config screen: [`CFG_APP_SAVE`],
+/// whatever rows the screen is showing.
+///
+/// It is drawn pinned to the bottom of the popup rather than at an index, so
+/// nothing here needs to know how many rows precede it.
+pub fn app_cfg_save_idx() -> usize {
+    CFG_APP_SAVE
 }
 
 /// The sandbox config rows grouped into labelled sections, in display order.
@@ -3231,7 +3244,7 @@ pub fn app_cfg_save_idx(has_wine_game: bool, encryption: EncryptionRows) -> usiz
 /// ↑/↓ navigation walk this table, letting the on-screen order and section
 /// separators differ from the storage layout.
 pub const SANDBOX_SECTIONS: &[(&str, &[usize])] = &[
-    ("Hardware settings", &[CFG_SPOOF_CPUINFO, CFG_RAM_LIMIT]),
+    ("Hardware settings", &[CFG_SPOOF_CPUINFO, CFG_GPU, CFG_RAM_LIMIT]),
     (
         "Privacy settings",
         &[CFG_NETWORK, CFG_CAMERA, CFG_MICROPHONE, CFG_AUDIO, CFG_USB, CFG_SHARES, CFG_AVAHI],
@@ -3345,7 +3358,7 @@ fn on_config(app: &mut App, code: KeyCode) {
         Screen::Config { app_name, .. } => app.encryption_rows_for(app_name),
         _ => EncryptionRows::Hidden,
     };
-    let save_idx = app_cfg_save_idx(has_wg, is_enc);
+    let save_idx = app_cfg_save_idx();
 
     let Screen::Config { app_name, config, selected } = &mut app.screen else { return };
 
@@ -3534,6 +3547,8 @@ pub fn setting_options(idx: usize) -> Vec<&'static str> {
             v
         }
         CFG_SPOOF_MACHINE_ID => vec!["system", "random", "sample", "input"],
+        // "auto" plus one entry per GPU the machine actually has.
+        CFG_GPU => crate::gpu::menu_labels().to_vec(),
         CFG_SPOOF_TERMINAL => vec!["off", "detect"],
         CFG_SPOOF_UPTIME => vec!["system", "1 hour", "1 day", "1 week", "custom"],
         CFG_RAM_LIMIT => vec!["none", "512 MB", "1 GB", "2 GB", "4 GB", "8 GB", "custom"],
@@ -3575,6 +3590,7 @@ pub fn setting_title(idx: usize) -> &'static str {
         20 => "Layout",
         CFG_SPOOF_UPTIME => "Spoof uptime",
         CFG_USB => "USB / removable media",
+        CFG_GPU => "GPU",
         CFG_PASSWORD_SOURCE => "Container password",
         CFG_MASTER_PASSWORD => "Master password",
         CFG_MASTER_SHOW => "Stored passwords",
@@ -3612,6 +3628,7 @@ pub fn setting_description(idx: usize) -> &'static str {
         19 => "Colour palette for the TUI (independent of Layout). Applies immediately.\n\n• default — cool: cyan accent on a dark-blue selection\n• amber   — warm: amber accent on a dark-brown selection\n• matrix  — green-phosphor: the body text itself is green, not white",
         20 => "Structural layout for the TUI (independent of Colour theme). Applies immediately.\n\n• default — horizontal tab strip on top, single-line borders\n• sidebar — vertical tab bar down the left, double-line borders, prompt-style cursor\n• bottom  — horizontal tab strip along the bottom, rounded borders, chevron cursor",
         CFG_SPOOF_UPTIME => "Report a fake system uptime inside the sandbox.\n\nFools fastfetch's 'Uptime', the uptime/w commands, and any sysinfo(2)/CLOCK_BOOTTIME reader via a /proc/uptime overlay plus an LD_PRELOAD shim. Time still advances from the fake value.\n\n• system — show the real uptime\n• 1 hour / 1 day / 1 week — fixed presets\n• custom — type a duration (3d4h, 90m) or bare seconds",
+        CFG_GPU => "Which GPU this app renders on.\n\nSets DRI_PRIME and MESA_VK_DEVICE_SELECT for Mesa, and the __NV_PRIME/__GLX_VENDOR_LIBRARY_NAME/__VK_LAYER_NV_optimus trio when an NVIDIA card is involved — each driver stack reads its own. The other GPUs' render nodes (/dev/dri/renderD*) are then hidden from the sandbox, so an app that enumerates devices itself cannot pick one of them anyway; the display path (/dev/dri/card*) is left alone.\n\n• auto — let the driver choose (the integrated GPU, on a hybrid machine)\n• <card> — pin the app to that GPU\n\nOn a machine with one GPU this changes nothing.",
         CFG_USB => "Make USB / removable drives visible inside the sandbox.\n\nBinds the mount roots the desktop (or udisks/udevil/pmount) uses — /run/media, /media and /mnt — so drives show up in the app's file dialogs. Drives plugged in AFTER the app starts appear live, because the host mounts propagate into the sandbox.\n\n• on  — expose removable media\n• off — hide it (default; better isolation)",
         CFG_MASTER_PASSWORD => "The one password that protects every stored container password.\n\nApps set to 'master' keep their container password in an encrypted store (~/.wryayer/.passwords.vault, Argon2id + AES-256-GCM). You type this master password once per boot; after that those apps unlock without prompting.\n\nPress Enter to create it, or to change it if it already exists. Changing it re-encrypts the store — the passwords inside are unaffected, so your containers keep working.",
         CFG_LOCK_ON_EXIT => "Unmount this app's container when the app exits.\n\n• on  — the files become unreadable again the moment you close the app (default). Each launch mounts the container, which needs sudo.\n• off — leave it mounted until you lock it by hand. No sudo prompt per launch, but the files stay readable for the rest of the session.",
@@ -3636,6 +3653,14 @@ pub fn option_description(setting_idx: usize, choice_idx: usize) -> &'static str
             c if c == 1 + n => "custom — Open a field-by-field configurator to build your own CPU (vendor, model name, family/model/stepping, cores, threads, MHz, cache). Spoofs both /proc/cpuinfo and CPUID.",
             _ => "edit — Open a text editor to write a fully custom /proc/cpuinfo (pre-filled with your real CPU).",
         };
+    }
+    // The GPU row's choices are the machine's own hardware, so they are
+    // described from the scan rather than from a table written here.
+    if setting_idx == CFG_GPU {
+        return crate::gpu::menu_descriptions()
+            .get(choice_idx)
+            .copied()
+            .unwrap_or("No description available.");
     }
     match (setting_idx, choice_idx) {
         // Network
@@ -3796,6 +3821,12 @@ pub fn setting_current(config: &AppConfig, idx: usize) -> usize {
         },
         CFG_SPOOF_TERMINAL => usize::from(config.spoof_terminal),
         CFG_USB => if config.usb { 0 } else { 1 },
+        // A GPU that is no longer present has no row of its own to sit on, so
+        // the picker shows "auto" — which is what the launcher falls back to.
+        CFG_GPU => match config.gpu.as_deref() {
+            None => 0,
+            Some(id) => crate::gpu::all().iter().position(|g| g.matches(id)).map_or(0, |p| p + 1),
+        },
         CFG_PASSWORD_SOURCE => match config.password_source {
             PasswordSource::Prompt => 0,
             PasswordSource::Master => 1,
@@ -3886,6 +3917,8 @@ pub fn apply_setting(config: &mut AppConfig, idx: usize, choice: usize) {
         // (11, 5) = "input" — handled by on_option_picker which opens TextInput
         (12, 0) => config.spoof_terminal = false,
         (12, 1) => config.spoof_terminal = true,
+        (CFG_GPU, 0) => config.gpu = None,
+        (CFG_GPU, c) => config.gpu = crate::gpu::all().get(c - 1).map(|g| g.id.clone()),
         (CFG_USB, 0) => config.usb = true,
         (CFG_USB, 1) => config.usb = false,
         (CFG_PASSWORD_SOURCE, 0) => config.password_source = PasswordSource::Prompt,
@@ -5343,7 +5376,7 @@ mod op_log_tests {
             EncryptionRows::Manage,
             EncryptionRows::Alias,
         ] {
-            let save = app_cfg_save_idx(false, rows);
+            let save = app_cfg_save_idx();
             let mut at = 0;
             let mut seen_save = false;
             for _ in 0..save + 2 {
@@ -5355,19 +5388,35 @@ mod op_log_tests {
     }
 
     #[test]
-    fn the_save_button_moves_down_as_encryption_rows_appear() {
-        // The Save index is derived from the row count; a stale one would make
-        // Enter on Save cycle a setting instead.
-        let hidden = app_cfg_save_idx(false, EncryptionRows::Hidden);
-        assert_eq!(app_cfg_save_idx(false, EncryptionRows::Offer), hidden + 1);
-        assert_eq!(app_cfg_save_idx(false, EncryptionRows::Manage), hidden + 3);
+    fn the_save_button_never_shares_an_index_with_a_row() {
+        // This is the whole reason Save has an index of its own: when it was
+        // counted from the rows on screen, adding a row moved it onto one — and
+        // Enter on that row saved and closed instead of opening its picker.
+        for wine in [false, true] {
+            for rows in [
+                EncryptionRows::Hidden,
+                EncryptionRows::Offer,
+                EncryptionRows::Manage,
+                EncryptionRows::Alias,
+            ] {
+                let save = app_cfg_save_idx();
+                let order = config_nav_order(false, wine, rows);
+                assert!(
+                    !order.contains(&save),
+                    "Save ({save}) collides with a row for wine={wine} {rows:?}: {order:?}",
+                );
+            }
+        }
+        // And the global screen's own Save is likewise not one of its rows.
+        let global = config_nav_order(true, false, EncryptionRows::Hidden);
+        assert!(!global.contains(&CFG_SAVE), "{global:?}");
     }
 
     #[test]
     fn navigation_reaches_every_encryption_row_and_then_save() {
         // Rows the renderer draws but ↑/↓ cannot reach are invisible in
         // practice — this is how the Encryption section shipped empty once.
-        let save = app_cfg_save_idx(false, EncryptionRows::Manage);
+        let save = app_cfg_save_idx();
         let mut seen = vec![];
         let mut at = 0;
         for _ in 0..save + 2 {

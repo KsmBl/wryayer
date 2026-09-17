@@ -68,7 +68,7 @@ tagged `[repo]` or `[aur]`). Press `Space` to mark several packages, then
 ![wryayer TUI — Install tab](docs/screenshots/install.png)
 
 **Settings tab** — global defaults inherited by every newly installed app:
-network and device toggles, temp mode, identity spoofing, RAM limit, the
+network and device toggles, temp mode, identity spoofing, GPU, RAM limit, the
 install-behaviour switches (**Confirm install** / **Ask shortcut** / **Clean
 cache**), the **master password** for [encrypted containers](#encrypted-containers),
 and the **TUI theme** (`default`, `amber`, or `matrix` colours) and **layout**
@@ -83,7 +83,8 @@ and option list on the right.
 
 **Per-app config** — press `s` on any installed app to override the global
 defaults for just that app: network/device toggles, temp mode, identity
-spoofing, RAM limit, **Avahi mode**, and (for wine games) the exe and prefix.
+spoofing, **GPU**, RAM limit, **Avahi mode**, and (for wine games) the exe and
+prefix.
 Changes are saved to that app's own `config.ini`.
 
 A plain app's config also offers to move it into an encrypted container —
@@ -775,6 +776,12 @@ wryayer config firefox tempmode ramdisk   # private in-memory /tmp
 wryayer config firefox ramlimit 2048      # limit to 2 GiB RAM
 wryayer config firefox ramlimit none      # remove RAM limit
 
+# Which GPU an app renders on
+wryayer gpu                               # list this machine's GPUs and their ids
+wryayer config blender gpu nvidia         # pin blender to the NVIDIA card
+wryayer config blender gpu pci-0000_01_00_0
+wryayer config blender gpu auto           # back to whatever the driver picks
+
 # Shared directories (bind-mounted read-write into the sandbox)
 wryayer config firefox share add ~/Documents
 wryayer config firefox share add ~/Downloads
@@ -793,6 +800,7 @@ wryayer config firefox share list
 | `microphone` | `on` `off` | `on` | Mask ALSA capture devices (see caveat below) |
 | `audio` | `on` `off` | `on` | Mask ALSA + PipeWire/PulseAudio sockets |
 | `usb` | `on` `off` | `off` | Bind the removable-media roots (`/run/media`, `/media`, `/mnt`) into the sandbox so USB drives — including ones mounted after launch — are visible to the app |
+| `gpu` | `auto`, or a GPU id / name from `wryayer gpu` | `auto` | Which GPU the app renders on (see below) |
 | `share add <path>` | Any existing directory | — | Bind-mount `<path>` read-write inside the sandbox |
 | `ramlimit <MiB\|none>` | Integer (MiB) or `none` | `none` | Hard cap on RAM **and** swap combined, enforced via `systemd-run --scope -p MemoryMax=NM -p MemorySwapMax=0` (requires systemd). Both limits are necessary — without `MemorySwapMax=0` the kernel silently offloads pages to swap (including zram), letting the app exceed the cap. |
 | `avahi` | `stub` `host` `off` | `stub` | How zeroconf is answered: `stub` gives the sandbox a private system bus owning `org.freedesktop.Avahi`, `host` best-effort starts the host daemon, `off` leaves apps to print a harmless "Daemon not running" |
@@ -808,6 +816,49 @@ the key names in the table are the ones the file uses. The install-behaviour key
 `ask_shortcut`, `clean_cache`) and the TUI's `theme` / `layout` are written into
 every generated `config.ini`, but only ever read from the global
 `~/.wryayer/defaults.ini` — set them in the Settings tab.
+
+### Choosing a GPU
+
+On a hybrid laptop every app renders on the integrated GPU unless it is told
+otherwise, and *how* you tell it depends on the driver stack. `wryayer gpu`
+lists what the machine has:
+
+```fish
+wryayer gpu
+```
+
+```
+pci-0000_00_02_0
+  Intel WhiskeyLake-U GT2 [UHD Graphics 620]
+  driver i915 · card1 · render node /dev/dri/renderD128
+pci-0000_01_00_0
+  NVIDIA GA107M [GeForce RTX 3050 Mobile]
+  driver nvidia · card2 · render node /dev/dri/renderD129
+```
+
+The id is the stable name (a PCI address, unlike `cardN`, which follows probe
+order), but anything that identifies the card works — `nvidia`, `card2`, or part
+of the model name:
+
+```fish
+wryayer config blender gpu nvidia
+```
+
+At launch wryayer then sets `DRI_PRIME` and `MESA_VK_DEVICE_SELECT` for Mesa,
+and adds `__NV_PRIME_RENDER_OFFLOAD`, `__GLX_VENDOR_LIBRARY_NAME` and
+`__VK_LAYER_NV_optimus` whenever an NVIDIA card is in the picture — each stack
+reads its own variables, and the NVIDIA one only steps aside when told to.
+
+Environment variables are a request, though, and an app that opens `/dev/dri`
+itself (anything Chromium-based) can ignore them. So the render nodes of the
+other GPUs — `/dev/dri/renderD*` — are masked inside the sandbox, which is the
+part that makes the setting stick. Primary nodes (`/dev/dri/card*`) are left
+alone: that is how the display server hands out buffers, and an app rendering
+elsewhere still has to present through them.
+
+If the pinned card isn't there at launch — an eGPU unplugged, a driver that
+failed to load — wryayer says so and falls back to `auto` rather than refusing
+to start. The setting is kept, so it takes effect again when the card comes back.
 
 ## Encrypted containers
 
@@ -1272,6 +1323,7 @@ The config is stored as a human-readable INI file at `~/.wryayer/<app>/config.in
 - [x] **Global default settings** — Settings tab in TUI and `~/.wryayer/defaults.ini` set defaults inherited by all new apps
 - [x] **Multi-select install** — mark multiple search results with `Space`, install them all sequentially with `Enter`; marks persist across searches
 - [x] **Update all** — check every app for updates on TUI start and update the out-of-date ones with `Shift+U`
+- [x] **GPU selection** — pin an app to one GPU (`wryayer gpu` lists them, `config <app> gpu <name>` sets it): the driver env vars for Mesa and NVIDIA, plus masking the other cards' render nodes so an app that enumerates `/dev/dri` itself cannot ignore the choice
 - [ ] **Per-app env var overrides** — let users set `LANG`, `QT_SCALE_FACTOR`, etc. in `config.ini`
 - [ ] **Dependency graph viewer** — TUI screen showing the full package tree for an installed app
 - [ ] **Auto-snapshot on update** — capture a snapshot automatically before each update so failures can be undone with one keystroke

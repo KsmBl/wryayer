@@ -405,6 +405,21 @@ fn build_form(form: &gtk::Box, cfg: AppConfig, is_global: bool, app_name: Option
         _ => "",
     };
     let spoof_cpuinfo = entry(form, "…or custom cpuinfo file", cpu_custom_init);
+    // GPU: "Automatic" plus whatever cards this machine has. A stored card that
+    // is no longer plugged in falls back to Automatic, which is what the
+    // launcher does with it too.
+    let gpus = crate::gpu::all();
+    let gpu_labels: Vec<String> = std::iter::once("Automatic (driver picks)".to_string())
+        .chain(gpus.iter().map(|g| g.label()))
+        .collect();
+    let gpu_refs: Vec<&str> = gpu_labels.iter().map(String::as_str).collect();
+    let gpu_sel = cfg
+        .gpu
+        .as_deref()
+        .and_then(|id| gpus.iter().position(|g| g.matches(id)))
+        .map_or(0, |p| p as u32 + 1);
+    let gpu = dropdown(form, "GPU", &gpu_refs, gpu_sel);
+
     let ram = entry(form, "RAM limit (e.g. 2 GB)", &cfg.ram_limit.map(format_ram_limit).unwrap_or_default());
 
     header(form, "Privacy settings");
@@ -732,6 +747,10 @@ fn build_form(form: &gtk::Box, cfg: AppConfig, is_global: bool, app_name: Option
         c.spoof_terminal = spoof_terminal.is_active();
         c.spoof_uptime = crate::config::parse_uptime(&spoof_uptime.text());
         c.ram_limit = parse_ram_limit(&ram.text());
+        c.gpu = match gpu.selected() {
+            0 => None,
+            n => crate::gpu::all().get((n - 1) as usize).map(|g| g.id.clone()),
+        };
         c.shared_dirs = shared_state.borrow().clone();
 
         // Bound apps only exist on the per-app form (global has no such section).
