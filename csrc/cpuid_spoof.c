@@ -94,11 +94,13 @@ struct lc_raw_front {
     uint32_t basic_cpuid[32][4];   /* leaves 0x00000000..0x0000001F */
     uint32_t ext_cpuid[32][4];     /* leaves 0x80000000..0x8000001F */
 };
-/* struct cpu_raw_data_array_t: { bool with_affinity; int32_t num_raw;
- * cpu_raw_data_t* raw; } — on LP64 num_raw is at offset 4, raw at offset 8. */
+/* struct cpu_raw_data_array_t: { bool with_affinity; logical_cpu_t num_raw;
+ * cpu_raw_data_t* raw; }. logical_cpu_t is uint16_t, so on LP64 num_raw sits
+ * at offset 2 and raw at offset 8. Reading it as a 32-bit int at offset 4 picks
+ * up padding instead — a garbage count that walks off the end of the array. */
 struct lc_raw_array {
     unsigned char with_affinity;
-    int32_t num_raw;
+    uint16_t num_raw;
     struct lc_raw_front *raw;
 };
 typedef int (*get_raw_fn)(struct lc_raw_front *);
@@ -394,7 +396,7 @@ int cpuid_get_raw_data(void *data) {
  * within an entry). Returns 0 if it can't be found. Safe: the first match is at
  * the true stride, which is entry 1's offset and therefore inside the (>=2
  * entry) allocation, so the scan never reads past it. */
-static size_t find_stride(struct lc_raw_front *base, int32_t num) {
+static size_t find_stride(struct lc_raw_front *base, uint32_t num) {
     if (num < 2) return 0;
     uint32_t s0 = base->basic_cpuid[0][1];
     uint32_t s1 = base->basic_cpuid[0][3];
@@ -423,16 +425,16 @@ int cpuid_get_all_raw_data(void *arrv) {
 
     struct lc_raw_array *arr = (struct lc_raw_array *)arrv;
     struct lc_raw_front *base = arr->raw;
-    int32_t num = arr->num_raw;
-    if (!base || num < 1) return rc;
+    uint32_t num = arr->num_raw;
+    if (rc != 0 || !base || num < 1) return rc;
     if (num == 1) { patch_leaves(base, g_have_topo ? 0 : -1); return rc; }
 
     size_t stride = find_stride(base, num);
     if (!stride) { patch_leaves(base, -1); return rc; } /* can't walk it safely */
 
-    for (int32_t i = 0; i < num; i++) {
+    for (uint32_t i = 0; i < num; i++) {
         struct lc_raw_front *r = (struct lc_raw_front *)((char *)base + (size_t)i * stride);
-        patch_leaves(r, g_have_topo ? i : -1);
+        patch_leaves(r, g_have_topo ? (int)i : -1);
     }
     return rc;
 }
