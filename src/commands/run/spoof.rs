@@ -125,11 +125,59 @@ pub(super) fn spoofed_thread_count(config: &AppConfig, spoof_dir: &Path) -> Opti
     (n >= 1).then_some(n)
 }
 
+/// Rewrites a file the sandbox sees through a bind mount while the app may be
+/// reading it. The bind pins the inode, so the file has to change in place — a
+/// rename would leave the sandbox on the old one — and `fs::write` won't do:
+/// it truncates first, and a reader landing in that gap gets an empty file.
+/// libuv's `uv_cpu_info` (Node's `os.cpus()`, polled by Electron apps such as
+/// Discord) aborts the whole process on an empty `/proc/stat`. So each update
+/// overwrites from offset 0 without truncating, and a shorter text is padded
+/// with spaces at the end of its last line: the file never shrinks, and never
+/// reads as empty or cut short.
+struct LiveFile {
+    file: std::fs::File,
+    len: usize,
+}
+
+impl LiveFile {
+    fn open(path: &Path) -> Option<Self> {
+        let file = std::fs::OpenOptions::new().write(true).open(path).ok()?;
+        let len = file.metadata().ok()?.len() as usize;
+        Some(Self { file, len })
+    }
+
+    fn update(&mut self, text: String) {
+        use std::os::unix::fs::FileExt;
+        let text = pad_to_len(text, self.len);
+        if self.file.write_all_at(text.as_bytes(), 0).is_ok() {
+            self.len = text.len();
+        }
+    }
+}
+
+/// Pad `text` with spaces before its final newline until it is `len` bytes.
+fn pad_to_len(mut text: String, len: usize) -> String {
+    if text.len() >= len {
+        return text;
+    }
+    let newline = text.ends_with('\n');
+    if newline {
+        text.pop();
+    }
+    let body = len - usize::from(newline);
+    text.extend(std::iter::repeat_n(' ', body - text.len()));
+    if newline {
+        text.push('\n');
+    }
+    text
+}
+
 /// Rewrite the spoofed `/proc/stat` at `path` from the live host stats every
 /// ~500 ms until `stop` is set, so per-CPU usage stays current in the sandbox.
 pub(super) fn proc_stat_updater_loop(path: PathBuf, threads: u32, stop: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+    let Some(mut live) = LiveFile::open(&path) else { return };
     while !stop.load(std::sync::atomic::Ordering::Relaxed) {
-        let _ = std::fs::write(&path, spoof_proc_stat(threads));
+        live.update(spoof_proc_stat(threads));
         for _ in 0..5 {
             if stop.load(std::sync::atomic::Ordering::Relaxed) {
                 return;
@@ -364,13 +412,14 @@ pub(super) fn meminfo_updater_loop(
 ) {
     use std::sync::atomic::Ordering;
     let Some(mem_current) = find_scope_memory_current(pid, kib) else { return };
+    let Some(mut live) = LiveFile::open(&meminfo_path) else { return };
     let total_kb = kib; // /proc/meminfo counts in KiB, which is our unit
     while !stop.load(Ordering::Relaxed) {
         let Ok(s) = std::fs::read_to_string(&mem_current) else { break };
         if let Ok(used_bytes) = s.trim().parse::<u64>() {
             let used_kb = used_bytes / 1024;
             let free_kb = total_kb.saturating_sub(used_kb);
-            let _ = std::fs::write(&meminfo_path, format_meminfo(total_kb, free_kb));
+            live.update(format_meminfo(total_kb, free_kb));
         }
         std::thread::sleep(std::time::Duration::from_millis(500));
     }
@@ -418,5 +467,17 @@ pub(super) fn mask_audio_sockets(cmd: &mut Command) {
         if std::path::Path::new(&path).exists() {
             cmd.args(["--bind", "/dev/null", &path]);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pad_to_len;
+
+    #[test]
+    fn pad_keeps_length_and_final_newline() {
+        assert_eq!(pad_to_len("a b\nc\n".into(), 9), "a b\nc   \n");
+        assert_eq!(pad_to_len("abc".into(), 5), "abc  ");
+        assert_eq!(pad_to_len("abcdef\n".into(), 3), "abcdef\n");
     }
 }
