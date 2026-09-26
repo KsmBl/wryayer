@@ -137,6 +137,17 @@ pub fn run(app_name: &str, bin: Option<&str>, args: &[String]) -> Result<()> {
 
     let app_root_str = app_root.to_string_lossy().into_owned();
 
+    // An earlier `wryayer dedup` may have left soname links pointing at temp
+    // names that no longer exist; the next ldconfig in the tree then breaks
+    // even /bin/sh. Only the library dirs matter here, which keeps it cheap.
+    let healed: usize = ["usr/lib", "usr/lib32"]
+        .iter()
+        .map(|d| crate::commands::dedup::heal_leftovers(&app_root.join(d), false))
+        .sum();
+    if healed > 0 {
+        run_ldconfig(&app_root);
+    }
+
     // Pre-launch: repair any missing sonames in the sandbox home/ tree.
     // Catches second-and-later launches after a self-updating app (e.g.
     // Discord) already wrote its downloaded binary to home/.config/... during

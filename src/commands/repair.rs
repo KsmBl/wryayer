@@ -24,6 +24,12 @@ pub fn run(app_name: &str) -> Result<()> {
         eprintln!("  Repaired permissions on {fixed} file(s)");
     }
 
+    let healed = crate::commands::dedup::heal_leftovers(&app_dir, true);
+    if healed > 0 {
+        eprintln!("  Cleared {healed} leftover(s) of an earlier dedup");
+        run_ldconfig(&app_dir);
+    }
+
     eprintln!("Scanning {app_name} for missing shared library dependencies...");
 
     let missing = find_missing_sonames(&app_dir)?;

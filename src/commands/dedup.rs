@@ -10,6 +10,10 @@ use std::path::{Path, PathBuf};
 const SKIP_DIRS: &[&str] = &["home", ".tmp", ".snapshots"];
 const SKIP_FILES: &[&str] = &[".manifest.toml", "config.ini", ".instance.pid"];
 
+/// Suffix of the sibling a duplicate is linked to before it is renamed over
+/// the duplicate. Nothing carrying it is ever meant to outlive a link.
+const TMP_SUFFIX: &str = ".wry_dedup";
+
 /// One candidate file, identified the way the kernel identifies files: a
 /// filesystem plus an inode number within it.
 ///
@@ -46,6 +50,11 @@ pub fn run(verbose: bool) -> Result<()> {
 
     for app in &apps {
         let dir = app_dir(&app.app.name)?;
+        // Earlier runs left temp links behind; clear them before they are
+        // indexed as files of their own.
+        if heal_leftovers(&dir, true) > 0 {
+            crate::commands::install::run_ldconfig(&dir);
+        }
         collect_files(&dir, &mut by_size, &mut total_files);
     }
 
@@ -264,7 +273,7 @@ fn collect_files(dir: &Path, by_size: &mut HashMap<u64, Vec<FileRef>>, count: &m
 
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if SKIP_FILES.iter().any(|&s| s == name.as_ref()) {
+        if SKIP_FILES.iter().any(|&s| s == name.as_ref()) || name.ends_with(TMP_SUFFIX) {
             continue;
         }
 
@@ -327,8 +336,14 @@ fn files_equal(a: &Path, b: &Path) -> bool {
 /// sibling temp file + rename so the path is never absent.
 pub fn atomic_hard_link(canonical: &Path, dup: &Path) -> Result<()> {
     let mut tmp_name = dup.file_name().unwrap_or_default().to_os_string();
-    tmp_name.push(".wry_dedup");
+    tmp_name.push(TMP_SUFFIX);
     let tmp = dup.parent().unwrap_or(Path::new(".")).join(tmp_name);
+
+    if let (Ok(a), Ok(b)) = (std::fs::metadata(canonical), std::fs::symlink_metadata(dup)) {
+        if (a.dev(), a.ino()) == (b.dev(), b.ino()) {
+            return Ok(());
+        }
+    }
 
     let _ = std::fs::remove_file(&tmp);
     std::fs::hard_link(canonical, &tmp).map_err(|e| {
@@ -338,7 +353,62 @@ pub fn atomic_hard_link(canonical: &Path, dup: &Path) -> Result<()> {
         let _ = std::fs::remove_file(&tmp);
         anyhow::anyhow!("rename {} → {}: {e}", tmp.display(), dup.display())
     })?;
+    // rename(2) succeeds without doing anything when both names already are
+    // one file, which would leave the temp name behind. ldconfig reads such a
+    // leftover as a newer library version and points the soname link at it.
+    let _ = std::fs::remove_file(&tmp);
     Ok(())
+}
+
+/// Clear what earlier dedup runs left in `dir`: temp links that were never
+/// renamed away, and soname symlinks ldconfig pointed at them — which dangle
+/// as soon as the temp name is gone, and take every program needing that
+/// library down with them (`/bin/sh` losing libreadline, for one).
+///
+/// A leftover whose real name is missing is the only copy, so it is moved
+/// into place rather than deleted. Returns how many entries were fixed; the
+/// caller rebuilds the library cache when that is non-zero.
+pub fn heal_leftovers(dir: &Path, recursive: bool) -> usize {
+    let Ok(rd) = std::fs::read_dir(dir) else { return 0 };
+    let mut fixed = 0;
+    let mut links = Vec::new();
+    for entry in rd.flatten() {
+        let Ok(meta) = entry.metadata() else { continue };
+        let path = entry.path();
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if meta.is_dir() {
+            if recursive && name != "home" && name != ".tmp" {
+                fixed += heal_leftovers(&path, true);
+            }
+        } else if meta.file_type().is_symlink() {
+            links.push(path);
+        } else if let Some(real) = name.strip_suffix(TMP_SUFFIX) {
+            let real = dir.join(real);
+            let done = if real.symlink_metadata().is_ok() {
+                std::fs::remove_file(&path)
+            } else {
+                std::fs::rename(&path, &real)
+            };
+            if done.is_ok() {
+                fixed += 1;
+            }
+        }
+    }
+    // Symlinks last, so a leftover moved into place above is a valid target.
+    for link in links {
+        let Ok(target) = std::fs::read_link(&link) else { continue };
+        let Some(real) = target.to_str().and_then(|t| t.strip_suffix(TMP_SUFFIX)) else { continue };
+        let real = PathBuf::from(real);
+        let resolved = if real.is_absolute() { real.clone() } else { dir.join(&real) };
+        if resolved.symlink_metadata().is_err() {
+            continue;
+        }
+        if std::fs::remove_file(&link).is_ok() && std::os::unix::fs::symlink(&real, &link).is_ok() {
+            fixed += 1;
+        }
+    }
+    fixed
 }
 
 // ── Formatting ────────────────────────────────────────────────────────────────
@@ -439,6 +509,43 @@ mod tests {
         let lines = summary_lines(1, 512, 2, 0, 0);
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("(2 skipped)"), "{}", lines[0]);
+    }
+
+    fn tmp_tree(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("wry-dedup-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn linking_an_already_linked_file_leaves_no_temp_name() {
+        let d = tmp_tree("nolink");
+        std::fs::write(d.join("a.so"), b"x").unwrap();
+        std::fs::hard_link(d.join("a.so"), d.join("b.so")).unwrap();
+        atomic_hard_link(&d.join("a.so"), &d.join("b.so")).unwrap();
+        assert!(!d.join("b.so.wry_dedup").exists());
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn leftovers_are_removed_and_soname_links_repointed() {
+        let d = tmp_tree("heal");
+        std::fs::write(d.join("libr.so.8.3"), b"x").unwrap();
+        std::fs::hard_link(d.join("libr.so.8.3"), d.join("libr.so.8.3.wry_dedup")).unwrap();
+        std::os::unix::fs::symlink("libr.so.8.3.wry_dedup", d.join("libr.so.8")).unwrap();
+        // The dangling case: the leftover it pointed at is already gone.
+        std::fs::write(d.join("libt.so.3.0"), b"y").unwrap();
+        std::os::unix::fs::symlink("libt.so.3.0.wry_dedup", d.join("libt.so.3")).unwrap();
+        // A leftover with no real name is the only copy and is kept.
+        std::fs::write(d.join("lone.wry_dedup"), b"z").unwrap();
+
+        assert_eq!(heal_leftovers(&d, false), 4);
+        assert!(!d.join("libr.so.8.3.wry_dedup").exists());
+        assert_eq!(std::fs::read_link(d.join("libr.so.8")).unwrap(), PathBuf::from("libr.so.8.3"));
+        assert_eq!(std::fs::read_link(d.join("libt.so.3")).unwrap(), PathBuf::from("libt.so.3.0"));
+        assert_eq!(std::fs::read(d.join("lone")).unwrap(), b"z");
+        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
