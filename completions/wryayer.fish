@@ -99,6 +99,22 @@ function __wryayer_config_has_app
     return 1
 end
 
+function __wryayer_monitors --description 'Monitor connector names'
+    for dir in /sys/class/drm/card*-*
+        test "$(cat $dir/status 2>/dev/null)" = connected
+        and string replace -r '^card[0-9]+-' '' (basename $dir)
+    end
+end
+
+function __wryayer_popup_themes --description 'Popup themes: auto, gtk, tilewin and the tileWin themes'
+    printf '%s\n' auto gtk tilewin
+    for base in ~/.config/tileWin/themes /usr/local/share/tileWin/themes /usr/share/tileWin/themes
+        for conf in $base/*/theme.conf
+            basename (dirname $conf)
+        end
+    end
+end
+
 # ── Disable file completions globally ─────────────────────────────────────────
 complete -c wryayer -f
 
@@ -193,14 +209,27 @@ complete -c wryayer -n '__fish_seen_subcommand_from snapshot-prune' -l keep \
 complete -c wryayer -n '__fish_seen_subcommand_from dedup' -l verbose -s v -d 'Print every file that gets linked'
 
 # ── popup (the command itself is listed only in GUI builds, by install.sh) ─────
-complete -c wryayer -n '__fish_seen_subcommand_from popup' -l position -x \
+set -l popup_opts '__fish_seen_subcommand_from popup; and not __fish_seen_subcommand_from configurator'
+complete -c wryayer -n "$popup_opts" -a configurator -d 'Set the popup up in a window with a preview'
+complete -c wryayer -n "$popup_opts" -l monitor -x -a '(__wryayer_monitors)' -d 'Monitor to open on'
+complete -c wryayer -n "$popup_opts" -l position -x \
     -a 'center top bottom left right top-left top-right bottom-left bottom-right' \
     -d 'Where it opens (or "X,Y")'
-complete -c wryayer -n '__fish_seen_subcommand_from popup' -l width  -x -d 'Width in pixels, or a share of the screen like 40%'
-complete -c wryayer -n '__fish_seen_subcommand_from popup' -l height -x -d 'Height in pixels, or a share of the screen like 50%'
-complete -c wryayer -n '__fish_seen_subcommand_from popup' -l animation -x \
+complete -c wryayer -n "$popup_opts" -l margin -x -d 'Distance in pixels from the screen edge'
+complete -c wryayer -n "$popup_opts" -l width  -x -d 'Width in pixels, or a share of the screen like 40%'
+complete -c wryayer -n "$popup_opts" -l height -x -d 'Height in pixels, or a share of the screen like 50%'
+complete -c wryayer -n "$popup_opts" -l animation -x \
     -a 'auto none fade slide-down slide-up slide-left slide-right swing-down swing-up swing-left swing-right' \
     -d 'How it appears'
+complete -c wryayer -n "$popup_opts" -l animation-ms -x -d 'Length of the animation in milliseconds'
+complete -c wryayer -n "$popup_opts" -l log-pane -x -a 'right bottom off' -d 'Where running apps\' output is shown'
+complete -c wryayer -n "$popup_opts" -l theme -x -a '(__wryayer_popup_themes)' -d 'Colours and fonts'
+complete -c wryayer -n "$popup_opts" -l scheme -x -a 'auto light dark' -d 'Colour scheme'
+complete -c wryayer -n "$popup_opts" -l font -x -d 'Font, e.g. "Noto Sans 11"'
+complete -c wryayer -n "$popup_opts" -l icon-size -x -d 'Icon size in pixels'
+complete -c wryayer -n "$popup_opts" -l close-after-launch -x -a 'true false' -d 'Close after launching an app'
+complete -c wryayer -n "$popup_opts" -l close-on-focus-loss -x -a 'true false' -d 'Close when another window is focused'
+complete -c wryayer -n "$popup_opts" -l keyboard -x -a 'exclusive on-demand' -d 'Wayland keyboard grab'
 
 # ── completions ───────────────────────────────────────────────────────────────
 complete -c wryayer -n '__fish_seen_subcommand_from completions' \

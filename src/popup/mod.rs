@@ -207,13 +207,146 @@ struct Raw {
     resident: Option<bool>,
 }
 
-/// What `wryayer popup` was told on the command line; each overrides the file.
-#[derive(Debug, Default, Clone)]
+/// The settings that can also be given on the command line, by their key in
+/// `popup.toml`; the flag is the key with dashes (`--animation-ms`).
+/// `resident` is missing on purpose: it describes the process, not one open.
+pub const CLI_KEYS: &[&str] = &[
+    "monitor",
+    "position",
+    "margin",
+    "width",
+    "height",
+    "animation",
+    "animation_ms",
+    "log_pane",
+    "theme",
+    "scheme",
+    "font",
+    "icon_size",
+    "close_after_launch",
+    "close_on_focus_loss",
+    "keyboard",
+];
+
+/// What `wryayer popup` was told on the command line, as `(key, value)`
+/// pairs keyed like `popup.toml`; each overrides the file.
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct Overrides {
-    pub position: Option<String>,
-    pub width: Option<String>,
-    pub height: Option<String>,
-    pub animation: Option<String>,
+    pub values: Vec<(String, String)>,
+}
+
+impl Overrides {
+    pub fn set(&mut self, key: &str, value: impl Into<String>) {
+        self.values.retain(|(k, _)| k != key);
+        self.values.push((key.to_string(), value.into()));
+    }
+
+    pub fn get(&self, key: &str) -> Option<&str> {
+        self.values.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+    }
+
+    /// Read `--key value` / `--key=value` flags out of a command line.
+    /// Anything else is skipped: clap has already checked the line.
+    pub fn from_args(args: &[String]) -> Overrides {
+        let mut overrides = Overrides::default();
+        let mut i = 0;
+        while i < args.len() {
+            let (flag, inline) = match args[i].split_once('=') {
+                Some((f, v)) => (f, Some(v.to_string())),
+                None => (args[i].as_str(), None),
+            };
+            let key = flag.strip_prefix("--").map(|k| k.replace('-', "_"));
+            if let Some(key) = key.filter(|k| CLI_KEYS.contains(&k.as_str())) {
+                let value = match inline {
+                    Some(v) => Some(v),
+                    None => {
+                        i += 1;
+                        args.get(i).cloned()
+                    }
+                };
+                if let Some(value) = value {
+                    overrides.set(&key, value);
+                }
+            }
+            i += 1;
+        }
+        overrides
+    }
+
+    /// The flags that give these values, ready for a shell.
+    pub fn to_args(&self) -> Vec<String> {
+        let mut args = Vec::new();
+        for key in CLI_KEYS {
+            if let Some(value) = self.get(key) {
+                args.push(format!("--{}", key.replace('_', "-")));
+                args.push(value.to_string());
+            }
+        }
+        args
+    }
+}
+
+/// A command-line value as the TOML value its key takes.
+fn typed(key: &str, value: &str) -> Result<toml::Value> {
+    Ok(match key {
+        "margin" | "animation_ms" | "icon_size" => toml::Value::Integer(
+            value.trim().parse().with_context(|| format!("{key} '{value}' is not a whole number"))?,
+        ),
+        "close_after_launch" | "close_on_focus_loss" | "resident" => toml::Value::Boolean(
+            match value.trim() {
+                "true" | "on" | "yes" | "1" => true,
+                "false" | "off" | "no" | "0" => false,
+                _ => anyhow::bail!("{key} '{value}' — use true or false"),
+            },
+        ),
+        _ => toml::Value::String(value.to_string()),
+    })
+}
+
+/// A value as `popup.toml` spells it.
+fn toml_text(key: &str, value: &str) -> Result<String> {
+    Ok(match typed(key, value)? {
+        toml::Value::String(s) => toml::Value::String(s).to_string(),
+        other => other.to_string(),
+    })
+}
+
+/// Set `values` in the text of a `popup.toml`, keeping its comments and the
+/// order of its keys; keys it does not have yet are added at the end.
+pub fn with_values(text: &str, values: &Overrides) -> Result<String> {
+    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    for (key, value) in &values.values {
+        let line = format!("{key} = {}", toml_text(key, value)?);
+        let existing = lines.iter().position(|l| {
+            l.split_once('=').is_some_and(|(k, _)| k.trim() == key && !l.trim_start().starts_with('#'))
+        });
+        match existing {
+            Some(i) => lines[i] = line,
+            None => lines.push(line),
+        }
+    }
+    let mut out = lines.join("\n");
+    out.push('\n');
+    // Written only if it still reads back.
+    parse(&out, &Overrides::default())?;
+    Ok(out)
+}
+
+/// Every key of a `popup.toml` with its value as text: the file's, over the
+/// defaults for what it leaves out.
+pub fn values_of(text: &str) -> Overrides {
+    let mut values = Overrides::default();
+    for source in [DEFAULT_FILE, text] {
+        let Ok(table) = toml::from_str::<toml::Table>(source) else { continue };
+        for (key, value) in table {
+            let text = match value {
+                toml::Value::String(s) => s,
+                other => other.to_string(),
+            };
+            values.set(&key, text);
+        }
+    }
+    values
 }
 
 pub fn settings_path() -> Result<PathBuf> {
@@ -237,9 +370,13 @@ pub fn load(overrides: &Overrides) -> Result<Settings> {
 }
 
 pub fn parse(text: &str, overrides: &Overrides) -> Result<Settings> {
-    let raw: Raw = toml::from_str(text)?;
+    let mut table: toml::Table = toml::from_str(text)?;
+    for (key, value) in &overrides.values {
+        table.insert(key.clone(), typed(key, value)?);
+    }
+    let raw: Raw = toml::Value::Table(table).try_into()?;
 
-    let position_text = overrides.position.clone().or(raw.position).unwrap_or_else(|| "center".into());
+    let position_text = raw.position.unwrap_or_else(|| "center".into());
     let position = Position::parse(&position_text).with_context(|| {
         format!(
             "position '{position_text}' — use center, top, bottom, left, right, top-left, \
@@ -247,21 +384,20 @@ pub fn parse(text: &str, overrides: &Overrides) -> Result<Settings> {
         )
     })?;
 
-    let length = |cli: &Option<String>, file: Option<toml::Value>, key: &str, default: &str| -> Result<Length> {
-        let text = match (cli, file) {
-            (Some(s), _) => s.clone(),
-            (None, Some(toml::Value::Integer(n))) => n.to_string(),
-            (None, Some(toml::Value::String(s))) => s,
-            (None, Some(other)) => anyhow::bail!("{key} = {other} — use pixels (720) or a percentage (\"40%\")"),
-            (None, None) => default.to_string(),
+    let length = |file: Option<toml::Value>, key: &str, default: &str| -> Result<Length> {
+        let text = match file {
+            Some(toml::Value::Integer(n)) => n.to_string(),
+            Some(toml::Value::String(s)) => s,
+            Some(other) => anyhow::bail!("{key} = {other} — use pixels (720) or a percentage (\"40%\")"),
+            None => default.to_string(),
         };
         Length::parse(&text)
             .with_context(|| format!("{key} '{text}' — use pixels (720) or a percentage (\"40%\")"))
     };
-    let width = length(&overrides.width, raw.width, "width", "720")?;
-    let height = length(&overrides.height, raw.height, "height", "460")?;
+    let width = length(raw.width, "width", "720")?;
+    let height = length(raw.height, "height", "460")?;
 
-    let animation_text = overrides.animation.clone().or(raw.animation).unwrap_or_else(|| "auto".into());
+    let animation_text = raw.animation.unwrap_or_else(|| "auto".into());
     let animation = Animation::parse(&animation_text, position).with_context(|| {
         format!(
             "animation '{animation_text}' — use auto, none, fade, slide-down, slide-up, \
@@ -447,15 +583,57 @@ mod tests {
     fn the_command_line_beats_the_file() {
         let s = parse(
             "position = \"top\"\nwidth = 500\n",
-            &Overrides {
-                position: Some("bottom-right".into()),
-                width: Some("50%".into()),
-                ..Default::default()
-            },
+            &Overrides::from_args(&["--position".into(), "bottom-right".into(), "--width=50%".into()]),
         )
         .unwrap();
         assert_eq!(s.position, Position::BottomRight);
         assert_eq!(s.width, Length::Percent(50.0));
+    }
+
+    #[test]
+    fn a_command_line_round_trips_through_its_flags() {
+        let mut o = Overrides::default();
+        o.set("animation_ms", "250");
+        o.set("monitor", "DP-1");
+        o.set("font", "Noto Sans 11");
+        let args = o.to_args();
+        assert_eq!(args[..2], ["--monitor", "DP-1"]);
+        assert!(args.contains(&"--animation-ms".to_string()));
+        let back = Overrides::from_args(&args);
+        assert_eq!(back.get("font"), Some("Noto Sans 11"));
+        assert_eq!(back.get("animation_ms"), Some("250"));
+        assert_eq!(parse("", &back).unwrap().animation_ms, 250);
+    }
+
+    #[test]
+    fn a_number_that_is_not_one_is_refused() {
+        let o = Overrides::from_args(&["--margin".into(), "wide".into()]);
+        assert!(parse("", &o).is_err());
+    }
+
+    #[test]
+    fn saving_keeps_the_comments_and_changes_only_the_values() {
+        let mut o = Overrides::default();
+        o.set("position", "top-right");
+        o.set("margin", "12");
+        o.set("resident", "false");
+        let text = with_values(DEFAULT_FILE, &o).unwrap();
+        assert!(text.contains("# Where it opens"), "comments survive");
+        assert!(text.contains("position = \"top-right\"\n"));
+        assert!(text.contains("margin = 12\n"));
+        let s = parse(&text, &Overrides::default()).unwrap();
+        assert_eq!((s.position, s.margin, s.resident), (Position::TopRight, 12, false));
+        // A value that would not read back is not written.
+        o.set("position", "nowhere");
+        assert!(with_values(DEFAULT_FILE, &o).is_err());
+    }
+
+    #[test]
+    fn the_values_of_a_file_fill_in_the_defaults() {
+        let v = values_of("width = \"40%\"\n");
+        assert_eq!(v.get("width"), Some("40%"));
+        assert_eq!(v.get("height"), Some("460"));
+        assert_eq!(v.get("position"), Some("center"));
     }
 
     #[test]

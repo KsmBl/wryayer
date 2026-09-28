@@ -238,8 +238,20 @@ opens only draw a window — about 50 ms from key press to popup. It costs about
 start-up on every open. A rebuilt wryayer takes over on the next open.
 
 Position, size, animation and look are set in `~/.wryayer/popup.toml`, written
-with every option explained the first time the popup opens; `--position`,
-`--width`, `--height` and `--animation` override it for one call.
+with every option explained the first time the popup opens. Every key there is
+also a flag (`--position`, `--width`, `--animation-ms`, `--monitor`, …) that
+overrides it for one call — so different key bindings can open differently
+placed popups.
+
+```
+wryayer popup configurator
+```
+
+sets it up in a window instead: the screens drawn to scale with a likeness of
+the popup in the theme's colours — click a screen to open it there, drag the
+popup to place it anywhere — next to every setting. Below is the `wryayer popup
+…` command that opens it exactly so, ready to copy into a key binding, and
+buttons to try it or to save it all as the default.
 
 - **Position** — `center`, an edge or a corner, or exact coordinates `"X,Y"`,
   with a margin from the screen edge. **Size** in pixels or as a share of the

@@ -121,6 +121,59 @@ fn tilewin_scheme_is_dark() -> bool {
         .is_some_and(|s| s == "dark")
 }
 
+/// The tileWin themes installed, user themes included, by name.
+pub fn available() -> Vec<String> {
+    let data = std::env::var_os("TILEWIN_DATADIR")
+        .filter(|d| !d.is_empty())
+        .map(PathBuf::from);
+    let bases = config_dir()
+        .map(|c| c.join("themes"))
+        .into_iter()
+        .chain(data.map(|d| d.join("themes")))
+        .chain(["/usr/local/share/tileWin/themes", "/usr/share/tileWin/themes"].map(PathBuf::from));
+    let mut names: Vec<String> = bases
+        .filter_map(|base| std::fs::read_dir(base).ok())
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().join("theme.conf").is_file())
+        .filter_map(|e| e.file_name().to_str().map(str::to_string))
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// The first plain colour in a CSS value — a gradient's first stop, say — as
+/// RGB in 0..1, for drawing a likeness of the popup. None for GTK's named
+/// colours, which only a style context can resolve.
+pub fn first_rgb(css: &str) -> Option<(f64, f64, f64)> {
+    if let Some(start) = css.find("rgba(") {
+        let inner = &css[start + 5..];
+        let parts: Vec<f64> = inner
+            .split([',', ')'])
+            .take(3)
+            .filter_map(|p| p.trim().parse().ok())
+            .collect();
+        if let [r, g, b] = parts[..] {
+            return Some((r / 255.0, g / 255.0, b / 255.0));
+        }
+    }
+    let hash = css.find('#')?;
+    let hex: String = css[hash + 1..].chars().take_while(|c| c.is_ascii_hexdigit()).collect();
+    let (r, g, b) = match hex.len() {
+        3 => {
+            let d = |i: usize| u8::from_str_radix(&hex[i..i + 1].repeat(2), 16).ok();
+            (d(0)?, d(1)?, d(2)?)
+        }
+        6 | 8 => {
+            let d = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).ok();
+            (d(0)?, d(2)?, d(4)?)
+        }
+        _ => return None,
+    };
+    Some((r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0))
+}
+
 fn theme_dir(name: &str) -> Option<PathBuf> {
     // A name is a directory name, never a path.
     if name.is_empty() || name.contains('/') || name.starts_with('.') {
@@ -450,6 +503,14 @@ dark {
         let p = from_tilewin(&load(&theme_dir("mine").unwrap(), 0).unwrap(), false);
         assert_eq!(p.bg, "#111111");
         assert_eq!(p.fg, "#ff0000");
+    }
+
+    #[test]
+    fn the_first_colour_of_a_fill_is_found_for_the_preview() {
+        assert_eq!(first_rgb("linear-gradient(to bottom, #ff0000 0%, #0000ff 100%)"), Some((1.0, 0.0, 0.0)));
+        assert_eq!(first_rgb("rgba(0, 255, 0, 0.5)"), Some((0.0, 1.0, 0.0)));
+        assert_eq!(first_rgb("#fff"), Some((1.0, 1.0, 1.0)));
+        assert_eq!(first_rgb("@theme_bg_color"), None);
     }
 
     #[test]

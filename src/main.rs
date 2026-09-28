@@ -270,12 +270,22 @@ enum Commands {
     Gui,
     /// Open the launcher popup: type to search, arrows to pick, Enter to
     /// launch, and the output of running apps beside the list. Running it
-    /// again closes it. Settings: ~/.wryayer/popup.toml (requires --features gui)
+    /// again closes it. Settings: ~/.wryayer/popup.toml; every flag below
+    /// overrides its key there for this open (requires --features gui)
+    #[command(args_conflicts_with_subcommands = true)]
     Popup {
+        #[command(subcommand)]
+        action: Option<PopupAction>,
+        /// Monitor to open on, by connector name (e.g. DP-1)
+        #[arg(long)]
+        monitor: Option<String>,
         /// Where it opens: center, top, bottom, left, right, top-left,
         /// top-right, bottom-left, bottom-right, or "X,Y"
         #[arg(long)]
         position: Option<String>,
+        /// Distance in pixels from the screen edge(s) it sits against
+        #[arg(long)]
+        margin: Option<String>,
         /// Width in pixels, or a share of the screen like 40%
         #[arg(long)]
         width: Option<String>,
@@ -286,6 +296,33 @@ enum Commands {
         /// swing-down, swing-up, swing-left or swing-right
         #[arg(long)]
         animation: Option<String>,
+        /// Length of the animation in milliseconds
+        #[arg(long)]
+        animation_ms: Option<String>,
+        /// Where the highlighted app's output is shown: right, bottom or off
+        #[arg(long)]
+        log_pane: Option<String>,
+        /// auto, gtk, tilewin, or a tileWin theme by name
+        #[arg(long)]
+        theme: Option<String>,
+        /// auto, light or dark
+        #[arg(long)]
+        scheme: Option<String>,
+        /// Font, e.g. "Noto Sans 11"
+        #[arg(long)]
+        font: Option<String>,
+        /// Icon size in pixels
+        #[arg(long)]
+        icon_size: Option<String>,
+        /// Close after launching an app: true or false
+        #[arg(long)]
+        close_after_launch: Option<String>,
+        /// Close when another window is focused: true or false
+        #[arg(long)]
+        close_on_focus_loss: Option<String>,
+        /// Wayland keyboard grab: exclusive or on-demand
+        #[arg(long)]
+        keyboard: Option<String>,
     },
     /// Hard-link identical files across app directories to reclaim disk space
     Dedup {
@@ -316,6 +353,14 @@ enum Commands {
         /// Comma-separated list of app names allowed to be launched
         allowed: String,
     },
+}
+
+#[derive(Subcommand)]
+enum PopupAction {
+    /// Set the popup up in a window: pick the screen, drag it into place on a
+    /// preview, choose size, animation and look — then copy the command that
+    /// opens it that way, or save it as the default
+    Configurator,
 }
 
 #[derive(Subcommand)]
@@ -684,15 +729,43 @@ fn main() {
                 ))
             }
         }
-        Commands::Popup { position, width, height, animation } => {
-            let overrides = wryayer::popup::Overrides { position, width, height, animation };
+        Commands::Popup {
+            action, monitor, position, margin, width, height, animation, animation_ms,
+            log_pane, theme, scheme, font, icon_size, close_after_launch,
+            close_on_focus_loss, keyboard,
+        } => {
+            let mut overrides = wryayer::popup::Overrides::default();
+            for (key, value) in [
+                ("monitor", monitor),
+                ("position", position),
+                ("margin", margin),
+                ("width", width),
+                ("height", height),
+                ("animation", animation),
+                ("animation_ms", animation_ms),
+                ("log_pane", log_pane),
+                ("theme", theme),
+                ("scheme", scheme),
+                ("font", font),
+                ("icon_size", icon_size),
+                ("close_after_launch", close_after_launch),
+                ("close_on_focus_loss", close_on_focus_loss),
+                ("keyboard", keyboard),
+            ] {
+                if let Some(value) = value {
+                    overrides.set(key, value);
+                }
+            }
             #[cfg(feature = "gui")]
             {
-                wryayer::gui::popup::run(overrides)
+                match action {
+                    Some(PopupAction::Configurator) => wryayer::gui::popup_config::run(),
+                    None => wryayer::gui::popup::run(overrides),
+                }
             }
             #[cfg(not(feature = "gui"))]
             {
-                let _ = overrides;
+                let _ = (action, overrides);
                 Err(anyhow::anyhow!(
                     "this build has no GUI, and the popup is part of it. Rebuild with the gui feature:\n    cargo build --release --features gui"
                 ))

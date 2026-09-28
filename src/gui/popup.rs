@@ -80,7 +80,9 @@ pub fn run(overrides: Overrides) -> Result<()> {
             ui.close();
             return glib::ExitCode::SUCCESS;
         }
-        let overrides = overrides_from(&command_line.arguments());
+        let args: Vec<String> =
+            command_line.arguments().iter().map(|a| a.to_string_lossy().into_owned()).collect();
+        let overrides = Overrides::from_args(&args);
         let settings = match settings_mod::load(&overrides) {
             Ok(settings) => settings,
             Err(e) => {
@@ -119,39 +121,6 @@ pub fn run(overrides: Overrides) -> Result<()> {
     } else {
         anyhow::bail!("the popup exited with a non-zero status")
     }
-}
-
-/// The overrides in a forwarded command line (`wryayer popup --width 50% …`),
-/// which clap has already checked in the process that received it.
-fn overrides_from(args: &[std::ffi::OsString]) -> Overrides {
-    let args: Vec<String> = args.iter().map(|a| a.to_string_lossy().into_owned()).collect();
-    let mut overrides = Overrides::default();
-    let mut i = 0;
-    while i < args.len() {
-        let (key, inline) = match args[i].split_once('=') {
-            Some((k, v)) => (k.to_string(), Some(v.to_string())),
-            None => (args[i].clone(), None),
-        };
-        let slot = match key.as_str() {
-            "--position" => &mut overrides.position,
-            "--width" => &mut overrides.width,
-            "--height" => &mut overrides.height,
-            "--animation" => &mut overrides.animation,
-            _ => {
-                i += 1;
-                continue;
-            }
-        };
-        *slot = match inline {
-            Some(v) => Some(v),
-            None => {
-                i += 1;
-                args.get(i).cloned()
-            }
-        };
-        i += 1;
-    }
-    overrides
 }
 
 fn binary_replaced() -> bool {
@@ -1461,18 +1430,6 @@ mod tests {
         let rows = arrange(&items, "");
         let last: Vec<&str> = rows.iter().filter(|r| r.last).map(|r| items[r.item].name.as_str()).collect();
         assert_eq!(last, ["ublock", "nfsu2"]);
-    }
-
-    #[test]
-    fn a_forwarded_command_line_carries_its_overrides() {
-        let args: Vec<std::ffi::OsString> = ["wryayer", "popup", "--width", "50%", "--position=top-left"]
-            .iter()
-            .map(Into::into)
-            .collect();
-        let o = overrides_from(&args);
-        assert_eq!(o.width.as_deref(), Some("50%"));
-        assert_eq!(o.position.as_deref(), Some("top-left"));
-        assert_eq!(o.animation, None);
     }
 
     #[test]
