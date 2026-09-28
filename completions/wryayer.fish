@@ -103,10 +103,10 @@ end
 complete -c wryayer -f
 
 # ── Top-level subcommands ─────────────────────────────────────────────────────
-# Front-end subcommands (tui/gui) are appended by install.sh to match the build;
+# Front-end subcommands (tui/gui/popup) are appended by install.sh to match the build;
 # they are kept in this guard list so once one is typed, top-level completions stop.
 set -l cmds install remove list run update repair config export import setup \
-           snapshot rollback snapshots snapshot-prune snapshot-delete tui gui dedup completions
+           snapshot rollback snapshots snapshot-prune snapshot-delete tui gui popup dedup completions
 
 complete -c wryayer -n "not __fish_seen_subcommand_from $cmds" -a install         -d 'Install a package in an isolated directory'
 complete -c wryayer -n "not __fish_seen_subcommand_from $cmds" -a remove          -d 'Remove an installed app and its launchers'
@@ -191,6 +191,16 @@ complete -c wryayer -n '__fish_seen_subcommand_from snapshot-prune' -l keep \
 
 # ── dedup ─────────────────────────────────────────────────────────────────────
 complete -c wryayer -n '__fish_seen_subcommand_from dedup' -l verbose -s v -d 'Print every file that gets linked'
+
+# ── popup (the command itself is listed only in GUI builds, by install.sh) ─────
+complete -c wryayer -n '__fish_seen_subcommand_from popup' -l position -x \
+    -a 'center top bottom left right top-left top-right bottom-left bottom-right' \
+    -d 'Where it opens (or "X,Y")'
+complete -c wryayer -n '__fish_seen_subcommand_from popup' -l width  -x -d 'Width in pixels, or a share of the screen like 40%'
+complete -c wryayer -n '__fish_seen_subcommand_from popup' -l height -x -d 'Height in pixels, or a share of the screen like 50%'
+complete -c wryayer -n '__fish_seen_subcommand_from popup' -l animation -x \
+    -a 'auto none fade slide-down slide-up slide-left slide-right swing-down swing-up swing-left swing-right' \
+    -d 'How it appears'
 
 # ── completions ───────────────────────────────────────────────────────────────
 complete -c wryayer -n '__fish_seen_subcommand_from completions' \

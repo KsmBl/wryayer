@@ -260,7 +260,7 @@ if command -v fish &>/dev/null; then
     cp completions/wryayer.fish "$FISH_COMP_DIR/wryayer.fish"
 
     # Reflect the built front-ends: the committed file advertises 'tui'; drop it
-    # if the TUI wasn't built, and add 'gui' when the desktop GUI was built.
+    # if the TUI wasn't built, and add 'gui' and 'popup' when the desktop GUI was built.
     if [ "$BUILD_TUI" != 1 ]; then
         sed -i '/-a tui .*Launch the interactive TUI/d' "$FISH_COMP_DIR/wryayer.fish"
     fi
@@ -269,6 +269,7 @@ if command -v fish &>/dev/null; then
 
 # ── gui (added by install.sh because the desktop GUI was built) ────────────────
 complete -c wryayer -n "not __fish_seen_subcommand_from $cmds" -a gui -d 'Launch the native GTK desktop GUI'
+complete -c wryayer -n "not __fish_seen_subcommand_from $cmds" -a popup -d 'Open the launcher popup (search, launch, see running apps\' output)'
 FISH_GUI
     fi
     info "Installed completions to $FISH_COMP_DIR/wryayer.fish"
