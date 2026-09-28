@@ -1,3 +1,4 @@
+pub mod app_log;
 pub mod avahi_stub;
 pub mod child_output;
 pub mod commands;
@@ -12,6 +13,7 @@ pub mod gui;
 pub mod launcher;
 pub mod manifest;
 pub mod package;
+pub mod popup;
 pub mod prompt;
 pub mod secrets;
 #[cfg(test)]

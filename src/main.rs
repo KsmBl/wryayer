@@ -268,6 +268,25 @@ enum Commands {
     Tui,
     /// Launch the native GTK desktop GUI (requires a build with --features gui)
     Gui,
+    /// Open the launcher popup: type to search, arrows to pick, Enter to
+    /// launch, and the output of running apps beside the list. Running it
+    /// again closes it. Settings: ~/.wryayer/popup.toml (requires --features gui)
+    Popup {
+        /// Where it opens: center, top, bottom, left, right, top-left,
+        /// top-right, bottom-left, bottom-right, or "X,Y"
+        #[arg(long)]
+        position: Option<String>,
+        /// Width in pixels, or a share of the screen like 40%
+        #[arg(long)]
+        width: Option<String>,
+        /// Height in pixels, or a share of the screen like 50%
+        #[arg(long)]
+        height: Option<String>,
+        /// auto, none, fade, slide-down, slide-up, slide-left, slide-right,
+        /// swing-down, swing-up, swing-left or swing-right
+        #[arg(long)]
+        animation: Option<String>,
+    },
     /// Hard-link identical files across app directories to reclaim disk space
     Dedup {
         /// Print every file that gets linked
@@ -665,6 +684,20 @@ fn main() {
                 ))
             }
         }
+        Commands::Popup { position, width, height, animation } => {
+            let overrides = wryayer::popup::Overrides { position, width, height, animation };
+            #[cfg(feature = "gui")]
+            {
+                wryayer::gui::popup::run(overrides)
+            }
+            #[cfg(not(feature = "gui"))]
+            {
+                let _ = overrides;
+                Err(anyhow::anyhow!(
+                    "this build has no GUI, and the popup is part of it. Rebuild with the gui feature:\n    cargo build --release --features gui"
+                ))
+            }
+        }
         Commands::Dedup { verbose } => commands::dedup::run(verbose),
         Commands::Clean => commands::clean::run(),
         Commands::Completions { shell } => {
@@ -677,6 +710,7 @@ fn main() {
 
     if let Err(e) = result {
         eprintln!("error: {:#}", e);
+        wryayer::app_log::finish();
         std::process::exit(1);
     }
 }

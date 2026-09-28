@@ -11,6 +11,7 @@ mod config;
 mod encryption;
 mod install;
 mod op;
+pub mod popup;
 
 use std::cell::RefCell;
 use std::collections::HashMap;

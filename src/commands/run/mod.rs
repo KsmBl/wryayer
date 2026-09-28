@@ -19,6 +19,10 @@ use spoof::*;
 
 
 pub fn run(app_name: &str, bin: Option<&str>, args: &[String]) -> Result<()> {
+    // Before anything can print: a launch with no terminal to write to keeps
+    // its output in the app's log, where the launcher popup shows it.
+    crate::app_log::start(app_name);
+
     // Strip a leading "--" separator (e.g. `wryayer run firefox -- file.pdf`)
     let args = match args {
         [first, rest @ ..] if first == "--" => rest,
@@ -201,7 +205,7 @@ pub fn run(app_name: &str, bin: Option<&str>, args: &[String]) -> Result<()> {
         }
         let _ = std::fs::remove_dir_all(&cleanup_path);
         crate::commands::encrypt::relock_on_exit(&fs_root_name, relock);
-        std::process::exit(status.code().unwrap_or(1));
+        exit_logged(status.code().unwrap_or(1), app_name, &fs_root_name);
     } else if repaired && !relock {
         // Replace this process with a fresh bwrap so the retry gets a clean
         // exec() hand-off (correct signal disposition, no extra wryayer in the
@@ -214,6 +218,9 @@ pub fn run(app_name: &str, bin: Option<&str>, args: &[String]) -> Result<()> {
                 cmd = wrap_with_ram_limit(cmd, mib);
             }
         }
+        // The log's pumps are threads of this process and do not survive the
+        // exec; the retry writes straight to the original streams instead.
+        crate::app_log::finish();
         let err = cmd.exec();
         bail!("failed to exec bwrap: {err}");
     } else if repaired {
@@ -221,11 +228,23 @@ pub fn run(app_name: &str, bin: Option<&str>, args: &[String]) -> Result<()> {
         // outlive the app so it can unmount the container afterwards.
         let retry = launch_bwrap(&app_root_str, &binary, &effective_args, &temp, &config, wine_ctx.as_ref(), &appimage_env)?;
         crate::commands::encrypt::relock_on_exit(&fs_root_name, relock);
-        std::process::exit(retry.code().unwrap_or(0));
+        exit_logged(retry.code().unwrap_or(0), app_name, &fs_root_name);
     } else {
         crate::commands::encrypt::relock_on_exit(&fs_root_name, relock);
-        std::process::exit(status.code().unwrap_or(0));
+        exit_logged(status.code().unwrap_or(0), app_name, &fs_root_name);
     }
+}
+
+/// Exit once the app's output has reached its log.
+///
+/// An app in its own encrypted container loses its log once the container is
+/// locked again: what it printed is as private as the files it printed about.
+fn exit_logged(code: i32, app_name: &str, fs_root: &str) -> ! {
+    crate::app_log::finish();
+    if crate::veracrypt::is_locked(fs_root) {
+        crate::app_log::discard(app_name);
+    }
+    std::process::exit(code)
 }
 
 

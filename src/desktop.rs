@@ -508,6 +508,43 @@ pub(crate) fn declared(app_name: &str) -> Option<(String, Vec<String>)> {
     Some((name, mimes))
 }
 
+/// How a launcher should show an installed app: the name its package gives it,
+/// and its icon — an absolute path into the app's tree when the tree has it,
+/// otherwise the bare icon name for the host theme to look up.
+///
+/// `None` when the container says nothing: locked, or an app that ships no
+/// desktop entry of its own.
+pub fn presentation(app_name: &str) -> Option<(String, Option<String>)> {
+    let manifest = read_manifest(app_name).ok()?;
+    let fs_root = manifest.app.alias_of.clone().unwrap_or_else(|| app_name.to_string());
+    let tree = app_dir(&fs_root).ok()?;
+
+    let mut launchers = manifest.app.launchers.clone();
+    if !manifest.app.main_binary.is_empty() && !launchers.contains(&manifest.app.main_binary) {
+        launchers.push(manifest.app.main_binary.clone());
+    }
+
+    // Same rule as `declared`: only the app's own launchers speak for it, and
+    // the entry starting the main binary speaks loudest.
+    let mut best: Option<(bool, String)> = None;
+    for (_, content) in packaged_entries(&tree) {
+        let Some(binary) = exec_binary(&content) else { continue };
+        if !launchers.contains(&binary) {
+            continue;
+        }
+        let is_main = binary == manifest.app.main_binary;
+        if best.as_ref().is_none_or(|(main, _)| is_main && !main) {
+            best = Some((is_main, content));
+        }
+    }
+    let (_, content) = best?;
+    let name = value(&content, "Name=").unwrap_or_else(|| app_name.to_string());
+    let icon = value(&content, "Icon=")
+        .map(|icon| resolve_icon(icon.trim(), &tree))
+        .filter(|icon| !icon.is_empty());
+    Some((name, icon))
+}
+
 /// The files making up the desktop-entry tree handed to a sandbox, as
 /// (path relative to that tree, contents).  `shim_dir` is where the portal
 /// shims live inside the sandbox.

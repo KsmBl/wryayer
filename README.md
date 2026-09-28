@@ -206,6 +206,50 @@ cargo build --release --features gui
 
 It needs `gtk4` (≥ 4.10) at build and run time. On Arch: `sudo pacman -S --needed gtk4`.
 
+### The launcher popup
+
+```
+wryayer popup
+```
+
+A keyboard launcher for every installed app, part of the GUI build. Type to
+search (letters in order are enough — `tbird` finds Thunderbird), **↑/↓** to pick,
+**Enter** to launch, **Esc** to close. Running `wryayer popup` again while it is
+open closes it, so one key binding toggles it:
+
+```
+bindsym Mod1+F2 exec wryayer popup     # tileWin / sway
+```
+
+Beside the list is the **output of the app under the cursor**: live while it
+runs, dimmed as "last run" once it has exited. **Shift+PgUp/PgDn** scrolls it.
+Every launch without a terminal — from the popup, a menu, a desktop entry, the
+GUI — keeps what the sandbox prints in `~/.wryayer/.logs/<app>.log`, rotated at
+2 MiB and still passed on to wherever the output was going. A launch from a
+terminal is left alone and prints there, as always. An app in its own
+[encrypted container](#encrypted-containers) loses its log when the container
+is locked again.
+
+Position, size, animation and look are set in `~/.wryayer/popup.toml`, written
+with every option explained the first time the popup opens; `--position`,
+`--width`, `--height` and `--animation` override it for one call.
+
+- **Position** — `center`, an edge or a corner, or exact coordinates `"X,Y"`,
+  with a margin from the screen edge. **Size** in pixels or as a share of the
+  screen (`"40%"`).
+- **Animation** — fade, slide or swing in from any side; `auto` slides in from the
+  edge the popup sits at.
+- **Look** — under tileWin it takes the active tileWin theme's start-menu colours,
+  gradients, border, corner radius and font, in its dark variant when the dark
+  colour scheme is on; elsewhere it follows the GTK theme. `theme = "win7"` picks
+  a tileWin theme by name.
+
+On Wayland the popup is a layer-shell surface, the way panels and launchers are
+placed, when `gtk4-layer-shell` is installed (`sudo pacman -S gtk4-layer-shell`) —
+it is loaded at runtime, not needed to build. Without it, sway-compatible
+compositors (tileWin included) get an ordinary floating window moved into place
+over their IPC socket. On X11 it is an undecorated window moved into place.
+
 ---
 
 ## Supported distributions
