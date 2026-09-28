@@ -4,7 +4,11 @@
 //! under the cursor shows what it has printed while running, read from the
 //! log `wryayer run` keeps for launches without a terminal (see `app_log`).
 //! Running `wryayer popup` again while it is open closes it, so a single key
-//! binding toggles it.
+//! binding toggles it. Apps installed `--into` another are listed under it.
+//!
+//! The first `wryayer popup` of a session stays running after its window
+//! closes, and every later one hands it its command line over D-Bus and
+//! exits: opening then costs building a window, not starting GTK.
 //!
 //! Placing a window is the part that differs by desktop, since a Wayland
 //! client may not position its own windows:
@@ -52,28 +56,108 @@ const LOG_TAIL_BYTES: u64 = 96 * 1024;
 const LOG_MAX_LINES: usize = 600;
 
 pub fn run(overrides: Overrides) -> Result<()> {
+    // Checked here as well as where the window is built, so a mistake is
+    // reported to whoever typed it rather than to the resident instance.
+    settings_mod::load(&overrides)?;
     preload_layer_shell();
     // Nothing here can answer a terminal prompt, and neither can what it
     // starts: the apps run detached.
     crate::prompt::forbid_here();
-    let settings = settings_mod::load(&overrides)?;
 
-    let app = gtk::Application::builder().application_id(APP_ID).build();
+    // Every `wryayer popup` hands its command line to the one instance on
+    // the session bus: the first becomes it, later ones only pass their
+    // arguments along and exit. That instance stays up between opens (unless
+    // `resident = false`), so opening costs a window, not a GTK start-up.
+    let app = gtk::Application::builder()
+        .application_id(APP_ID)
+        .flags(gtk::gio::ApplicationFlags::HANDLES_COMMAND_LINE)
+        .build();
     let open: Rc<RefCell<Option<Rc<Ui>>>> = Rc::new(RefCell::new(None));
-    app.connect_activate(move |app| {
-        // A second `wryayer popup` lands here, in the one already open.
+    let hold: Rc<RefCell<Option<gtk::gio::ApplicationHoldGuard>>> = Rc::new(RefCell::new(None));
+    app.connect_command_line(move |app, command_line| {
         let current = open.borrow().clone();
-        match current {
-            Some(ui) => ui.close(),
-            None => *open.borrow_mut() = Some(Ui::build(app, settings.clone())),
+        if let Some(ui) = current {
+            ui.close();
+            return glib::ExitCode::SUCCESS;
         }
+        let overrides = overrides_from(&command_line.arguments());
+        let settings = match settings_mod::load(&overrides) {
+            Ok(settings) => settings,
+            Err(e) => {
+                // The forwarding process checked the same file a moment ago;
+                // this only happens if it changed in between.
+                eprintln!("error: {e:#}");
+                return glib::ExitCode::FAILURE;
+            }
+        };
+        let held = hold.borrow().is_some();
+        match (settings.resident, held) {
+            (true, false) => *hold.borrow_mut() = Some(app.hold()),
+            (false, true) => drop(hold.borrow_mut().take()),
+            _ => {}
+        }
+        let ui = Ui::build(app, settings);
+        let (open2, hold2) = (open.clone(), hold.clone());
+        // Not `destroy`: the Ui kept in `open` holds the window, so it is
+        // never disposed while that reference stands.
+        ui.window.connect_close_request(move |_| {
+            *open2.borrow_mut() = None;
+            // A wryayer that has been rebuilt since this instance started
+            // must not keep answering with the old code.
+            if binary_replaced() {
+                drop(hold2.borrow_mut().take());
+            }
+            glib::Propagation::Proceed
+        });
+        *open.borrow_mut() = Some(ui);
+        glib::ExitCode::SUCCESS
     });
-    let code = app.run_with_args::<&str>(&[]);
+    let args: Vec<String> = std::env::args().collect();
+    let code = app.run_with_args(&args);
     if code == glib::ExitCode::SUCCESS {
         Ok(())
     } else {
         anyhow::bail!("the popup exited with a non-zero status")
     }
+}
+
+/// The overrides in a forwarded command line (`wryayer popup --width 50% …`),
+/// which clap has already checked in the process that received it.
+fn overrides_from(args: &[std::ffi::OsString]) -> Overrides {
+    let args: Vec<String> = args.iter().map(|a| a.to_string_lossy().into_owned()).collect();
+    let mut overrides = Overrides::default();
+    let mut i = 0;
+    while i < args.len() {
+        let (key, inline) = match args[i].split_once('=') {
+            Some((k, v)) => (k.to_string(), Some(v.to_string())),
+            None => (args[i].clone(), None),
+        };
+        let slot = match key.as_str() {
+            "--position" => &mut overrides.position,
+            "--width" => &mut overrides.width,
+            "--height" => &mut overrides.height,
+            "--animation" => &mut overrides.animation,
+            _ => {
+                i += 1;
+                continue;
+            }
+        };
+        *slot = match inline {
+            Some(v) => Some(v),
+            None => {
+                i += 1;
+                args.get(i).cloned()
+            }
+        };
+        i += 1;
+    }
+    overrides
+}
+
+fn binary_replaced() -> bool {
+    std::fs::read_link("/proc/self/exe")
+        .map(|p| p.to_string_lossy().ends_with(" (deleted)"))
+        .unwrap_or(false)
 }
 
 // ── the list ────────────────────────────────────────────────────────────────
@@ -86,20 +170,39 @@ struct Item {
     detail: String,
     /// An absolute path, or a name for the icon theme.
     icon: Option<String>,
+    /// The app whose tree this one was installed into (`install --into`),
+    /// when that app is listed too.
+    parent: Option<String>,
     fs_root: String,
     running: usize,
     locked: bool,
+    /// False for a container that only holds what its children run.
+    launchable: bool,
 }
 
-/// Every app that has something to launch.
+/// One row of the list: the item, how deep in the tree it sits, whether it
+/// is the last of its siblings, and whether it is only there to give a
+/// matching child its place in the tree.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Row {
+    item: usize,
+    depth: u8,
+    last: bool,
+    context: bool,
+}
+
+/// Every installed app, parents before the apps installed into them.
+///
+/// Running counts are left at zero: walking `/proc` for them is the slowest
+/// part of this, and it is done once the window is up.
 fn load_items() -> Vec<Item> {
-    let running = crate::commands::run::running_instances();
     let apps = crate::manifest::list_all_apps().unwrap_or_default();
+    let names: std::collections::HashSet<String> = apps.iter().map(|m| m.app.name.clone()).collect();
+    let mounts = std::fs::read_to_string("/proc/self/mounts").unwrap_or_default();
     apps.into_iter()
-        .filter(|m| !m.app.main_binary.is_empty() || m.app.wine_game.is_some())
         .map(|m| {
             let fs_root = m.app.alias_of.clone().unwrap_or_else(|| m.app.name.clone());
-            let locked = crate::veracrypt::is_locked(&fs_root);
+            let locked = is_locked(&fs_root, &mounts);
             let (packaged, icon) = if locked {
                 (None, None)
             } else {
@@ -114,8 +217,10 @@ fn load_items() -> Vec<Item> {
                 m.app.name.clone()
             };
             Item {
-                running: running.get(&m.app.name).copied().unwrap_or(0),
+                running: 0,
                 icon: icon.or_else(|| m.app.wine_game.as_ref().map(|_| "wine".to_string())),
+                parent: m.app.alias_of.clone().filter(|p| names.contains(p)),
+                launchable: !m.app.main_binary.is_empty() || m.app.wine_game.is_some(),
                 name: m.app.name,
                 title,
                 detail,
@@ -126,25 +231,79 @@ fn load_items() -> Vec<Item> {
         .collect()
 }
 
-/// Indices of the items matching `query`, best first. With no query the
-/// running apps come first — they are the ones with something to show.
-fn arrange(items: &[Item], query: &str) -> Vec<usize> {
-    let mut scored: Vec<(u32, usize)> = items
-        .iter()
-        .enumerate()
-        .filter_map(|(i, item)| {
-            let fields = [item.title.as_str(), item.name.as_str(), item.detail.as_str()];
-            settings_mod::score(query, &fields).map(|s| (s, i))
-        })
-        .collect();
-    scored.sort_by(|(sa, a), (sb, b)| {
-        let (a, b) = (&items[*a], &items[*b]);
-        sb.cmp(sa)
-            .then_with(|| (b.running > 0).cmp(&(a.running > 0)))
-            .then_with(|| a.title.to_lowercase().cmp(&b.title.to_lowercase()))
-            .then_with(|| a.name.cmp(&b.name))
-    });
-    scored.into_iter().map(|(_, i)| i).collect()
+/// Whether an app's own encrypted container is shut. Read from the mount
+/// table, which is what `veracrypt --list` would be asked for at the cost of
+/// a process per app.
+fn is_locked(fs_root: &str, mounts: &str) -> bool {
+    if !crate::veracrypt::is_encrypted(fs_root) {
+        return false;
+    }
+    let Ok(dir) = crate::manifest::app_dir(fs_root) else { return true };
+    // The table escapes spaces as \040; app names never contain one.
+    let dir = dir.to_string_lossy();
+    !mounts.lines().any(|l| l.split(' ').nth(1) == Some(dir.as_ref()))
+}
+
+/// The list for `query`, as a tree: each app followed by the apps installed
+/// into it.
+///
+/// With no query everything is listed, alphabetically at each level. With
+/// one, a family is listed when any of its members matches, best match first;
+/// within it only the matching children are kept, and a parent that does not
+/// match itself stays as their (dimmed) heading.
+fn arrange(items: &[Item], query: &str) -> Vec<Row> {
+    let score = |i: usize| {
+        let item = &items[i];
+        settings_mod::score(query, &[&item.title, &item.name, &item.detail])
+    };
+    let by_title = |a: &usize, b: &usize| {
+        let (x, y) = (&items[*a], &items[*b]);
+        x.title.to_lowercase().cmp(&y.title.to_lowercase()).then_with(|| x.name.cmp(&y.name))
+    };
+
+    let mut children: HashMap<&str, Vec<usize>> = HashMap::new();
+    let mut roots: Vec<usize> = Vec::new();
+    for (i, item) in items.iter().enumerate() {
+        match &item.parent {
+            Some(parent) => children.entry(parent.as_str()).or_default().push(i),
+            None => roots.push(i),
+        }
+    }
+
+    struct Family {
+        best: u32,
+        root: usize,
+        /// None when the root is only there for its children.
+        own: Option<u32>,
+        kids: Vec<(u32, usize)>,
+    }
+    let mut families: Vec<Family> = Vec::new();
+    for root in roots {
+        let own = score(root);
+        let mut kids: Vec<(u32, usize)> = children
+            .get(items[root].name.as_str())
+            .into_iter()
+            .flatten()
+            .filter_map(|&c| score(c).map(|s| (s, c)))
+            .collect();
+        if own.is_none() && kids.is_empty() {
+            continue;
+        }
+        kids.sort_by(|(sa, a), (sb, b)| sb.cmp(sa).then_with(|| by_title(a, b)));
+        let best = kids.iter().map(|(s, _)| *s).chain(own).max().unwrap_or(0);
+        families.push(Family { best, root, own, kids });
+    }
+    families.sort_by(|a, b| b.best.cmp(&a.best).then_with(|| by_title(&a.root, &b.root)));
+
+    let mut rows = Vec::new();
+    for Family { root, own, kids, .. } in families {
+        rows.push(Row { item: root, depth: 0, last: false, context: own.is_none() });
+        let n = kids.len();
+        for (k, (_, child)) in kids.into_iter().enumerate() {
+            rows.push(Row { item: child, depth: 1, last: k + 1 == n, context: false });
+        }
+    }
+    rows
 }
 
 // ── the window ──────────────────────────────────────────────────────────────
@@ -166,8 +325,8 @@ struct Ui {
     log: Option<LogWidgets>,
     count: gtk::Label,
     items: RefCell<Vec<Item>>,
-    /// Row index → index into `items`.
-    shown: RefCell<Vec<usize>>,
+    /// What each list row shows.
+    shown: RefCell<Vec<Row>>,
     /// The query `shown` was arranged for.
     arranged_for: RefCell<String>,
     /// What the log pane last showed, so the timer only redraws on change.
@@ -385,23 +544,30 @@ impl Ui {
             Placement::Sway { command } => {
                 // The compositor may not know the window by the time GTK
                 // reports it mapped; ask again for a moment.
+                // It is shown after a few tries whether or not it has been
+                // placed yet: a popup late in the right place is worse than
+                // one on time a little off.
                 let revealer = self.revealer.clone();
                 let tries = Cell::new(0);
-                glib::timeout_add_local(Duration::from_millis(15), move || {
+                glib::timeout_add_local(Duration::from_millis(8), move || {
                     tries.set(tries.get() + 1);
-                    let placed = sway_command(&command).is_some_and(|r| r.contains("\"success\": true") || r.contains("\"success\":true"));
-                    if placed || tries.get() > 20 {
+                    let placed = sway_command(&command)
+                        .is_some_and(|r| r.contains("\"success\": true") || r.contains("\"success\":true"));
+                    if placed || tries.get() == 6 {
                         revealer.set_reveal_child(true);
+                    }
+                    if placed || tries.get() >= 25 {
                         glib::ControlFlow::Break
                     } else {
                         glib::ControlFlow::Continue
                     }
                 });
-                return;
             }
-            Placement::LayerShell | Placement::Default => {}
+            Placement::LayerShell | Placement::Default => self.revealer.set_reveal_child(true),
         }
-        self.revealer.set_reveal_child(true);
+        // Left out of the first frame, since walking /proc is the slowest
+        // thing the popup does.
+        self.refresh_running();
     }
 
     fn connect(self: &Rc<Self>) {
@@ -519,7 +685,7 @@ impl Ui {
 
     fn selected_item(&self) -> Option<Item> {
         let row = self.list.selected_row()?;
-        let index = *self.shown.borrow().get(row.index() as usize)?;
+        let index = self.shown.borrow().get(row.index() as usize)?.item;
         self.items.borrow().get(index).cloned()
     }
 
@@ -534,19 +700,22 @@ impl Ui {
         while let Some(child) = self.list.first_child() {
             self.list.remove(&child);
         }
-        let mut select = 0;
-        for (row_index, &i) in order.iter().enumerate() {
-            let item = &items[i];
+        // A heading kept only for its matching children is not what the
+        // query asked for; start on the first row that is.
+        let mut select = order.iter().position(|r| !r.context).unwrap_or(0);
+        for (row_index, row) in order.iter().enumerate() {
+            let item = &items[row.item];
             if keep.as_deref() == Some(item.name.as_str()) {
                 select = row_index;
             }
-            let row = gtk::ListBoxRow::new();
-            row.set_focusable(false);
-            row.set_child(Some(&self.row_widget(item)));
-            self.list.append(&row);
+            let list_row = gtk::ListBoxRow::new();
+            list_row.set_focusable(false);
+            list_row.set_child(Some(&self.row_widget(item, *row)));
+            self.list.append(&list_row);
         }
         let running = items.iter().filter(|i| i.running > 0).count();
-        self.count.set_text(&match (order.len(), items.len(), running) {
+        let matching = order.iter().filter(|r| !r.context).count();
+        self.count.set_text(&match (matching, items.len(), running) {
             (shown, all, 0) if shown == all => format!("{all} apps"),
             (shown, all, 0) => format!("{shown} of {all} apps"),
             (shown, all, running) if shown == all => format!("{all} apps · {running} running"),
@@ -565,8 +734,19 @@ impl Ui {
         }
     }
 
-    fn row_widget(&self, item: &Item) -> gtk::Box {
+    fn row_widget(&self, item: &Item, place: Row) -> gtk::Box {
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+        if place.depth > 0 {
+            // The branch the child hangs off: ├ for one with siblings below
+            // it, └ for the last.
+            let branch = gtk::Label::new(Some(if place.last { "└" } else { "├" }));
+            branch.add_css_class("wp-branch");
+            branch.set_margin_start(self.settings.icon_size / 2 - 3);
+            row.append(&branch);
+        }
+        if place.context || !item.launchable {
+            row.add_css_class("wp-heading");
+        }
         row.append(&self.icon(item));
 
         let text = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -612,11 +792,12 @@ impl Ui {
         };
         let Some(icon) = item.icon.as_deref() else { return fallback() };
         let image = if icon.starts_with('/') {
+            let px = size * self.window.scale_factor().max(1);
             let texture = self
                 .textures
                 .borrow_mut()
                 .entry(icon.to_string())
-                .or_insert_with(|| gdk::Texture::from_filename(icon).ok())
+                .or_insert_with(|| small_icon(icon, px))
                 .clone();
             match texture {
                 Some(texture) => gtk::Image::from_paintable(Some(&texture)),
@@ -774,6 +955,13 @@ impl Ui {
             self.window.error_bell();
             return;
         }
+        if !item.launchable {
+            if let Some(log) = &self.log {
+                log.state.set_text("nothing to launch here — it holds what the apps below it run");
+            }
+            self.window.error_bell();
+            return;
+        }
         match spawn_run(&item.name) {
             Ok(()) if self.settings.close_after_launch => self.close(),
             Ok(()) => {}
@@ -849,6 +1037,41 @@ fn pick_monitor(display: &gdk::Display, name: &str) -> Option<gdk::Monitor> {
     all.into_iter().next()
 }
 
+/// An icon file decoded at the size it is drawn at.
+///
+/// Packages ship icons of 512 px and more, or as SVG, and decoding those whole
+/// was most of the popup's start-up time. The scaled copy is kept under
+/// `~/.wryayer/.cache` — inside the root, like everything else that says what
+/// is installed — and remade when the package's icon is newer.
+fn small_icon(path: &str, px: i32) -> Option<gdk::Texture> {
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut hash);
+    let cached = crate::manifest::wryayer_root()
+        .ok()?
+        .join(".cache/popup-icons")
+        .join(format!("{:016x}-{px}.png", hash.finish()));
+
+    let modified = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    if let (Some(copy), Some(source)) = (modified(&cached), modified(Path::new(path))) {
+        if copy >= source {
+            if let Ok(texture) = gdk::Texture::from_filename(&cached) {
+                return Some(texture);
+            }
+        }
+    }
+    let pixbuf = gtk::gdk_pixbuf::Pixbuf::from_file_at_size(path, px, px).ok()?;
+    if let Some(dir) = cached.parent() {
+        if std::fs::create_dir_all(dir).is_ok() && pixbuf.savev(&cached, "png", &[]).is_ok() {
+            if let Ok(texture) = gdk::Texture::from_filename(&cached) {
+                return Some(texture);
+            }
+        }
+    }
+    // Not cacheable (a read-only root): decode the full file after all.
+    gdk::Texture::from_filename(path).ok()
+}
+
 // ── styling ─────────────────────────────────────────────────────────────────
 
 fn load_css(display: &gdk::Display, p: &Palette, s: &Settings) {
@@ -893,6 +1116,8 @@ fn load_css(display: &gdk::Display, p: &Palette, s: &Settings) {
         .wp-name {{ font-size: 1.05em; }}
         .wp-detail {{ color: {dim}; font-size: 0.85em; }}
         .wp-badge {{ font-size: 0.9em; }}
+        .wp-branch {{ color: {dim}; font-family: monospace; }}
+        .wp-heading .wp-name, .wp-heading image {{ opacity: 0.6; }}
         .wp-side {{ background: {side_bg}; color: {side_fg}; border-left: 1px solid {border}; }}
         .wp-side.bottom {{ border-left: none; border-top: 1px solid {border}; }}
         .wp-side-head {{ padding: 8px 10px 6px 10px; }}
@@ -1008,6 +1233,11 @@ fn preload_layer_shell() {
         return;
     }
     let Some(lib) = LAYER_SHELL_LIBS.iter().find(|p| Path::new(p).exists()) else { return };
+    // A resident instance does the drawing; this process only forwards its
+    // command line, and restarting it would only delay that.
+    if instance_running() {
+        return;
+    }
     let Ok(exe) = std::env::current_exe() else { return };
     let original = std::env::var("LD_PRELOAD").unwrap_or_default();
     let preload = if original.is_empty() { lib.to_string() } else { format!("{lib}:{original}") };
@@ -1018,6 +1248,26 @@ fn preload_layer_shell() {
         .env(ORIGINAL_PRELOAD, original)
         .exec();
     eprintln!("warning: could not restart with {lib} preloaded: {err}");
+}
+
+/// Whether a popup instance already owns its name on the session bus.
+fn instance_running() -> bool {
+    use gtk::gio;
+    let Ok(bus) = gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE) else { return false };
+    bus.call_sync(
+        Some("org.freedesktop.DBus"),
+        "/org/freedesktop/DBus",
+        "org.freedesktop.DBus",
+        "NameHasOwner",
+        Some(&(APP_ID,).to_variant()),
+        glib::VariantTy::new("(b)").ok(),
+        gio::DBusCallFlags::NONE,
+        200,
+        gio::Cancellable::NONE,
+    )
+    .ok()
+    .and_then(|reply| reply.get::<(bool,)>())
+    .is_some_and(|(owned,)| owned)
 }
 
 struct LayerShell {
@@ -1161,29 +1411,81 @@ fn x11_move(window: &gtk::ApplicationWindow, x: i32, y: i32) {
 mod tests {
     use super::*;
 
-    fn item(name: &str, title: &str, running: usize) -> Item {
+    fn item(name: &str, title: &str, parent: Option<&str>) -> Item {
         Item {
             name: name.into(),
             title: title.into(),
             detail: String::new(),
             icon: None,
-            fs_root: name.into(),
-            running,
+            parent: parent.map(str::to_string),
+            fs_root: parent.unwrap_or(name).into(),
+            running: 0,
             locked: false,
+            launchable: true,
         }
     }
 
-    #[test]
-    fn with_no_query_running_apps_come_first() {
-        let items = vec![item("alpha", "Alpha", 0), item("zulu", "Zulu", 1), item("mike", "Mike", 0)];
-        let order: Vec<&str> = arrange(&items, "").iter().map(|&i| items[i].name.as_str()).collect();
-        assert_eq!(order, ["zulu", "alpha", "mike"]);
+    fn names(items: &[Item], rows: &[Row]) -> Vec<String> {
+        rows.iter()
+            .map(|r| {
+                let indent = if r.depth > 0 { "  " } else { "" };
+                let dim = if r.context { "(context)" } else { "" };
+                format!("{indent}{}{dim}", items[r.item].name)
+            })
+            .collect()
+    }
+
+    fn tree() -> Vec<Item> {
+        vec![
+            item("wine", "Wine", None),
+            item("nfsu2", "Need for Speed", Some("wine")),
+            item("bonfire", "Bonfire", None),
+            item("firefox", "Firefox", None),
+            item("ublock", "uBlock", Some("firefox")),
+            item("dict", "Dictionary", Some("firefox")),
+        ]
     }
 
     #[test]
-    fn a_query_orders_by_how_well_it_matches() {
-        let items = vec![item("bonfire", "Bonfire", 1), item("firefox", "Firefox", 0)];
-        let order: Vec<&str> = arrange(&items, "fire").iter().map(|&i| items[i].name.as_str()).collect();
-        assert_eq!(order, ["firefox", "bonfire"]);
+    fn with_no_query_each_app_is_followed_by_the_apps_installed_into_it() {
+        let items = tree();
+        assert_eq!(
+            names(&items, &arrange(&items, "")),
+            ["bonfire", "firefox", "  dict", "  ublock", "wine", "  nfsu2"]
+        );
     }
+
+    #[test]
+    fn the_last_child_is_marked_for_its_corner() {
+        let items = tree();
+        let rows = arrange(&items, "");
+        let last: Vec<&str> = rows.iter().filter(|r| r.last).map(|r| items[r.item].name.as_str()).collect();
+        assert_eq!(last, ["ublock", "nfsu2"]);
+    }
+
+    #[test]
+    fn a_forwarded_command_line_carries_its_overrides() {
+        let args: Vec<std::ffi::OsString> = ["wryayer", "popup", "--width", "50%", "--position=top-left"]
+            .iter()
+            .map(Into::into)
+            .collect();
+        let o = overrides_from(&args);
+        assert_eq!(o.width.as_deref(), Some("50%"));
+        assert_eq!(o.position.as_deref(), Some("top-left"));
+        assert_eq!(o.animation, None);
+    }
+
+    #[test]
+    fn a_matching_child_keeps_its_parent_as_a_heading() {
+        let items = tree();
+        assert_eq!(names(&items, &arrange(&items, "speed")), ["wine(context)", "  nfsu2"]);
+    }
+
+    #[test]
+    fn a_query_orders_families_by_their_best_match() {
+        let items = tree();
+        // Firefox starts with "fire", Bonfire merely contains it.
+        assert_eq!(names(&items, &arrange(&items, "fire")), ["firefox", "bonfire"]);
+    }
+
 }

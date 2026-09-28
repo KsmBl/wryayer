@@ -181,6 +181,7 @@ pub struct Settings {
     pub close_after_launch: bool,
     pub close_on_focus_loss: bool,
     pub keyboard_exclusive: bool,
+    pub resident: bool,
 }
 
 /// The file as written — every key optional, numbers accepted where strings
@@ -203,6 +204,7 @@ struct Raw {
     close_after_launch: Option<bool>,
     close_on_focus_loss: Option<bool>,
     keyboard: Option<String>,
+    resident: Option<bool>,
 }
 
 /// What `wryayer popup` was told on the command line; each overrides the file.
@@ -299,6 +301,7 @@ pub fn parse(text: &str, overrides: &Overrides) -> Result<Settings> {
         close_after_launch: raw.close_after_launch.unwrap_or(true),
         close_on_focus_loss: raw.close_on_focus_loss.unwrap_or(true),
         keyboard_exclusive,
+        resident: raw.resident.unwrap_or(true),
     })
 }
 
@@ -348,6 +351,11 @@ close_after_launch = true
 # close_on_focus_loss is set.
 keyboard = "exclusive"
 close_on_focus_loss = true
+
+# Keep the popup's process running in the background after it closes, so the
+# next open only has to draw a window (it keeps about 80 MB of memory). With false,
+# every open starts GTK from scratch. Changes here apply on the next open.
+resident = true
 "#;
 
 // ── search ─────────────────────────────────────────────────────────────────

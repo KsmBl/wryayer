@@ -214,8 +214,10 @@ wryayer popup
 
 A keyboard launcher for every installed app, part of the GUI build. Type to
 search (letters in order are enough — `tbird` finds Thunderbird), **↑/↓** to pick,
-**Enter** to launch, **Esc** to close. Running `wryayer popup` again while it is
-open closes it, so one key binding toggles it:
+**Enter** to launch, **Esc** to close. The list is the app tree: apps installed
+`--into` another sit under it, and a search that matches only a child keeps its
+parent as a dimmed heading. Running `wryayer popup` again while it is open closes
+it, so one key binding toggles it:
 
 ```
 bindsym Mod1+F2 exec wryayer popup     # tileWin / sway
@@ -229,6 +231,11 @@ GUI — keeps what the sandbox prints in `~/.wryayer/.logs/<app>.log`, rotated a
 terminal is left alone and prints there, as always. An app in its own
 [encrypted container](#encrypted-containers) loses its log when the container
 is locked again.
+
+After the first open the popup's process stays in the background, so later
+opens only draw a window — about 50 ms from key press to popup. It costs about
+80 MB of memory; `resident = false` gives it back at the price of a full GTK
+start-up on every open. A rebuilt wryayer takes over on the next open.
 
 Position, size, animation and look are set in `~/.wryayer/popup.toml`, written
 with every option explained the first time the popup opens; `--position`,
