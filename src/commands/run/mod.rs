@@ -12,6 +12,7 @@ use std::process::{Command, ExitStatus};
 // unqualified: `bus` = D-Bus proxy / Avahi stub / portal listener,
 // `spoof` = /proc, /sys and DMI hardware-identity overlays plus device masks.
 mod bus;
+mod preflight;
 mod spoof;
 use bus::*;
 use spoof::*;
@@ -187,7 +188,13 @@ pub fn run(app_name: &str, bin: Option<&str>, args: &[String]) -> Result<()> {
     // user locks them explicitly.
     let relock = crate::commands::encrypt::should_relock_on_exit(&fs_root_name);
 
+    let started = std::time::Instant::now();
     let status = launch_bwrap(&app_root_str, &binary, &effective_args, &temp, &config, wine_ctx.as_ref(), &appimage_env)?;
+    // A missing library stops an app before it has done anything. One that
+    // ran for a while and then exited unhappily did not die of that, and
+    // scanning its whole tree for the cause only keeps this process from
+    // exiting — for minutes, in a large tree.
+    let failed_at_start = started.elapsed() < std::time::Duration::from_secs(5);
 
     // Post-launch: if bwrap exited abnormally, the app may have written a new
     // self-updated ELF binary (e.g. Discord bootstrapping app-X.Y.Z/Discord)
@@ -195,7 +202,7 @@ pub fn run(app_name: &str, bin: Option<&str>, args: &[String]) -> Result<()> {
     // again now that those binaries exist, install any missing packages, and
     // retry automatically so the user doesn't have to re-launch manually.
     let repaired = !status.success() && fix_home_sonames(&app_root);
-    if !status.success() && !repaired {
+    if !status.success() && !repaired && failed_at_start {
         explain_missing_libraries(&app_root);
     }
 
@@ -211,7 +218,8 @@ pub fn run(app_name: &str, bin: Option<&str>, args: &[String]) -> Result<()> {
         // exec() hand-off (correct signal disposition, no extra wryayer in the
         // process tree). The dbus proxy carries PR_SET_PDEATHSIG, so it dies
         // with the app.
-        let (mut cmd, _, _dbus, _avahi, _portal) = bwrap_cmd(&app_root_str, &binary, &effective_args, &temp, &config, wine_ctx.as_ref(), &appimage_env);
+        let (cmd, _, _dbus, _avahi, _portal) = bwrap_cmd(&app_root_str, &binary, &effective_args, &temp, &config, wine_ctx.as_ref(), &appimage_env);
+        let mut cmd = checked_against_host(cmd);
         set_bwrap_env(&mut cmd);
         if let Some(mib) = config.ram_limit {
             if has_systemd_run() {
@@ -266,7 +274,8 @@ fn launch_bwrap(
     wine: Option<&WineCtx>,
     appimage_env: &[(String, String)],
 ) -> Result<ExitStatus> {
-    let (mut cmd, spoof_dir, mut dbus_proxy, mut avahi_stub, mut portal) = bwrap_cmd(app_root_str, binary, args, temp, config, wine, appimage_env);
+    let (cmd, spoof_dir, mut dbus_proxy, mut avahi_stub, mut portal) = bwrap_cmd(app_root_str, binary, args, temp, config, wine, appimage_env);
+    let mut cmd = checked_against_host(cmd);
     set_bwrap_env(&mut cmd);
     let ram_mib = if let Some(mib) = config.ram_limit {
         if has_systemd_run() {
@@ -329,6 +338,26 @@ fn launch_bwrap(
         let _ = std::fs::remove_dir_all(dir);
     }
     Ok(status)
+}
+
+/// The bwrap command with its mounts checked against the host as it is now,
+/// and repaired where bwrap would refuse to start (see `preflight`). What
+/// had to be left out is said, since the app will be missing it.
+fn checked_against_host(cmd: Command) -> Command {
+    let args: Vec<std::ffi::OsString> = cmd.get_args().map(|a| a.to_owned()).collect();
+    let checked = preflight::check(&args);
+    for note in &checked.notes {
+        eprintln!("warning: {note}");
+    }
+    let mut fixed = Command::new(cmd.get_program());
+    fixed.args(&checked.args);
+    for (key, value) in cmd.get_envs() {
+        match value {
+            Some(value) => fixed.env(key, value),
+            None => fixed.env_remove(key),
+        };
+    }
+    fixed
 }
 
 fn set_bwrap_env(cmd: &mut Command) {
@@ -733,7 +762,7 @@ fn bwrap_cmd(app_root: &str, binary: &str, args: &[String], temp: &TempBind, con
                 }
                 for node in crate::gpu::nodes_to_mask(gpu, crate::gpu::all()) {
                     if let Some(path) = node.to_str() {
-                        cmd.args(["--bind", "/dev/null", path]);
+                        mask(&mut cmd, path);
                     }
                 }
             }

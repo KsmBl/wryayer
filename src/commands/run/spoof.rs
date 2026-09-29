@@ -432,9 +432,28 @@ pub(super) fn mask_dev_prefix(cmd: &mut Command, dir: &str, prefix: &str) {
         let name = entry.file_name();
         let name = name.to_string_lossy();
         if name.starts_with(prefix) {
-            let path = format!("{dir}/{name}");
-            cmd.args(["--bind", "/dev/null", &path]);
+            mask(cmd, &format!("{dir}/{name}"));
         }
+    }
+}
+
+/// Hide a host path from the sandbox, whatever kind of thing it is.
+///
+/// A device node or socket gets `/dev/null` bound over it, a directory an
+/// empty tmpfs: bwrap will not bind a file over a directory, and refuses the
+/// whole launch when asked to. udev puts directories next to device nodes of
+/// the same prefix (`/dev/media/` beside `/dev/media0`), and an update can
+/// add one at any time.
+pub(super) fn mask(cmd: &mut Command, path: &str) {
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.is_dir() => {
+            cmd.args(["--tmpfs", path]);
+        }
+        Ok(_) => {
+            cmd.args(["--bind", "/dev/null", path]);
+        }
+        // Gone since it was listed: nothing left to hide.
+        Err(_) => {}
     }
 }
 
@@ -453,8 +472,7 @@ pub(super) fn mask_snd_devices(cmd: &mut Command, capture_only: Option<char>) {
             None => true,
         };
         if matches {
-            let path = format!("/dev/snd/{name}");
-            cmd.args(["--bind", "/dev/null", &path]);
+            mask(cmd, &format!("/dev/snd/{name}"));
         }
     }
 }
@@ -463,10 +481,7 @@ pub(super) fn mask_snd_devices(cmd: &mut Command, capture_only: Option<char>) {
 pub(super) fn mask_audio_sockets(cmd: &mut Command) {
     let Ok(xdg) = std::env::var("XDG_RUNTIME_DIR") else { return };
     for name in &["pipewire-0", "pipewire-0.lock", "pulse/native"] {
-        let path = format!("{xdg}/{name}");
-        if std::path::Path::new(&path).exists() {
-            cmd.args(["--bind", "/dev/null", &path]);
-        }
+        mask(cmd, &format!("{xdg}/{name}"));
     }
 }
 
