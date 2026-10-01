@@ -66,6 +66,7 @@ pub fn run(app_name: &str) -> Result<()> {
     if let Err(e) = crate::desktop::remove(app_name) {
         eprintln!("warning: desktop entries not removed: {e:#}");
     }
+    crate::desktop::unexport(app_name);
 
     // An encrypted app's files are inside its container, not under the app dir.
     // Unmount first (removing a mount point would otherwise fail, and deleting

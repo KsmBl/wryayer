@@ -414,6 +414,222 @@ fn resolve_icon(name: &str, tree: &Path) -> String {
         .unwrap_or_else(|| name.to_string())
 }
 
+// ── exports: what the desktop sees of every app, kept inside the root ─────────
+//
+// Registering an app in /usr/share/applications needs root and a /usr/bin
+// shortcut, and leaves its name on the unencrypted disk — so most apps never
+// were, and a taskbar matching windows to desktop entries had no icon to show
+// for them. Exports are the Flatpak answer, kept inside the encrypted root:
+// every app's own entries, rewritten to start it through `wryayer run`, under
+// ~/.wryayer/.exports/applications/<app>/, and one symlink to that directory
+// in the user's applications directory. The desktop reads subdirectories as
+// id prefixes, so an entry shows up as `wryayer-<app>-<name>.desktop` — the
+// id `wryayer desktop` registers under, which it therefore stands in for
+// rather than duplicating. Nothing outside the root names an app, and while
+// the root is locked the link leads nowhere.
+
+/// The binary to start for a packaged entry that runs `binary`, when the
+/// entry is the app's own: one of its launchers, or another name for its main
+/// program — Vivaldi's entry runs `vivaldi-stable`, a second link to the same
+/// /opt/vivaldi/vivaldi that the app records as `vivaldi`.
+fn own_binary(tree: &Path, manifest: &crate::manifest::Manifest, binary: &str) -> Option<String> {
+    let main = &manifest.app.main_binary;
+    if binary == main || manifest.app.launchers.iter().any(|l| l == binary) {
+        return Some(binary.to_string());
+    }
+    let program = |name: &str| resolve_in_tree(tree, &tree.join("usr/bin").join(name));
+    match (program(binary), program(main)) {
+        (Some(a), Some(b)) if !main.is_empty() && a == b => Some(main.clone()),
+        _ => None,
+    }
+}
+
+/// Follow symlinks inside an app tree, where an absolute target means the
+/// tree's root rather than the host's.
+fn resolve_in_tree(tree: &Path, path: &Path) -> Option<PathBuf> {
+    let mut current = path.to_path_buf();
+    for _ in 0..16 {
+        match std::fs::read_link(&current) {
+            Ok(target) if target.is_absolute() => {
+                current = tree.join(target.strip_prefix("/").ok()?);
+            }
+            Ok(target) => current = current.parent()?.join(target),
+            Err(_) => return current.exists().then_some(current),
+        }
+    }
+    None
+}
+
+/// Where exported entries live.
+pub fn exports_dir() -> Result<PathBuf> {
+    Ok(crate::manifest::wryayer_root()?.join(".exports").join("applications"))
+}
+
+/// The symlink the desktop finds them through.
+fn exports_link() -> Option<PathBuf> {
+    let data = match std::env::var_os("XDG_DATA_HOME").filter(|d| !d.is_empty()) {
+        Some(dir) => PathBuf::from(dir),
+        None => PathBuf::from(std::env::var_os("HOME")?).join(".local/share"),
+    };
+    Some(data.join("applications").join("wryayer"))
+}
+
+/// Make sure the desktop can see the exports. A symlink of that name that
+/// points elsewhere is not ours to replace.
+fn ensure_linked() -> Result<()> {
+    let (Some(link), Ok(target)) = (exports_link(), exports_dir()) else { return Ok(()) };
+    match std::fs::read_link(&link) {
+        Ok(current) if current == target => Ok(()),
+        Ok(_) => Ok(()),
+        Err(_) if link.symlink_metadata().is_ok() => Ok(()),
+        Err(_) => {
+            if let Some(parent) = link.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("failed to create {}", parent.display()))?;
+            }
+            std::os::unix::fs::symlink(&target, &link)
+                .with_context(|| format!("failed to link {}", link.display()))
+        }
+    }
+}
+
+/// Write `app_name`'s exported entries, replacing what was there.
+pub fn export(app_name: &str) -> Result<()> {
+    let dir = exports_dir()?.join(app_name);
+    let entries = exported_entries(app_name);
+    let _ = std::fs::remove_dir_all(&dir);
+    if entries.is_empty() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
+    for (name, content) in entries {
+        let path = dir.join(name);
+        std::fs::write(&path, content).with_context(|| format!("failed to write {}", path.display()))?;
+    }
+    ensure_linked()
+}
+
+/// Remove `app_name`'s exported entries.
+pub fn unexport(app_name: &str) {
+    if let Ok(dir) = exports_dir() {
+        let _ = std::fs::remove_dir_all(dir.join(app_name));
+    }
+}
+
+/// Bring every export up to date: each installed app's written afresh, and
+/// those of apps no longer installed removed.
+pub fn export_all() -> Result<()> {
+    let apps = crate::manifest::list_all_apps()?;
+    if let Ok(entries) = std::fs::read_dir(exports_dir()?) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !apps.iter().any(|m| m.app.name == name) {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
+    }
+    let mut first_error = None;
+    for m in &apps {
+        // A locked app's tree is out of reach; what was exported while it
+        // was open is still right.
+        let fs_root = m.app.alias_of.as_deref().unwrap_or(&m.app.name);
+        if crate::veracrypt::is_locked(fs_root) {
+            continue;
+        }
+        if let Err(e) = export(&m.app.name) {
+            first_error.get_or_insert(e);
+        }
+    }
+    first_error.map_or(Ok(()), Err)
+}
+
+/// The files to export for an app, as (file name, contents).
+fn exported_entries(app_name: &str) -> Vec<(String, String)> {
+    let Ok(manifest) = read_manifest(app_name) else { return Vec::new() };
+    let fs_root = manifest.app.alias_of.clone().unwrap_or_else(|| app_name.to_string());
+    let Ok(tree) = app_dir(&fs_root) else { return Vec::new() };
+    let wryayer = launcher::wryayer_exe();
+
+    let mut out = Vec::new();
+    for (source, content) in packaged_entries(&tree) {
+        // Only the app's own entries: its dependencies ship some too.
+        let Some(binary) = exec_binary(&content).and_then(|b| own_binary(&tree, &manifest, &b)) else {
+            continue;
+        };
+        let stem = source.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+        let mut command = format!("{wryayer} run {app_name}");
+        if binary != manifest.app.main_binary {
+            command.push_str(&format!(" --bin {binary}"));
+        }
+        command.push_str(" --");
+        let entry = exported(&rewrite(&content, &command, &tree, app_name), &stem);
+        out.push((format!("{stem}.desktop"), entry.main));
+        if let Some(window) = entry.window {
+            out.push((format!("{stem}-window.desktop"), window));
+        }
+    }
+    out
+}
+
+struct Exported {
+    main: String,
+    /// A hidden twin naming the window by the entry's own id, when the
+    /// package's StartupWMClass says something else.
+    window: Option<String>,
+}
+
+/// Finish a rewritten entry for export.
+///
+/// A taskbar finds a window's entry by its app_id. On Wayland that is meant
+/// to be the entry's file name, and the exported one carries a prefix, so the
+/// match has to come from StartupWMClass: the package's own value is kept
+/// (an X11 window is matched by it), and the file name is put there when the
+/// package says nothing. When the two differ — Thunderbird's entry is
+/// org.mozilla.Thunderbird but says StartupWMClass=thunderbird — a hidden
+/// twin carries the file name, so either kind of window finds its icon.
+fn exported(rewritten: &str, stem: &str) -> Exported {
+    let mut lines: Vec<String> = rewritten
+        .lines()
+        // TryExec has to be a path; the command is `wryayer run …`.
+        .filter(|l| !l.trim_start().starts_with("TryExec="))
+        .map(str::to_string)
+        .collect();
+    let main_group_end = lines
+        .iter()
+        .skip(1)
+        .position(|l| l.trim_start().starts_with('['))
+        .map_or(lines.len(), |i| i + 1);
+    let wm_class = lines[..main_group_end]
+        .iter()
+        .find_map(|l| l.trim().strip_prefix("StartupWMClass="))
+        .map(|v| v.trim().to_string());
+
+    let window = match &wm_class {
+        None => {
+            lines.insert(main_group_end, format!("StartupWMClass={stem}"));
+            None
+        }
+        Some(class) if class.eq_ignore_ascii_case(stem) => None,
+        Some(_) => {
+            let mut twin: Vec<String> = lines[..main_group_end]
+                .iter()
+                .filter(|l| {
+                    let l = l.trim_start();
+                    !l.starts_with("StartupWMClass=")
+                        && !l.starts_with("NoDisplay=")
+                        && !l.starts_with("MimeType=")
+                        && !l.starts_with("Actions=")
+                })
+                .cloned()
+                .collect();
+            twin.push(format!("StartupWMClass={stem}"));
+            twin.push("NoDisplay=true".to_string());
+            Some(twin.join("\n") + "\n")
+        }
+    };
+    Exported { main: lines.join("\n") + "\n", window }
+}
+
 // ── entries for the sandbox side of app binding ───────────────────────────────
 //
 // Standing in for a bound app on the sandbox's PATH is not enough for one app
@@ -519,19 +735,13 @@ pub fn presentation(app_name: &str) -> Option<(String, Option<String>)> {
     let fs_root = manifest.app.alias_of.clone().unwrap_or_else(|| app_name.to_string());
     let tree = app_dir(&fs_root).ok()?;
 
-    let mut launchers = manifest.app.launchers.clone();
-    if !manifest.app.main_binary.is_empty() && !launchers.contains(&manifest.app.main_binary) {
-        launchers.push(manifest.app.main_binary.clone());
-    }
-
-    // Same rule as `declared`: only the app's own launchers speak for it, and
-    // the entry starting the main binary speaks loudest.
+    // Only the app's own entries speak for it, and the one starting the main
+    // binary speaks loudest.
     let mut best: Option<(bool, String)> = None;
     for (_, content) in packaged_entries(&tree) {
-        let Some(binary) = exec_binary(&content) else { continue };
-        if !launchers.contains(&binary) {
+        let Some(binary) = exec_binary(&content).and_then(|b| own_binary(&tree, &manifest, &b)) else {
             continue;
-        }
+        };
         let is_main = binary == manifest.app.main_binary;
         if best.as_ref().is_none_or(|(main, _)| is_main && !main) {
             best = Some((is_main, content));
@@ -695,6 +905,113 @@ fn refresh_database() {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn an_entry_running_another_name_for_the_main_program_is_the_apps_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let tree = dir.path();
+        std::fs::create_dir_all(tree.join("usr/bin")).unwrap();
+        std::fs::create_dir_all(tree.join("opt/vivaldi")).unwrap();
+        std::fs::write(tree.join("opt/vivaldi/vivaldi"), b"elf").unwrap();
+        std::fs::write(tree.join("usr/bin/qvidcap"), b"elf").unwrap();
+        // Absolute links mean the tree's root, not the host's.
+        std::os::unix::fs::symlink("/opt/vivaldi/vivaldi", tree.join("usr/bin/vivaldi")).unwrap();
+        std::os::unix::fs::symlink("/opt/vivaldi/vivaldi", tree.join("usr/bin/vivaldi-stable")).unwrap();
+        let manifest = crate::manifest::Manifest {
+            app: crate::manifest::AppMeta {
+                name: "vivaldi".into(),
+                main_binary: "vivaldi".into(),
+                installed_at: "2026-01-01".into(),
+                launchers: vec![],
+                alias_of: None,
+                display_name: None,
+                pkg_name: None,
+                wine_game: None,
+            },
+            packages: vec![],
+        };
+        assert_eq!(own_binary(tree, &manifest, "vivaldi-stable").as_deref(), Some("vivaldi"));
+        assert_eq!(own_binary(tree, &manifest, "vivaldi").as_deref(), Some("vivaldi"));
+        // A dependency's program is not the app's.
+        assert_eq!(own_binary(tree, &manifest, "qvidcap"), None);
+        assert_eq!(own_binary(tree, &manifest, "missing"), None);
+    }
+
+    #[test]
+    fn an_export_is_matched_by_its_file_name_when_the_package_names_no_class() {
+        let e = exported("[Desktop Entry]\nName=WhatsDesk\nExec=/x run whatsdesk-bin --\nTryExec=/x run\n", "whatsdesk");
+        assert!(e.main.contains("StartupWMClass=whatsdesk\n"), "{}", e.main);
+        assert!(!e.main.contains("TryExec"), "{}", e.main);
+        assert!(e.window.is_none());
+    }
+
+    #[test]
+    fn a_class_that_differs_from_the_file_name_gets_a_hidden_twin() {
+        let content = "[Desktop Entry]\nName=Thunderbird\nExec=/x run thunderbird -- %u\n\
+                       MimeType=message/rfc822;\nStartupWMClass=thunderbird\nActions=compose;\n\n\
+                       [Desktop Action compose]\nName=Write\nExec=/x run thunderbird -- -compose\n";
+        let e = exported(content, "org.mozilla.Thunderbird");
+        assert!(e.main.contains("StartupWMClass=thunderbird"), "the package's class stays");
+        let twin = e.window.expect("a twin");
+        assert!(twin.contains("StartupWMClass=org.mozilla.Thunderbird\n"), "{twin}");
+        assert!(twin.contains("NoDisplay=true"), "{twin}");
+        assert!(!twin.contains("MimeType") && !twin.contains("[Desktop Action"), "{twin}");
+    }
+
+    #[test]
+    fn exports_start_the_app_through_wryayer_and_are_linked_for_the_desktop() {
+        let _home = crate::test_support::test_home();
+        let tree = crate::manifest::app_dir("whatsdesk-bin").unwrap();
+        std::fs::create_dir_all(tree.join("usr/share/applications")).unwrap();
+        std::fs::create_dir_all(tree.join("usr/share/pixmaps")).unwrap();
+        std::fs::write(tree.join("usr/share/pixmaps/whatsdesk.png"), b"png").unwrap();
+        std::fs::write(
+            tree.join("usr/share/applications/whatsdesk.desktop"),
+            "[Desktop Entry]\nName=WhatsDesk\nExec=/opt/whatsdesk/whatsdesk %U\nIcon=whatsdesk\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tree.join("usr/share/applications/avahi-discover.desktop"),
+            "[Desktop Entry]\nName=Avahi\nExec=avahi-discover\n",
+        )
+        .unwrap();
+        crate::manifest::write_manifest(
+            "whatsdesk-bin",
+            &crate::manifest::Manifest {
+                app: crate::manifest::AppMeta {
+                    name: "whatsdesk-bin".into(),
+                    main_binary: "whatsdesk".into(),
+                    installed_at: "2026-01-01".into(),
+                    launchers: vec!["whatsdesk".into()],
+                    alias_of: None,
+                    display_name: None,
+                    pkg_name: None,
+                    wine_game: None,
+                },
+                packages: vec![],
+            },
+        )
+        .unwrap();
+
+        export_all().unwrap();
+
+        let dir = exports_dir().unwrap().join("whatsdesk-bin");
+        let names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["whatsdesk.desktop"], "only the app's own launcher is exported");
+        let entry = std::fs::read_to_string(dir.join("whatsdesk.desktop")).unwrap();
+        assert!(entry.contains(" run whatsdesk-bin -- %U"), "{entry}");
+        assert!(entry.contains(&format!("Icon={}", tree.join("usr/share/pixmaps/whatsdesk.png").display())), "{entry}");
+        assert!(entry.contains("StartupWMClass=whatsdesk"), "{entry}");
+        assert_eq!(std::fs::read_link(exports_link().unwrap()).unwrap(), exports_dir().unwrap());
+
+        // Gone from the list, gone from the exports.
+        std::fs::remove_dir_all(&tree).unwrap();
+        export_all().unwrap();
+        assert!(!dir.exists());
+    }
     use super::*;
 
     const FIREFOX: &str = "\

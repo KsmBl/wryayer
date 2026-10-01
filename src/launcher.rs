@@ -264,7 +264,7 @@ exec {exe} run "{app_name}" "$@"
 /// works even though the session PATH never included wherever wryayer was
 /// installed. Falls back to a bare `wryayer` when the running executable is not
 /// wryayer itself — under `cargo test`, most obviously.
-fn wryayer_exe() -> String {
+pub(crate) fn wryayer_exe() -> String {
     std::env::current_exe()
         .ok()
         .filter(|p| p.file_name().is_some_and(|n| n == "wryayer"))

@@ -102,6 +102,7 @@ pub fn run(zip_path: &Path) -> Result<()> {
             .with_context(|| format!("failed to create launcher for '{launcher_name}'"))?;
         eprintln!("Created launcher: {}", launcher_path.display());
     }
+    super::install::export_desktop_entries(&app_name);
     if !manifest.app.launchers.is_empty() {
         super::install::register_desktop_entries(&app_name);
     }

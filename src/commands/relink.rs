@@ -90,6 +90,10 @@ pub fn run(app_name: Option<&str>) -> Result<()> {
         }
     }
 
+    if let Err(e) = desktop::export_all() {
+        eprintln!("warning: desktop entries not exported: {e:#}");
+    }
+
     eprintln!("\nDone: {shortcuts} shortcuts, {entries} desktop entries.");
     Ok(())
 }

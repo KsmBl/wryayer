@@ -68,6 +68,7 @@ pub fn test_home() -> TestHome {
         "HOME",
         "XDG_RUNTIME_DIR",
         "XDG_STATE_HOME",
+        "XDG_DATA_HOME",
         "WRYAYER_LAUNCHER_DIR",
         "WRYAYER_DESKTOP_DIR",
     ]);
@@ -76,6 +77,8 @@ pub fn test_home() -> TestHome {
     std::env::set_var("XDG_RUNTIME_DIR", dir.path().join("run"));
     // Keeps any XDG state a test writes out of the developer's real state dir.
     std::env::set_var("XDG_STATE_HOME", dir.path().join("state"));
+    // Exports are linked into the user's applications directory.
+    std::env::set_var("XDG_DATA_HOME", dir.path().join("data"));
     // Shortcuts and desktop entries are system-wide in normal use. Under test
     // they must never be: writing them would need root, and asking for root is
     // exactly the hang — or the damage — a test must not cause.

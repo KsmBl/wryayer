@@ -361,6 +361,8 @@ fn reinstall(manifest: &crate::manifest::Manifest, full: bool) -> Result<()> {
     eprintln!("Building library cache...");
     run_ldconfig(&app_dir);
     regenerate_runtime_caches(&app_dir);
+    // A new version may bring a new icon or entry.
+    super::install::export_desktop_entries(app_name);
 
     eprintln!("Updated '{app_name}'.");
     Ok(())

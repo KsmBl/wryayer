@@ -75,6 +75,14 @@ pub fn run(app_name: &str, bin: Option<&str>, args: &[String]) -> Result<()> {
     }
     let config = read_config(app_name)?;
 
+    // The app's tree is reachable now. Keeping its export current here means
+    // the taskbar can name and draw its window from the first launch, however
+    // the app came to be installed — and before that window exists, since a
+    // taskbar remembers an icon it could not find.
+    if let Err(e) = crate::desktop::export(app_name) {
+        eprintln!("warning: desktop entries not exported: {e:#}");
+    }
+
     // Wine games override the normal binary lookup: they always launch
     // /usr/bin/wine with the .exe path prepended to the user's args, and
     // they need WINEPREFIX + chdir set on the bwrap command.

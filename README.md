@@ -489,7 +489,20 @@ files the package itself ships to `/usr/share/applications`, rewritten so
 menu, in a file manager's **Open with**, and in the list of applications that
 can handle a MIME type — the same places a natively packaged one appears.
 
-That last step is opt-in, because being the *default* handler is a preference:
+Every app is also **exported** inside the wryayer root, with or without a
+shortcut: its own `.desktop` files, rewritten to start through `wryayer run`,
+under `~/.wryayer/.exports/applications/<app>/`, reached through a single
+symlink, `~/.local/share/applications/wryayer`. That is what lets a taskbar or
+dock find a running app's name and icon — it matches the window to a desktop
+entry — and what puts apps without a shortcut in the application menu. Nothing
+outside `~/.wryayer` names an app; while it is locked the link leads nowhere.
+Exports are refreshed on install, update, import and removal, by `wryayer
+relink`, and for an app every time it is launched. Where the package's
+`StartupWMClass` differs from the entry's own name (Thunderbird's entry is
+`org.mozilla.Thunderbird`, its class `thunderbird`) a hidden twin carries the
+other, so the window is matched either way.
+
+Being the *default* handler is a preference, so that step is opt-in:
 
 ```fish
 # Register (or re-register) an app's desktop entries

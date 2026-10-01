@@ -583,6 +583,7 @@ fn run_inner(
         // with" and link handling see it the way they see a packaged app.
         register_desktop_entries(&alias_name_owned);
     }
+    export_desktop_entries(&alias_name_owned);
 
     // Skip the cross-app dedup pass when this install added zero files —
     // no new inodes can have been created, so there's nothing to link.
@@ -593,6 +594,15 @@ fn run_inner(
     }
 
     Ok(())
+}
+
+/// Export the app's entries inside the wryayer root, where the desktop finds
+/// them through one symlink (see `desktop::export`) — with or without a
+/// shortcut, and without writing its name outside the root.
+pub fn export_desktop_entries(app_name: &str) {
+    if let Err(e) = crate::desktop::export(app_name) {
+        eprintln!("warning: desktop entries not exported: {e:#}");
+    }
 }
 
 /// Publish the app's packaged `.desktop` files to the host, and say so.
