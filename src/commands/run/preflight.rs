@@ -19,6 +19,10 @@
 //!   an app with its camera or microphone exposed is worse than not running;
 //! * a bind whose source has vanished becomes its `-try` form, which bwrap
 //!   skips;
+//! * a bind onto a symlink — which bwrap refuses to mount on — lands on what
+//!   the symlink points to instead, as reading through it inside the sandbox
+//!   would. The host's NVIDIA libraries are bound over an app tree whose copy
+//!   of `libEGL_nvidia.so` is a link to the versioned file;
 //! * any other bind whose source and destination disagree about being a
 //!   directory is left out, with a warning naming it.
 
@@ -113,14 +117,24 @@ pub(super) fn check(args: &[OsString]) -> Checked {
 }
 
 fn bind(option: &str, source: &OsStr, dest: &OsStr, mounts: &mut Vec<(PathBuf, Backing)>, out: &mut Checked) {
+    let tolerant = option.ends_with("-try");
+    let is_mask = source == OsStr::new("/dev/null");
+    let dest_path = match follow_links(mounts, Path::new(dest)) {
+        Some(path) => path,
+        None => {
+            out.notes.push(format!(
+                "{} is a symlink that leads nowhere it can be mounted — left out of the sandbox",
+                Path::new(dest).display()
+            ));
+            return;
+        }
+    };
+    let dest = dest_path.as_os_str();
     let keep = |out: &mut Checked, option: &str| {
         out.args.push(option.into());
         out.args.push(source.into());
         out.args.push(dest.into());
     };
-    let tolerant = option.ends_with("-try");
-    let is_mask = source == OsStr::new("/dev/null");
-    let dest_path = PathBuf::from(dest);
 
     let Ok(source_meta) = fs::metadata(source) else {
         if tolerant {
@@ -135,9 +149,9 @@ fn bind(option: &str, source: &OsStr, dest: &OsStr, mounts: &mut Vec<(PathBuf, B
         return;
     };
 
-    // Where the destination really is, if a host directory backs it. A
-    // symlink there is resolved by bwrap inside the sandbox, against paths
-    // this check cannot follow, so it is trusted as it stands.
+    // Where the destination really is, if a host directory backs it. Links
+    // are already followed, so a symlink still here sits under a mount this
+    // check cannot see into and is left to bwrap.
     let dest_kind = host_path(mounts, &dest_path)
         .and_then(|p| fs::symlink_metadata(p).ok())
         .filter(|m| !m.file_type().is_symlink())
@@ -168,6 +182,35 @@ fn bind(option: &str, source: &OsStr, dest: &OsStr, mounts: &mut Vec<(PathBuf, B
             }
         }
     }
+}
+
+/// Where a mount at `dest` really lands: bwrap will not mount on a symlink,
+/// so follow one the way the sandbox would, through the mounts made so far,
+/// until the path is something else or nothing at all. `None` for a loop.
+fn follow_links(mounts: &[(PathBuf, Backing)], dest: &Path) -> Option<PathBuf> {
+    let mut path = dest.to_path_buf();
+    // The kernel's own limit on links followed in one lookup.
+    for _ in 0..40 {
+        let Some(target) = host_path(mounts, &path)
+            .filter(|p| fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink()))
+            .and_then(|p| fs::read_link(p).ok())
+        else {
+            return Some(path);
+        };
+        // An absolute target is absolute in the sandbox, not on the host.
+        let joined = path.parent().unwrap_or(Path::new("/")).join(target);
+        path = PathBuf::from("/");
+        for part in joined.components() {
+            match part {
+                Component::Normal(name) => path.push(name),
+                Component::ParentDir => {
+                    path.pop();
+                }
+                _ => {}
+            }
+        }
+    }
+    None
 }
 
 /// The host path a sandbox path lands on: under the most recent mount whose
@@ -277,6 +320,38 @@ mod tests {
         let checked = check(&args);
         assert_eq!(checked.args, args);
         assert!(checked.notes.is_empty());
+    }
+
+    #[test]
+    fn a_bind_onto_a_symlink_lands_on_what_it_points_to() {
+        let (_dir, root, _dev) = host();
+        let lib = Path::new(&root).join("usr/lib");
+        fs::create_dir_all(&lib).unwrap();
+        // The tree's chain, one version behind the host's.
+        fs::write(lib.join("libEGL_nvidia.so.580.1"), b"old").unwrap();
+        std::os::unix::fs::symlink("libEGL_nvidia.so.580.1", lib.join("libEGL_nvidia.so.0")).unwrap();
+        std::os::unix::fs::symlink("libEGL_nvidia.so.0", lib.join("libEGL_nvidia.so")).unwrap();
+        std::os::unix::fs::symlink("/usr/lib/../lib/libEGL_nvidia.so", lib.join("abs")).unwrap();
+        let checked = check(&os(&[
+            "--bind", &root, "/",
+            "--ro-bind-try", "/etc/hostname", "/usr/lib/libEGL_nvidia.so",
+            "--ro-bind-try", "/etc/hostname", "/usr/lib/abs",
+            "--", "app",
+        ]));
+        let args = strs(&checked.args);
+        let landed = ["--ro-bind-try", "/etc/hostname", "/usr/lib/libEGL_nvidia.so.580.1"];
+        assert_eq!(args.windows(3).filter(|w| *w == landed).count(), 2, "{args:?}");
+        assert!(checked.notes.is_empty(), "{:?}", checked.notes);
+    }
+
+    #[test]
+    fn a_symlink_loop_is_left_out_with_a_warning() {
+        let (_dir, root, _dev) = host();
+        std::os::unix::fs::symlink("b", Path::new(&root).join("a")).unwrap();
+        std::os::unix::fs::symlink("a", Path::new(&root).join("b")).unwrap();
+        let checked = check(&os(&["--bind", &root, "/", "--ro-bind", "/etc/hostname", "/a", "--", "app"]));
+        assert!(!strs(&checked.args).contains(&"/a".to_string()), "{:?}", checked.args);
+        assert_eq!(checked.notes.len(), 1);
     }
 
     #[test]
