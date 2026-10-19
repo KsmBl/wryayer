@@ -50,6 +50,9 @@ const APP_ID: &str = "de.synthelicz.Wryayer.Popup";
 /// what `LD_PRELOAD` was before, for the apps it launches.
 const PRELOADED: &str = "WRYAYER_POPUP_PRELOADED";
 const ORIGINAL_PRELOAD: &str = "WRYAYER_POPUP_ORIGINAL_PRELOAD";
+/// Set when the popup chose GTK's renderer itself, so the apps it launches
+/// get GTK's own choice back.
+const CHOSE_RENDERER: &str = "WRYAYER_POPUP_CHOSE_RENDERER";
 
 /// How much of a log the pane reads; the rest is scrolled away anyway.
 const LOG_TAIL_BYTES: u64 = 96 * 1024;
@@ -59,6 +62,7 @@ pub fn run(overrides: Overrides) -> Result<()> {
     // Checked here as well as where the window is built, so a mistake is
     // reported to whoever typed it rather than to the resident instance.
     settings_mod::load(&overrides)?;
+    choose_renderer();
     preload_layer_shell();
     // Nothing here can answer a terminal prompt, and neither can what it
     // starts: the apps run detached.
@@ -121,6 +125,22 @@ pub fn run(overrides: Overrides) -> Result<()> {
     } else {
         anyhow::bail!("the popup exited with a non-zero status")
     }
+}
+
+/// Render with GL unless the user picked a renderer.
+///
+/// GTK's default is Vulkan, and the Vulkan loader opens every driver it has
+/// a manifest for to list the GPUs. On a laptop that wakes a sleeping NVIDIA
+/// card out of D3cold just to draw a launcher on the iGPU the compositor
+/// uses — two seconds before the window appears, against 30 ms with GL,
+/// which draws on the display's own device and leaves the card asleep.
+fn choose_renderer() {
+    if std::env::var_os("GSK_RENDERER").is_some() {
+        return;
+    }
+    // Runs before GTK or any other thread starts.
+    std::env::set_var("GSK_RENDERER", "gl");
+    std::env::set_var(CHOSE_RENDERER, "1");
 }
 
 fn binary_replaced() -> bool {
@@ -958,6 +978,9 @@ fn spawn_run(app: &str) -> std::io::Result<()> {
     crate::prompt::forbid_prompts(&mut cmd);
     // The layer-shell library was preloaded for the popup, not for apps.
     cmd.env_remove(PRELOADED).env_remove(ORIGINAL_PRELOAD);
+    if std::env::var_os(CHOSE_RENDERER).is_some() {
+        cmd.env_remove(CHOSE_RENDERER).env_remove("GSK_RENDERER");
+    }
     if std::env::var_os(PRELOADED).is_some() {
         match std::env::var_os(ORIGINAL_PRELOAD).filter(|p| !p.is_empty()) {
             Some(original) => cmd.env("LD_PRELOAD", original),
