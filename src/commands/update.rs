@@ -1002,13 +1002,7 @@ fn get_official_version(pkg_name: &str) -> Result<Option<String>> {
 
 fn get_aur_version(pkg_name: &str) -> Result<Option<String>> {
     let url = format!("https://aur.archlinux.org/rpc/v5/info?arg[]={pkg_name}");
-    let client = reqwest::blocking::Client::new();
-    let json: serde_json::Value = client
-        .get(&url)
-        .send()
-        .context("failed to query AUR RPC")?
-        .json()
-        .context("failed to parse AUR RPC JSON")?;
+    let json = crate::distro::aur_rpc(&url, std::time::Duration::from_secs(30))?;
     let version = json
         .get("results")
         .and_then(serde_json::Value::as_array)

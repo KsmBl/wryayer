@@ -585,29 +585,23 @@ fn search_packages(query: String) -> mpsc::Receiver<Vec<PkgResult>> {
             "https://aur.archlinux.org/rpc/v5/search/{}?by=name-desc",
             urlencode(&query)
         );
-        if let Ok(resp) = reqwest::blocking::Client::new()
-            .get(&url)
-            .timeout(Duration::from_secs(8))
-            .send()
-        {
-            if let Ok(json) = resp.json::<serde_json::Value>() {
-                if let Some(arr) = json.get("results").and_then(|r| r.as_array()) {
-                    for item in arr.iter().take(60) {
-                        let name = item
-                            .get("Name")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        if name.is_empty() || !seen.insert(name.clone()) {
-                            continue;
-                        }
-                        let desc = item
-                            .get("Description")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        results.push(PkgResult { name, source: "AUR", desc });
+        if let Ok(json) = crate::distro::aur_rpc(&url, Duration::from_secs(8)) {
+            if let Some(arr) = json.get("results").and_then(|r| r.as_array()) {
+                for item in arr.iter().take(60) {
+                    let name = item
+                        .get("Name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    if name.is_empty() || !seen.insert(name.clone()) {
+                        continue;
                     }
+                    let desc = item
+                        .get("Description")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    results.push(PkgResult { name, source: "AUR", desc });
                 }
             }
         }

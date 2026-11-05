@@ -730,16 +730,7 @@ mod arch {
             "https://aur.archlinux.org/rpc/v5/search/{}?by=name-desc",
             query
         );
-        let client = match reqwest::blocking::Client::builder()
-            .user_agent("curl/7.88.1")
-            .timeout(std::time::Duration::from_secs(10))
-            .build()
-        {
-            Ok(c) => c,
-            Err(_) => return vec![],
-        };
-        let Ok(resp) = client.get(&url).send() else { return vec![] };
-        let Ok(json) = resp.json::<serde_json::Value>() else { return vec![] };
+        let Ok(json) = aur_rpc(&url, std::time::Duration::from_secs(10)) else { return vec![] };
         json.get("results")
             .and_then(serde_json::Value::as_array)
             .map(|arr| {
@@ -1403,5 +1394,53 @@ mod verify_tests {
     fn apt_clean_output_is_authenticated() {
         assert!(!apt_reports_unauthenticated("Get:1 http://deb.debian.org foo 1.0\nFetched 1 B\n"));
         assert!(!apt_reports_unauthenticated(""));
+    }
+}
+
+/// Ask the AUR's RPC interface something.
+///
+/// The AUR sits behind Anubis, which answers a request without a User-Agent
+/// with a challenge page: HTML, and status 200, so only reading the body can
+/// tell it from an answer. Everything that talks to the RPC goes through here
+/// so that none of them forgets the header.
+pub fn aur_rpc(url: &str, timeout: std::time::Duration) -> Result<serde_json::Value> {
+    let client = reqwest::blocking::Client::builder()
+        .user_agent(concat!("wryayer/", env!("CARGO_PKG_VERSION")))
+        .timeout(timeout)
+        .build()
+        .context("failed to build HTTP client")?;
+    let response = client.get(url).send().context("failed to query AUR RPC")?;
+    let status = response.status();
+    let body = response.text().context("failed to read AUR RPC response")?;
+    parse_aur_response(status.as_u16(), &body)
+}
+
+fn parse_aur_response(status: u16, body: &str) -> Result<serde_json::Value> {
+    serde_json::from_str(body).map_err(|_| {
+        let kind = if body.trim_start().starts_with('<') { "a web page" } else { "something else" };
+        anyhow::anyhow!(
+            "the AUR answered with {kind} instead of JSON (HTTP {status}) — \
+             it may be down or blocking this connection"
+        )
+    })
+}
+
+#[cfg(test)]
+mod aur_rpc_tests {
+    use super::*;
+
+    #[test]
+    fn an_aur_challenge_page_is_reported_as_what_it_is() {
+        let page = "<!doctype html><html><head><title>Oh noes!</title></head></html>";
+        let err = parse_aur_response(200, page).unwrap_err().to_string();
+        assert!(err.contains("a web page"), "{err}");
+        assert!(err.contains("HTTP 200"), "{err}");
+        assert!(!err.contains("expected value"), "{err}");
+    }
+
+    #[test]
+    fn an_aur_answer_is_parsed() {
+        let json = parse_aur_response(200, r#"{"resultcount":0,"results":[]}"#).unwrap();
+        assert_eq!(json["resultcount"], 0);
     }
 }

@@ -1,6 +1,6 @@
 use crate::distro::{self, Distro};
 use crate::manifest::PackageSource;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 
@@ -329,7 +329,6 @@ fn query_aur_batch(names: &[String]) -> Result<std::collections::HashMap<String,
         return Ok(std::collections::HashMap::new());
     }
 
-    let client = reqwest::blocking::Client::new();
     let mut map = std::collections::HashMap::new();
 
     for chunk in names.chunks(AUR_BATCH_SIZE) {
@@ -342,14 +341,7 @@ fn query_aur_batch(names: &[String]) -> Result<std::collections::HashMap<String,
             url.push_str(name);
         }
 
-        let response = client
-            .get(&url)
-            .send()
-            .context("failed to query AUR RPC")?;
-
-        let json: serde_json::Value = response
-            .json()
-            .context("failed to parse AUR RPC response as JSON")?;
+        let json = crate::distro::aur_rpc(&url, std::time::Duration::from_secs(30))?;
 
         if let Some(results) = json.get("results").and_then(serde_json::Value::as_array) {
             for pkg in results {
