@@ -56,6 +56,22 @@ pub fn sanitize_line(raw: &str) -> String {
     out
 }
 
+/// How `wryayer update` opens the list of what a sweep is about to update.
+pub const UPDATE_PLAN_HEADING: &str = "Apps to update";
+/// How it opens the list of what happened once the sweep is over.
+pub const UPDATE_DONE_HEADING: &str = "Update finished:";
+
+/// The most recent update list in a log: the summary once there is one, the
+/// plan before that. A list runs from its heading to the next blank line.
+pub fn update_list(log: &[String]) -> Option<&[String]> {
+    let start = log.iter().rposition(|l| {
+        l.starts_with(UPDATE_PLAN_HEADING) || l.starts_with(UPDATE_DONE_HEADING)
+    })?;
+    let rest = &log[start..];
+    let len = rest.iter().position(|l| l.trim().is_empty()).unwrap_or(rest.len());
+    Some(&rest[..len])
+}
+
 /// A protocol line a child emitted to tell the front-end something it cannot be
 /// told any other way.
 ///

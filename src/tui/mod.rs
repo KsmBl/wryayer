@@ -3082,10 +3082,10 @@ fn on_op_done(app: &mut App, code: KeyCode) -> Result<()> {
     match code {
         KeyCode::Char('q') | KeyCode::Esc | KeyCode::Enter => {
             let screen = std::mem::replace(&mut app.screen, Screen::Main);
-            if let Screen::Operation { reload, success, .. } = screen {
-                if reload && success {
-                    app.reload_installed();
-                }
+            // A failed operation can still have changed things: a sweep that
+            // failed on one app has updated the others.
+            if let Screen::Operation { reload: true, .. } = screen {
+                app.reload_installed();
             }
             app.needs_clear = true;
             if !app.install_queue.is_empty() {
@@ -5256,6 +5256,82 @@ mod op_log_tests {
 
         handle_key(&mut app, KeyCode::Char('t')).unwrap();
         assert!(show_log_of(&app), "'t' should open the log when done");
+    }
+
+    fn update_all_screen(lines: &[&str], done: bool) -> (crate::test_support::TestHome, App, mpsc::Sender<Msg>) {
+        let home = crate::test_support::test_home();
+        let mut app = App::new().unwrap();
+        let (mut screen, tx) = op_screen(0, done);
+        if let Screen::Operation { log, .. } = &mut screen {
+            *log = lines.iter().map(|l| l.to_string()).collect();
+        }
+        app.screen = screen;
+        (home, app, tx)
+    }
+
+    #[test]
+    fn a_running_update_all_shows_what_it_will_update_and_what_it_is_doing() {
+        let (_home, mut app, _tx) = update_all_screen(
+            &[
+                "Apps to update (3):",
+                "  discord  1 -> 2",
+                "  firefox  3 -> 4",
+                "  gimp     5 -> 6",
+                "",
+                "discord: updating 1 -> 2",
+                "Extracting discord...",
+            ],
+            false,
+        );
+        let out = render(&mut app, 100, 30);
+        for expected in ["Apps to update (3)", "discord  1 -> 2", "firefox  3 -> 4", "gimp     5 -> 6", "Extracting discord"] {
+            assert!(out.contains(expected), "no {expected:?}:\n{out}");
+        }
+    }
+
+    #[test]
+    fn a_finished_update_all_lists_every_app_not_just_the_last_one() {
+        let (_home, mut app, _tx) = update_all_screen(
+            &[
+                "Apps to update (3):",
+                "  discord  1 -> 2",
+                "  firefox  3 -> 4",
+                "  gimp     5 -> 6",
+                "",
+                "Updated 'gimp'.",
+                "Update finished: 3 updated",
+                "Updated:",
+                "  discord  1 -> 2",
+                "  firefox  3 -> 4",
+                "  gimp     5 -> 6",
+                "",
+            ],
+            true,
+        );
+        let out = render(&mut app, 100, 30);
+        for expected in ["Update finished: 3 updated", "discord  1 -> 2", "firefox  3 -> 4", "gimp     5 -> 6"] {
+            assert!(out.contains(expected), "no {expected:?}:\n{out}");
+        }
+        assert!(!out.contains("Apps to update"), "the plan should have given way:\n{out}");
+    }
+
+    #[test]
+    fn a_list_too_long_for_the_screen_says_there_is_more() {
+        let mut lines = vec!["Update finished: 40 updated".to_string(), "Updated:".to_string()];
+        lines.extend((0..40).map(|i| format!("  app{i}  1 -> 2")));
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let (_home, mut app, _tx) = update_all_screen(&refs, true);
+        let out = render(&mut app, 100, 24);
+        assert!(out.contains("more lines"), "{out}");
+        assert!(out.contains("[Enter/q] Close"), "the footer must survive:\n{out}");
+    }
+
+    #[test]
+    fn other_operations_still_show_their_last_line() {
+        let (_home, mut app, _tx) = update_all_screen(&["Extracting vim...", "Installed vim."], true);
+        let out = render(&mut app, 100, 30);
+        assert!(out.contains("Installed vim."), "{out}");
+        assert!(!out.contains("Extracting vim"), "{out}");
     }
 
     #[test]

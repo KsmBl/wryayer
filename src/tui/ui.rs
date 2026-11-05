@@ -1212,7 +1212,7 @@ fn draw_confirm(f: &mut Frame, area: Rect, title: &str, body: &[String], danger:
 // ── Operation overlay ─────────────────────────────────────────────────────────
 
 fn log_line_color(l: &str) -> Color {
-    if l.starts_with("error") || l.contains("Error") || l.contains("failed") {
+    if l.starts_with("error") || l.starts_with("Failed") || l.contains("Error") || l.contains("failed") {
         c_red()
     } else if l.starts_with("warning") || l.contains("Warning") || l.starts_with('!') {
         c_yellow()
@@ -1361,7 +1361,17 @@ fn draw_operation(
         );
     } else {
         // ── Clean view: small popup with animated bar ─────────────────────────
-        let popup = centered_rect(60, 30, area);
+        // An update sweep's list needs room the usual one line doesn't: status,
+        // bar and a blank above it, the current step and the footer below, and
+        // the border around all of it.
+        let list = crate::child_output::update_list(log).unwrap_or(&[]);
+        let needed = list.len() as u32 + 8;
+        let height_pct = if list.is_empty() {
+            30
+        } else {
+            (needed * 100).div_ceil(u32::from(area.height.max(1))).clamp(30, 90) as u16
+        };
+        let popup = centered_rect(60, height_pct, area);
         f.render_widget(Clear, popup);
 
         let block = Block::default()
@@ -1440,7 +1450,43 @@ fn draw_operation(
             );
         }
 
-        if h >= 5 && !last_log_truncated.is_empty() {
+        if !list.is_empty() {
+            // Below the bar: the list, then — while there is still work going
+            // on — what is being done right now, above the footer.
+            let reserved = if done { 4 } else { 6 };
+            let room = usize::from(h.saturating_sub(reserved));
+            let (shown, hidden) = if list.len() > room {
+                (room.saturating_sub(1), list.len() - room.saturating_sub(1))
+            } else {
+                (list.len(), 0)
+            };
+            let mut lines: Vec<Line> = list[..shown]
+                .iter()
+                .map(|l| {
+                    let text: String = l.chars().take(max_chars).collect();
+                    Line::from(Span::styled(format!("  {text}"), Style::default().fg(log_line_color(l))))
+                })
+                .collect();
+            if hidden > 0 {
+                lines.push(Line::from(Span::styled(
+                    format!("  … {hidden} more lines — [t] Debug log"),
+                    Style::default().fg(c_dim()),
+                )));
+            }
+            f.render_widget(
+                Paragraph::new(lines),
+                Rect { x: inner.x, y: inner.y + 3, width: inner.width, height: room as u16 },
+            );
+            if !done && h >= 7 && !last_log_truncated.is_empty() {
+                f.render_widget(
+                    Paragraph::new(Span::styled(
+                        format!("  {last_log_truncated}"),
+                        Style::default().fg(last_log_color),
+                    )),
+                    Rect { x: inner.x, y: inner.y + h - 2, width: inner.width, height: 1 },
+                );
+            }
+        } else if h >= 5 && !last_log_truncated.is_empty() {
             f.render_widget(
                 Paragraph::new(Span::styled(
                     format!("  {last_log_truncated}"),

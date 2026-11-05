@@ -59,16 +59,21 @@ pub fn run(
         None => Some(supplied.without_container()),
     };
 
-    let mut has_updates = false;
+    let sweep = app_name.is_none();
+    let mut pending: Vec<Pending> = Vec::new();
+    let mut report = SweepReport::default();
 
-    for manifest in &manifests {
+    // Everything is checked before anything is installed, so a sweep can say
+    // what it is about to do. A container opened for an app with an update stays
+    // open until that app's turn; one with nothing to do closes straight away.
+    for manifest in manifests {
         // Alias manifests don't own a filesystem tree — skip them; the target
         // app is updated separately when its own manifest is processed.
         if manifest.app.alias_of.is_some() {
             continue;
         }
 
-        let name = &manifest.app.name;
+        let name = manifest.app.name.clone();
         // A locked app's tree is inaccessible and its manifest is a stub with
         // no packages, so there is nothing to compare against until its
         // container is open. Opening one costs a password (and root), which is
@@ -76,23 +81,25 @@ pub fn run(
         // not once per app in a sweep over all of them, so those skip anything
         // that cannot be opened silently.
         let ask_for_this_one = !check_only
-            && (app_name.is_some() || crate::commands::encrypt::can_open_unattended(name));
-        if crate::veracrypt::is_locked(name) && !ask_for_this_one {
+            && (app_name.is_some() || crate::commands::encrypt::can_open_unattended(&name));
+        if crate::veracrypt::is_locked(&name) && !ask_for_this_one {
             eprintln!("  {name}: locked — skipping (unlock it with 'wryayer unlock {name}')");
+            report.skipped.push((name, "locked".to_string()));
             continue;
         }
-        // Held for the rest of this iteration, so a container this sweep opened
-        // closes again as soon as that app is done with — succeeded or not. The
-        // named app was opened above and is already mounted, which this returns
-        // an empty guard for rather than closing something it did not open.
-        let _open = match (check_only, &per_app) {
+        // Held until this app is done with, so a container this sweep opened
+        // closes again as soon as it can — succeeded or not. The named app was
+        // opened above and is already mounted, which this returns an empty
+        // guard for rather than closing something it did not open.
+        let open = match (check_only, &per_app) {
             (true, _) | (_, None) => crate::commands::encrypt::OpenContainer::borrowed(),
             (_, Some(secrets)) => {
-                match crate::commands::encrypt::open_for_operation(name, secrets) {
+                match crate::commands::encrypt::open_for_operation(&name, secrets) {
                     Ok(open) => open,
                     // One container refusing to open must not abandon the rest.
                     Err(e) => {
                         eprintln!("  {name}: could not unlock — skipping ({e:#})");
+                        report.skipped.push((name, format!("could not unlock: {e:#}")));
                         continue;
                     }
                 }
@@ -100,51 +107,206 @@ pub fn run(
         };
         // The manifest listed while the app was locked is a stub with no
         // packages in it; now that the tree is readable, read the real one.
-        let unlocked;
-        let manifest = if app_name.is_none() && crate::veracrypt::is_encrypted(name) {
-            unlocked =
-                read_manifest(name).with_context(|| format!("'{name}' is not installed"))?;
-            &unlocked
+        let manifest = if sweep && crate::veracrypt::is_encrypted(&name) {
+            match read_manifest(&name) {
+                Ok(real) => real,
+                Err(e) => {
+                    eprintln!("  {name}: could not read its manifest — skipping ({e:#})");
+                    report.skipped.push((name, format!("could not read its manifest: {e:#}")));
+                    continue;
+                }
+            }
         } else {
             manifest
         };
-        let name = &manifest.app.name;
-        // When installed with --app-name, `name` is the user's custom label and
-        // the real upstream package is in `pkg_name`. Version checks must query
-        // the real package, not the custom name.
-        let pkg = manifest.app.pkg_name.as_deref().unwrap_or(name);
-        let main_pkg = manifest.packages.iter().find(|p| p.name == pkg);
-        let current_version = main_pkg.map(|p| p.version.as_str()).unwrap_or("0");
 
-        let latest_version = match main_pkg.map(|p| &p.source).unwrap_or(&PackageSource::Official) {
-            PackageSource::Official => get_official_version(pkg)?,
-            PackageSource::Aur => get_aur_version(pkg)?,
+        let availability = match availability(&manifest) {
+            Ok(availability) => availability,
+            // One app's lookup failing says nothing about the others.
+            Err(e) if sweep => {
+                eprintln!("  {name}: could not check for updates — skipping ({e:#})");
+                report.skipped.push((name, format!("could not check for updates: {e:#}")));
+                continue;
+            }
+            Err(e) => return Err(e),
         };
-
-        match latest_version {
-            None => eprintln!("{name}: package not found, skipping"),
-            Some(ref ver) if !is_newer(ver, current_version)? => {
+        match availability {
+            Availability::NotFound => {
+                eprintln!("{name}: package not found, skipping");
+                report.skipped.push((name, "package not found".to_string()));
+            }
+            Availability::UpToDate { current } => {
                 if check_only {
-                    eprintln!("{name}: up to date ({current_version})");
+                    eprintln!("{name}: up to date ({current})");
                 }
             }
-            Some(ref ver) => {
-                has_updates = true;
+            Availability::Newer { current, latest } => {
                 if check_only {
-                    eprintln!("{name}: update available  {current_version}  ->  {ver}");
-                } else {
-                    eprintln!("{name}: updating {current_version} -> {ver}");
-                    reinstall(manifest, full)?;
+                    eprintln!("{name}: update available  {current}  ->  {latest}");
                 }
+                let change = Change { name, from: current, to: latest };
+                pending.push(Pending { change, manifest, _open: open });
             }
         }
     }
 
-    if check_only && !has_updates {
-        eprintln!("All apps are up to date.");
+    if check_only {
+        if pending.is_empty() {
+            if report.skipped.is_empty() {
+                eprintln!("All apps are up to date.");
+            } else {
+                eprintln!("No updates found, but {} could not be checked.", apps(report.skipped.len()));
+            }
+        }
+        return Ok(());
+    }
+
+    if sweep && !pending.is_empty() {
+        let changes: Vec<&Change> = pending.iter().map(|p| &p.change).collect();
+        eprintln!("{}\n", plan_lines(&changes).join("\n"));
+    }
+
+    for Pending { change, manifest, _open } in pending {
+        eprintln!("{}: updating {} -> {}", change.name, change.from, change.to);
+        match reinstall(&manifest, full) {
+            Ok(()) => report.updated.push(change),
+            // The rest of a sweep doesn't depend on this one, and its summary
+            // has to be able to say what happened to all of them.
+            Err(e) if sweep => {
+                eprintln!("error: {}: {e:#}", change.name);
+                report.failed.push((change, format!("{e:#}")));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    if sweep {
+        eprintln!("{}\n", report.lines().join("\n"));
+        if !report.failed.is_empty() {
+            anyhow::bail!(
+                "{} of {} failed to update",
+                report.failed.len(),
+                apps(report.failed.len() + report.updated.len())
+            );
+        }
     }
 
     Ok(())
+}
+
+/// What an update would change about an app.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Change {
+    name: String,
+    from: String,
+    to: String,
+}
+
+/// An app that was found to have an update, waiting for its turn.
+struct Pending {
+    change: Change,
+    manifest: Manifest,
+    /// Keeps the app's container open until the update is through with it.
+    _open: crate::commands::encrypt::OpenContainer,
+}
+
+/// How a sweep over every app went, app by app.
+#[derive(Debug, Default)]
+struct SweepReport {
+    updated: Vec<Change>,
+    failed: Vec<(Change, String)>,
+    /// Apps that were never tried, and why.
+    skipped: Vec<(String, String)>,
+}
+
+fn apps(n: usize) -> String {
+    format!("{n} app{}", if n == 1 { "" } else { "s" })
+}
+
+/// `name  from -> to` lines, with the versions lined up.
+fn change_lines(changes: &[&Change]) -> Vec<String> {
+    let width = changes.iter().map(|c| c.name.chars().count()).max().unwrap_or(0);
+    changes
+        .iter()
+        .map(|c| format!("  {:width$}  {} -> {}", c.name, c.from, c.to))
+        .collect()
+}
+
+/// The list printed before a sweep starts installing.
+fn plan_lines(changes: &[&Change]) -> Vec<String> {
+    let mut lines = vec![format!(
+        "{} ({}):",
+        crate::child_output::UPDATE_PLAN_HEADING,
+        changes.len()
+    )];
+    lines.extend(change_lines(changes));
+    lines
+}
+
+impl SweepReport {
+    /// The list printed once a sweep is over.
+    fn lines(&self) -> Vec<String> {
+        if self.updated.is_empty() && self.failed.is_empty() && self.skipped.is_empty() {
+            return vec!["All apps are up to date.".to_string()];
+        }
+        let mut counts = Vec::new();
+        if self.updated.is_empty() && self.failed.is_empty() {
+            counts.push("nothing to update".to_string());
+        }
+        if !self.updated.is_empty() {
+            counts.push(format!("{} updated", self.updated.len()));
+        }
+        if !self.failed.is_empty() {
+            counts.push(format!("{} failed", self.failed.len()));
+        }
+        if !self.skipped.is_empty() {
+            counts.push(format!("{} skipped", self.skipped.len()));
+        }
+        let mut lines =
+            vec![format!("{} {}", crate::child_output::UPDATE_DONE_HEADING, counts.join(", "))];
+        if !self.updated.is_empty() {
+            lines.push("Updated:".to_string());
+            lines.extend(change_lines(&self.updated.iter().collect::<Vec<_>>()));
+        }
+        if !self.failed.is_empty() {
+            lines.push("Failed:".to_string());
+            let changes: Vec<&Change> = self.failed.iter().map(|(c, _)| c).collect();
+            for (line, (_, why)) in change_lines(&changes).into_iter().zip(&self.failed) {
+                lines.push(format!("{line}: {why}"));
+            }
+        }
+        if !self.skipped.is_empty() {
+            lines.push("Skipped:".to_string());
+            lines.extend(self.skipped.iter().map(|(name, why)| format!("  {name}: {why}")));
+        }
+        lines
+    }
+}
+
+/// Whether a newer version of an app's package exists.
+enum Availability {
+    NotFound,
+    UpToDate { current: String },
+    Newer { current: String, latest: String },
+}
+
+fn availability(manifest: &Manifest) -> Result<Availability> {
+    let name = &manifest.app.name;
+    // When installed with --app-name, `name` is the user's custom label and the
+    // real upstream package is in `pkg_name`. Version checks must query the
+    // real package, not the custom name.
+    let pkg = manifest.app.pkg_name.as_deref().unwrap_or(name);
+    let main_pkg = manifest.packages.iter().find(|p| p.name == pkg);
+    let current = main_pkg.map(|p| p.version.clone()).unwrap_or_else(|| "0".to_string());
+    let latest = match main_pkg.map(|p| &p.source).unwrap_or(&PackageSource::Official) {
+        PackageSource::Official => get_official_version(pkg)?,
+        PackageSource::Aur => get_aur_version(pkg)?,
+    };
+    Ok(match latest {
+        None => Availability::NotFound,
+        Some(latest) if is_newer(&latest, &current)? => Availability::Newer { current, latest },
+        Some(_) => Availability::UpToDate { current },
+    })
 }
 
 fn reinstall(manifest: &crate::manifest::Manifest, full: bool) -> Result<()> {
@@ -825,21 +987,10 @@ pub fn check_all_updates() -> std::collections::HashMap<String, String> {
         if manifest.app.alias_of.is_some() {
             continue;
         }
-        let name = &manifest.app.name;
-        // Query the real upstream package (pkg_name) for custom --app-name
-        // installs, but key the result on the app's name so the TUI can match
-        // the dot to the list entry.
-        let pkg = manifest.app.pkg_name.as_deref().unwrap_or(name);
-        let main_pkg = manifest.packages.iter().find(|p| p.name == pkg);
-        let current = main_pkg.map(|p| p.version.as_str()).unwrap_or("0");
-        let latest = match main_pkg.map(|p| &p.source).unwrap_or(&PackageSource::Official) {
-            PackageSource::Official => get_official_version(pkg),
-            PackageSource::Aur => get_aur_version(pkg),
-        };
-        if let Ok(Some(ver)) = latest {
-            if is_newer(&ver, current).unwrap_or(false) {
-                out.insert(name.clone(), ver);
-            }
+        // Keyed on the app's name, not its package's, so the TUI can match the
+        // dot to the list entry.
+        if let Ok(Availability::Newer { latest, .. }) = availability(manifest) {
+            out.insert(manifest.app.name.clone(), latest);
         }
     }
     out
@@ -879,6 +1030,51 @@ mod tests {
 
     fn old_map(pairs: &[(&str, &str)]) -> HashMap<String, String> {
         pairs.iter().map(|(n, v)| (n.to_string(), v.to_string())).collect()
+    }
+
+    fn change(name: &str, from: &str, to: &str) -> Change {
+        Change { name: name.into(), from: from.into(), to: to.into() }
+    }
+
+    #[test]
+    fn the_plan_lists_every_app_with_its_versions_lined_up() {
+        let (a, b) = (change("firefox", "1", "2"), change("gimp", "3.0", "3.1"));
+        let lines = plan_lines(&[&a, &b]);
+        assert_eq!(lines[0], "Apps to update (2):");
+        assert_eq!(lines[1], "  firefox  1 -> 2");
+        assert_eq!(lines[2], "  gimp     3.0 -> 3.1");
+    }
+
+    #[test]
+    fn the_summary_names_every_app_not_just_the_last_one() {
+        let report = SweepReport {
+            updated: vec![change("firefox", "1", "2"), change("gimp", "3.0", "3.1")],
+            failed: vec![(change("discord", "4", "5"), "failed to download discord".into())],
+            skipped: vec![("vault".into(), "locked".into())],
+        };
+        assert_eq!(
+            report.lines(),
+            [
+                "Update finished: 2 updated, 1 failed, 1 skipped",
+                "Updated:",
+                "  firefox  1 -> 2",
+                "  gimp     3.0 -> 3.1",
+                "Failed:",
+                "  discord  4 -> 5: failed to download discord",
+                "Skipped:",
+                "  vault: locked",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_summary_with_nothing_done_does_not_claim_everything_is_current() {
+        assert_eq!(SweepReport::default().lines(), ["All apps are up to date."]);
+        let report = SweepReport {
+            skipped: vec![("vault".into(), "locked".into())],
+            ..Default::default()
+        };
+        assert_eq!(report.lines()[0], "Update finished: nothing to update, 1 skipped");
     }
 
     #[test]

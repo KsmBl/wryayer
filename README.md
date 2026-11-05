@@ -611,6 +611,11 @@ update was what opened it. A sweep (`wryayer update` with no app) only opens
 containers it can open without asking, and names the ones it skipped;
 `--check` never asks for a password and refuses a locked app.
 
+A sweep checks every app first and lists what it is about to update, then
+finishes with a list of every app it updated, failed on or skipped. An app that
+fails doesn't stop the rest; the command exits non-zero once they are all done.
+The TUI's progress popup shows both lists.
+
 Updates also **preserve your data and snapshots**: the sandbox `home/` (browser
 profiles, settings), the per-app `config.ini`, and every saved snapshot survive
 the swap, and any programs merged in with `--into` are re-resolved so their
